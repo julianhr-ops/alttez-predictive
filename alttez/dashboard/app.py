@@ -4,6 +4,7 @@ import streamlit as st
 from alttez.experiments.tournament_oracle import build_probability_matrix, optimize_prediction
 from alttez.features.poisson import PoissonEngine
 from alttez.ingestion.international import InternationalLoader
+from alttez.ingestion.live_matches import ingest_live_matches_for_date, list_matches_for_date
 
 
 st.set_page_config(
@@ -81,8 +82,13 @@ def cargar_datos() -> pd.DataFrame:
     return loader.fetch_data()
 
 
+@st.cache_data(ttl=300)
+def cargar_agenda(fecha: str) -> pd.DataFrame:
+    return list_matches_for_date(pd.to_datetime(fecha).date(), include_statuses=("scheduled", "in_progress", "finished"))
+
+
 def _get_team_profile(engine: PoissonEngine, team: str) -> dict:
-    return engine.team_stats.get(team, engine._get_default_stats())
+    return engine._resolve_stats(team)
 
 
 def _build_scoreline_table(prob_matrix, top_n: int = 8) -> pd.DataFrame:
@@ -140,8 +146,9 @@ def _run_analysis(
     is_neutral: bool,
     is_knockout: bool,
     max_goles: int,
+    match_context: dict | None = None,
 ) -> dict:
-    engine = PoissonEngine(years_window=ventana, prior_matches=prior_matches)
+    engine = PoissonEngine(years_window=ventana, prior_matches=prior_matches, min_history_matches=5)
     engine.fit(df, target_date=fecha_simulacion)
 
     lambda_h, lambda_a = engine.predict_xg(equipo_local, equipo_visitante, is_neutral=is_neutral)
@@ -187,103 +194,166 @@ def _run_analysis(
         "scorelines": _build_scoreline_table(prob_matrix, top_n=8),
         "result_summary": _build_result_summary(prob_matrix, equipo_local, equipo_visitante),
         "strength_df": pd.DataFrame(strength_rows),
+        "match_context": match_context or {},
     }
+
+
+def _format_kickoff(value) -> str:
+    if pd.isna(value) or value in {None, ""}:
+        return "--:--"
+    kickoff = pd.to_datetime(value)
+    return kickoff.strftime("%H:%M")
+
+
+def _build_fixture_button_label(row: pd.Series) -> str:
+    kickoff_label = _format_kickoff(row.get("kickoff_at"))
+    tournament = row.get("tournament") or "Sin torneo"
+    return f"{kickoff_label} | {row['home_team']} vs {row['away_team']} | {tournament}"
+
+
+def _select_match_from_agenda(
+    agenda_df: pd.DataFrame,
+    df_historico: pd.DataFrame,
+    fecha_simulacion,
+    ventana: int,
+    prior_matches: int,
+    fase_torneo: str,
+    max_goles: int,
+) -> None:
+    for row in agenda_df.itertuples(index=False):
+        row_dict = row._asdict()
+        if st.button(_build_fixture_button_label(pd.Series(row_dict)), key=f"fixture-{row_dict['id']}"):
+            st.session_state["selected_match_id"] = row_dict["id"]
+            st.session_state["selected_match"] = row_dict
+            st.session_state["analysis_result"] = _run_analysis(
+                df=df_historico,
+                fecha_simulacion=str(fecha_simulacion),
+                ventana=ventana,
+                prior_matches=prior_matches,
+                equipo_local=row_dict["home_team"],
+                equipo_visitante=row_dict["away_team"],
+                is_neutral=bool(row_dict.get("is_neutral", False)),
+                is_knockout=fase_torneo == "Eliminacion Directa",
+                max_goles=max_goles,
+                match_context=row_dict,
+            )
+            st.session_state.pop("analysis_error", None)
 
 
 def main() -> None:
     st.markdown('<div class="alttez-kicker">Predictive Engine</div>', unsafe_allow_html=True)
-    st.markdown('<div class="alttez-headline">ALTTEZ Oraculo de Torneos</div>', unsafe_allow_html=True)
+    st.markdown('<div class="alttez-headline">ALTTEZ Agenda y Oraculo del Dia</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="alttez-subtle">Poisson reciente, suavizado por muestra y optimizacion de valor esperado sobre el reglamento del torneo.</div>',
+        '<div class="alttez-subtle">Calendario real de partidos, sincronizacion en vivo y analisis automatico con Poisson y valor esperado.</div>',
         unsafe_allow_html=True,
     )
 
     try:
         with st.spinner("Sincronizando base historica internacional..."):
-            df = cargar_datos()
+            df_historico = cargar_datos()
     except RuntimeError as exc:
         st.error(str(exc))
         st.caption("Si ya tienes una copia del CSV, puedes guardarla en `storage/network/international_results.csv`.")
         return
 
-    equipos_disponibles = sorted(set(df["home_team"]).union(set(df["away_team"])))
     default_date = pd.Timestamp.today().date()
 
     with st.sidebar:
         st.header("Parametros")
-        with st.form("analysis_form"):
-            fase_torneo = st.radio("Formato de puntuacion", ["Fase de Grupos", "Eliminacion Directa"])
-            is_neutral = st.toggle("Cancha neutral", value=True)
-            ventana = st.slider("Ventana de analisis (anos)", min_value=1, max_value=10, value=4)
-            prior_matches = st.slider("Suavizado por muestra", min_value=0, max_value=20, value=8)
-            fecha_simulacion = st.date_input("Fecha de simulacion", value=default_date)
-            max_goles = st.slider("Maximo de goles simulados", min_value=5, max_value=10, value=7)
+        fecha_simulacion = st.date_input("Fecha de agenda", value=default_date)
+        fase_torneo = st.radio("Formato de puntuacion", ["Fase de Grupos", "Eliminacion Directa"])
+        ventana = st.slider("Ventana de analisis (anos)", min_value=1, max_value=10, value=4)
+        prior_matches = st.slider("Suavizado por muestra", min_value=0, max_value=20, value=8)
+        max_goles = st.slider("Maximo de goles simulados", min_value=5, max_value=10, value=7)
 
-            st.caption(
-                "La app recalcula fortalezas con la historia anterior a la fecha elegida y optimiza el pronostico que maximiza puntos esperados."
-            )
-
-            equipo_local = st.selectbox(
-                "Equipo A",
-                equipos_disponibles,
-                index=equipos_disponibles.index("Colombia") if "Colombia" in equipos_disponibles else 0,
-            )
-            equipo_visitante = st.selectbox(
-                "Equipo B",
-                equipos_disponibles,
-                index=equipos_disponibles.index("Brazil") if "Brazil" in equipos_disponibles else 1,
-            )
-            ejecutar = st.form_submit_button("Ejecutar analisis de valor esperado")
-
-    if ejecutar:
-        if equipo_local == equipo_visitante:
-            st.session_state["analysis_error"] = "Elige dos selecciones distintas para correr el oraculo."
-            st.session_state.pop("analysis_result", None)
-        else:
+        if st.button("Sincronizar agenda del dia", key="sync-live-fixtures"):
             try:
-                st.session_state["analysis_result"] = _run_analysis(
-                    df=df,
-                    fecha_simulacion=str(fecha_simulacion),
-                    ventana=ventana,
-                    prior_matches=prior_matches,
-                    equipo_local=equipo_local,
-                    equipo_visitante=equipo_visitante,
-                    is_neutral=is_neutral,
-                    is_knockout=fase_torneo == "Eliminacion Directa",
-                    max_goles=max_goles,
-                )
+                with st.spinner("Descargando agenda real desde API-Football..."):
+                    result = ingest_live_matches_for_date(pd.to_datetime(fecha_simulacion).date())
+                cargar_agenda.clear()
+                st.session_state["sync_result"] = result
                 st.session_state.pop("analysis_error", None)
-            except ValueError as exc:
-                st.session_state["analysis_error"] = str(exc)
-                st.session_state.pop("analysis_result", None)
+            except Exception as exc:  # noqa: BLE001 - surface ingestion errors to the operator.
+                st.session_state["analysis_error"] = f"No se pudo sincronizar la agenda: {exc}"
 
-    selector_col, summary_col = st.columns([1.5, 1], gap="large")
+        sync_result = st.session_state.get("sync_result")
+        if sync_result:
+            st.caption(
+                f"Ultima sincronizacion: {sync_result['scheduled_matches']} partidos programados, {sync_result['raw_records']} payloads raw."
+            )
 
-    with selector_col:
-        st.markdown('<div class="alttez-panel">', unsafe_allow_html=True)
-        st.caption("Cruce configurado desde el formulario lateral")
-        st.write(f"Equipo A: `{equipo_local}`")
-        st.write(f"Equipo B: `{equipo_visitante}`")
-        st.write(f"Suavizado: `{prior_matches}`")
-        st.markdown("</div>", unsafe_allow_html=True)
+    try:
+        agenda_df = cargar_agenda(str(fecha_simulacion))
+    except Exception as exc:  # noqa: BLE001 - preserve UI even if database query fails.
+        st.error(f"No se pudo leer la agenda diaria desde Supabase: {exc}")
+        return
+
+    summary_col, context_col = st.columns([1.2, 1], gap="large")
 
     with summary_col:
         st.markdown('<div class="alttez-panel">', unsafe_allow_html=True)
-        st.caption("Contexto de simulacion")
+        st.caption("Agenda del dia")
         st.write(f"Fecha objetivo: `{fecha_simulacion}`")
-        st.write(f"Ventana reciente: `{ventana}` anos")
+        st.write(f"Partidos encontrados: `{len(agenda_df)}`")
         st.write(f"Formato: `{fase_torneo}`")
-        st.write(f"Escenario: `{'Neutral' if is_neutral else 'Local/Visitante'}`")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with context_col:
+        st.markdown('<div class="alttez-panel">', unsafe_allow_html=True)
+        st.caption("Blindaje del motor")
+        st.write(f"Ventana reciente: `{ventana}` anos")
+        st.write(f"Suavizado: `{prior_matches}`")
+        st.write("Fallback equipos nuevos: `fuerza neutral si historial < 5 partidos`")
         st.markdown("</div>", unsafe_allow_html=True)
 
     if st.session_state.get("analysis_error"):
         st.warning(st.session_state["analysis_error"])
-        return
+
+    st.subheader("Partidos reales del dia")
+    if agenda_df.empty:
+        st.info("No hay partidos cargados para esta fecha. Sincroniza la agenda o cambia la fecha.")
+    else:
+        agenda_preview = agenda_df.copy()
+        if "kickoff_at" in agenda_preview.columns:
+            agenda_preview["kickoff_at"] = agenda_preview["kickoff_at"].map(_format_kickoff)
+        st.dataframe(
+            agenda_preview[["kickoff_at", "home_team", "away_team", "tournament", "status", "city"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+        _select_match_from_agenda(
+            agenda_df=agenda_df,
+            df_historico=df_historico,
+            fecha_simulacion=fecha_simulacion,
+            ventana=ventana,
+            prior_matches=prior_matches,
+            fase_torneo=fase_torneo,
+            max_goles=max_goles,
+        )
 
     result = st.session_state.get("analysis_result")
     if result is None:
-        st.info("Selecciona un cruce y ejecuta el analisis para ver xG, probabilidades y pronosticos optimos.")
+        st.info("Haz clic en un partido de la agenda para lanzar el analisis automatico.")
         return
+
+    selected_match = result.get("match_context", {})
+    selected_col, venue_col = st.columns([1.5, 1], gap="large")
+
+    with selected_col:
+        st.markdown('<div class="alttez-panel">', unsafe_allow_html=True)
+        st.caption("Partido seleccionado")
+        st.write(f"`{result['equipo_local']}` vs `{result['equipo_visitante']}`")
+        st.write(f"Torneo: `{selected_match.get('tournament', 'Sin torneo')}`")
+        st.write(f"Estado: `{selected_match.get('status', 'scheduled')}`")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with venue_col:
+        st.markdown('<div class="alttez-panel">', unsafe_allow_html=True)
+        st.caption("Contexto del encuentro")
+        st.write(f"Hora: `{_format_kickoff(selected_match.get('kickoff_at'))}`")
+        st.write(f"Ciudad: `{selected_match.get('city') or 'N/D'}`")
+        st.write(f"Escenario: `{'Neutral' if result['is_neutral'] else 'Local/Visitante'}`")
+        st.markdown("</div>", unsafe_allow_html=True)
 
     metric_cols = st.columns(4, gap="medium")
     metric_cols[0].metric(f"xG esperado {result['equipo_local']}", f"{result['lambda_h']:.2f}")

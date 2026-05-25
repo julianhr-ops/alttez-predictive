@@ -6,9 +6,10 @@ import pandas as pd
 class PoissonEngine:
     """Calcula fortalezas ofensivas y defensivas usando historial reciente."""
 
-    def __init__(self, years_window: int = 4, prior_matches: int = 8):
+    def __init__(self, years_window: int = 4, prior_matches: int = 8, min_history_matches: int = 5):
         self.years_window = years_window
         self.prior_matches = prior_matches
+        self.min_history_matches = min_history_matches
         self.team_stats: Dict[str, Dict[str, float]] = {}
         self.global_avg_goals = 0.0
         self.global_home_avg_goals = 0.0
@@ -95,8 +96,8 @@ class PoissonEngine:
         if self.global_avg_goals <= 0:
             raise RuntimeError("PoissonEngine no ha sido entrenado todavia. Ejecuta fit() primero.")
 
-        stats_a = self.team_stats.get(team_a, self._get_default_stats())
-        stats_b = self.team_stats.get(team_b, self._get_default_stats())
+        stats_a = self._resolve_stats(team_a)
+        stats_b = self._resolve_stats(team_b)
 
         if is_neutral:
             lambda_a = stats_a["attack"] * stats_b["defense"] * self.global_avg_goals
@@ -114,6 +115,18 @@ class PoissonEngine:
             return baseline
 
         return (total_goals + baseline * self.prior_matches) / (matches_played + self.prior_matches)
+
+    def _resolve_stats(self, team: str) -> Dict[str, float]:
+        stats = self.team_stats.get(team)
+        if stats is None:
+            return self._get_default_stats()
+
+        if stats.get("matches", 0.0) < float(self.min_history_matches):
+            neutral_stats = self._get_default_stats()
+            neutral_stats["matches"] = stats.get("matches", 0.0)
+            return neutral_stats
+
+        return stats
 
     @staticmethod
     def _get_default_stats() -> Dict[str, float]:
