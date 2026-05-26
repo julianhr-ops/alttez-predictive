@@ -141,7 +141,7 @@ Daily process runner:
 .\scripts\run_daily_process.ps1 -ApplyMigrations -WriteSmoke
 ```
 
-The same sequence is scheduled in GitHub Actions at 02:00 UTC through `.github/workflows/daily_process.yml`, where the workflow materializes a temporary `.env`, applies migrations, runs the live smoke pipeline, and uploads certification reports as build artifacts.
+The same sequence is scheduled in GitHub Actions at 02:00 UTC through `.github/workflows/daily_process.yml`, where the workflow materializes a temporary `.env`, applies migrations, runs the live smoke pipeline, and uploads certification reports as build artifacts. Daily brief delivery is enabled automatically only when the required Telegram or webhook secrets are present.
 
 ### 6. Daily brief to Telegram
 
