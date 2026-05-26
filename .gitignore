@@ -8,6 +8,7 @@ venv/
 
 artifacts/
 !artifacts/.gitkeep
+screenshots/
 
 storage/network/statsbomb-open-data/
 storage/network/statsbomb-open-data-archive/
