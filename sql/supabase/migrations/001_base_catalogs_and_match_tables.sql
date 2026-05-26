@@ -27,6 +27,22 @@ create table if not exists public.tournaments (
 
 create index if not exists idx_tournaments_name on public.tournaments(name);
 
+create table if not exists public.competition_groups (
+    id uuid primary key default gen_random_uuid(),
+    tournament_id uuid not null references public.tournaments(id) on delete cascade,
+    season_label varchar(30),
+    stage varchar(60),
+    group_label varchar(60) not null,
+    competition_class varchar(40),
+    competition_normalized_name varchar(160),
+    created_at timestamptz not null default timezone('utc', now()),
+    updated_at timestamptz not null default timezone('utc', now()),
+    constraint uq_competition_groups unique (tournament_id, season_label, stage, group_label)
+);
+
+create index if not exists idx_competition_groups_tournament on public.competition_groups(tournament_id, season_label);
+create index if not exists idx_competition_groups_class on public.competition_groups(competition_class);
+
 create table if not exists public.raw_matches_api (
     id uuid primary key default gen_random_uuid(),
     provider varchar(50) not null,
@@ -77,13 +93,6 @@ create table if not exists public.matches (
     constraint uq_matches_historical_fingerprint unique (historical_fingerprint)
 );
 
-create index if not exists idx_matches_match_date on public.matches(match_date desc);
-create index if not exists idx_matches_kickoff_at on public.matches(kickoff_at desc);
-create index if not exists idx_matches_tournament on public.matches(tournament_id, match_date desc);
-create index if not exists idx_matches_home_team on public.matches(home_team_id, match_date desc);
-create index if not exists idx_matches_away_team on public.matches(away_team_id, match_date desc);
-create index if not exists idx_matches_status on public.matches(status);
-
 create table if not exists public.match_team_stats (
     id uuid primary key default gen_random_uuid(),
     match_id uuid not null references public.matches(id) on delete cascade,
@@ -114,33 +123,3 @@ create table if not exists public.match_team_stats (
 create index if not exists idx_match_team_stats_match on public.match_team_stats(match_id);
 create index if not exists idx_match_team_stats_team on public.match_team_stats(team_id, is_home);
 create index if not exists idx_match_team_stats_opponent on public.match_team_stats(opponent_team_id);
-
-create or replace function public.set_updated_at()
-returns trigger
-language plpgsql
-as $$
-begin
-    new.updated_at = timezone('utc', now());
-    return new;
-end;
-$$;
-
-drop trigger if exists trg_teams_updated_at on public.teams;
-create trigger trg_teams_updated_at
-before update on public.teams
-for each row execute function public.set_updated_at();
-
-drop trigger if exists trg_tournaments_updated_at on public.tournaments;
-create trigger trg_tournaments_updated_at
-before update on public.tournaments
-for each row execute function public.set_updated_at();
-
-drop trigger if exists trg_matches_updated_at on public.matches;
-create trigger trg_matches_updated_at
-before update on public.matches
-for each row execute function public.set_updated_at();
-
-drop trigger if exists trg_match_team_stats_updated_at on public.match_team_stats;
-create trigger trg_match_team_stats_updated_at
-before update on public.match_team_stats
-for each row execute function public.set_updated_at();

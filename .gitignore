@@ -6,9 +6,8 @@ __pycache__/
 
 venv/
 
-artifacts/*.log
-artifacts/*.zip
-artifacts/*.json
+artifacts/
+!artifacts/.gitkeep
 
 storage/network/statsbomb-open-data/
 storage/network/statsbomb-open-data-archive/

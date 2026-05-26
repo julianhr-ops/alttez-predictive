@@ -39,6 +39,7 @@ alttez/
   training/           Training helpers
 
 sql/supabase/         Schema and compatibility SQL
+sql/supabase/migrations/  Versioned Supabase migration chain
 scripts/              Operational PowerShell helpers
 storage/network/      Local cached datasets
 docs/                 Operational notes
@@ -58,6 +59,20 @@ Optional helper script:
 
 ```powershell
 .\scripts\start_streamlit_supabase.ps1
+```
+
+That helper now runs the shadow readiness preflight before launching Streamlit.
+
+One-click launcher for Windows:
+
+```powershell
+.\open_alttez_dashboard.cmd
+```
+
+Or, if you prefer PowerShell directly:
+
+```powershell
+.\scripts\open_alttez_dashboard.ps1
 ```
 
 The dashboard reads historical data through `InternationalLoader`, which now prefers Supabase and falls back locally only when needed.
@@ -104,6 +119,22 @@ Provider override example:
 venv\Scripts\python.exe -m alttez.ingestion.provider_stack --provider-order api_football,football_data_org --dry-run
 ```
 
+### 5. Live pipeline smoke test
+
+Validate provider fetch, historical training, and recommendation generation in one pass:
+
+```powershell
+venv\Scripts\python.exe scripts\smoke_live_pipeline.py --date 2026-05-26
+```
+
+Persist the live agenda and verify readback from Supabase:
+
+```powershell
+venv\Scripts\python.exe scripts\smoke_live_pipeline.py --date 2026-05-26 --write
+```
+
+When the live batch includes finished matches with enough metric coverage, ALTTEZ also writes a certification report under `artifacts/certification/` and the dashboard surfaces that status alongside the sync result.
+
 ## Environment
 
 Copy the template and fill in the real credentials:
@@ -126,14 +157,46 @@ Important variables:
 
 The runtime now auto-loads `.env` through `alttez.api.settings`, so the app no longer depends on shell-exported variables.
 
+If you change `.env` while Streamlit is already running, restart the process before retrying a live sync. The launcher scripts already do the right thing in the right order, so you usually do not need to remember the long command anymore.
+Recommended pre-flight check:
+
+```powershell
+venv\Scripts\python.exe -m alttez.ingestion.provider_healthcheck --json
+```
+
 ## Supabase
 
-The current schema lives in:
+The canonical migration chain for fresh installs lives in:
 
-- [001_schema_v2.sql](sql/supabase/001_schema_v2.sql)
-- [002_international_results_compat_view.sql](sql/supabase/002_international_results_compat_view.sql)
+- [001_base_catalogs_and_match_tables.sql](sql/supabase/migrations/001_base_catalogs_and_match_tables.sql)
+- [002_match_enrichment.sql](sql/supabase/migrations/002_match_enrichment.sql)
+- [003_indexes.sql](sql/supabase/migrations/003_indexes.sql)
+- [004_updated_at_triggers.sql](sql/supabase/migrations/004_updated_at_triggers.sql)
+- [005_international_results_compat_view.sql](sql/supabase/migrations/005_international_results_compat_view.sql)
 
 The compatibility view keeps the current analytical code working while the canonical schema evolves underneath.
+Dry-run the migration chain:
+
+```powershell
+venv\Scripts\python.exe scripts\apply_supabase_migrations.py
+```
+
+Apply the migration chain to Supabase:
+
+```powershell
+venv\Scripts\python.exe scripts\apply_supabase_migrations.py --apply
+```
+
+The migration chain is also validated automatically in CI on push and pull request.
+
+Optional local hook install:
+
+```powershell
+.\scripts\install_git_hooks.ps1
+```
+
+That installs the `pre-push` hook from `.githooks/pre-push` into `.git/hooks/pre-push`, which runs tests, readiness, and the migration plan before a push.
+If your checkout blocks writes into `.git`, use `git config core.hooksPath .githooks` or copy the hook manually into `.git/hooks/pre-push`.
 
 ## Modeling stack
 

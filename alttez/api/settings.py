@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 
-DEFAULT_ENV_PATH = Path(".env")
+DEFAULT_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 
 def load_local_env(env_path: str | Path = DEFAULT_ENV_PATH, override: bool = False) -> None:
@@ -24,5 +24,13 @@ def load_local_env(env_path: str | Path = DEFAULT_ENV_PATH, override: bool = Fal
         if not key:
             continue
 
-        if override or key not in os.environ:
+        current_value = os.environ.get(key)
+        should_set = (
+            override
+            or key not in os.environ
+            or current_value is None
+            or not current_value.strip()
+        )
+
+        if should_set:
             os.environ[key] = value

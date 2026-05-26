@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(git rev-parse --show-toplevel)
+PYTHON="$ROOT/venv/Scripts/python.exe"
+
+echo "[pre-push] running unit tests"
+"$PYTHON" -m unittest discover -s tests
+
+echo "[pre-push] running shadow readiness check"
+"$PYTHON" "$ROOT/scripts/shadow_readiness_check.py"
+
+echo "[pre-push] validating migration plan"
+"$PYTHON" "$ROOT/scripts/apply_supabase_migrations.py"
+
+echo "[pre-push] ok"

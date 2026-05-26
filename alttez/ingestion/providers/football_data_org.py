@@ -18,9 +18,12 @@ class FootballDataOrgProvider(MatchProvider):
         self,
         api_key: str | None = None,
         base_url: str | None = None,
+        use_system_proxy: bool | None = None,
     ) -> None:
         self.api_key = api_key or os.getenv("ALTTEZ_FOOTBALL_DATA_KEY", "")
         self.base_url = (base_url or os.getenv("ALTTEZ_FOOTBALL_DATA_BASE_URL") or self.base_url).rstrip("/")
+        configured_proxy_mode = os.getenv("ALTTEZ_USE_SYSTEM_PROXY", "false").strip().lower() == "true"
+        self.use_system_proxy = configured_proxy_mode if use_system_proxy is None else use_system_proxy
 
     def is_configured(self) -> bool:
         return bool(self.api_key)
@@ -41,7 +44,9 @@ class FootballDataOrgProvider(MatchProvider):
             params["season"] = request.season
         params.update(request.extra)
 
-        response = requests.get(
+        session = requests.Session()
+        session.trust_env = self.use_system_proxy
+        response = session.get(
             f"{self.base_url}/competitions/{request.competition}/matches",
             headers={
                 "X-Auth-Token": self.api_key,

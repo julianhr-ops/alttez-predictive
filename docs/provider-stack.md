@@ -44,6 +44,8 @@ JSON output:
 venv\Scripts\python.exe -m alttez.ingestion.provider_healthcheck --json
 ```
 
+If you update `.env`, restart Streamlit or any long-lived process before trusting the next sync attempt. The live dashboard now surfaces provider diagnostics, but a stale process can still hold old environment values until restart.
+
 ## Dry-run fetch
 
 Run the provider stack without writing to Supabase:
