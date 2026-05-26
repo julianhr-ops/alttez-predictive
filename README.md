@@ -145,6 +145,29 @@ The same sequence is scheduled in GitHub Actions at 02:00 UTC through `.github/w
 
 If `ALTTEZ_ALERT_WEBHOOK_URL` is configured, the daily process also emits operational alerts for success, quarantine, provider degradation, empty batches, and hard failures. Those alerts are persisted in Supabase (`alert_events`) and shown in the dashboard, with optional delivery to an external webhook sink.
 
+### 6. Daily Decision Brief
+
+After the smoke pipeline, ALTTEZ now generates a structured daily report for analysts:
+
+```powershell
+venv\Scripts\python.exe scripts\generate_daily_brief.py --date 2026-05-26
+```
+
+That command writes:
+
+- `artifacts/reports/daily-brief-YYYY-MM-DD.html`
+- `artifacts/reports/daily-brief-YYYY-MM-DD.json`
+
+The report includes:
+
+- operational batch status
+- certification and alert summary
+- prioritized agenda for the day
+- xG, 1X2 probabilities, EV, confidence, and support level by match
+- structured match-by-match decision notes
+
+If `ALTTEZ_DAILY_BRIEF_DELIVER=true` and `ALTTEZ_DAILY_BRIEF_WEBHOOK_URL` is configured, the same report is also delivered automatically to the configured endpoint.
+
 ## Environment
 
 Copy the template and fill in the real credentials:
@@ -166,6 +189,9 @@ Important variables:
 - `ALTTEZ_LOCAL_JSON_PATH`
 - `ALTTEZ_ALERT_WEBHOOK_URL`
 - `ALTTEZ_ALERT_WEBHOOK_TIMEOUT_SECONDS`
+- `ALTTEZ_DAILY_BRIEF_WEBHOOK_URL`
+- `ALTTEZ_DAILY_BRIEF_WEBHOOK_TIMEOUT_SECONDS`
+- `ALTTEZ_DAILY_BRIEF_DELIVER`
 
 The runtime now auto-loads `.env` through `alttez.api.settings`, so the app no longer depends on shell-exported variables.
 

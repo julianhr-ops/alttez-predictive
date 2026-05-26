@@ -15,6 +15,7 @@ $python = if (Test-Path $venvPython) { $venvPython } else { "python" }
 $preflight = Join-Path $root "scripts\shadow_readiness_check.py"
 $migrations = Join-Path $root "scripts\apply_supabase_migrations.py"
 $smoke = Join-Path $root "scripts\smoke_live_pipeline.py"
+$brief = Join-Path $root "scripts\generate_daily_brief.py"
 
 Set-Location $root
 
@@ -54,6 +55,19 @@ if ($Schema) {
 & $python @smokeArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Smoke pipeline failed."
+}
+
+Write-Output "PROCESS: daily decision brief"
+$briefArgs = @($brief, "--date", $Date)
+if ($DatabaseUrl) {
+    $briefArgs += @("--database-url", $DatabaseUrl)
+}
+if ($env:ALTTEZ_DAILY_BRIEF_DELIVER -eq "true") {
+    $briefArgs += "--deliver"
+}
+& $python @briefArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Daily brief generation failed."
 }
 
 Write-Output "PROCESS: complete"
