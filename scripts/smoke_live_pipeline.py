@@ -153,6 +153,16 @@ def run_smoke(
         print(f"certification_audit_persisted={result.get('certification_audit_persisted', False)}")
         if result.get("certification_audit_error"):
             print(f"certification_audit_error={result['certification_audit_error']}")
+        print(f"alerts_total={result.get('alerts_total', 0)}")
+        print(f"alerts_persisted={result.get('alerts_persisted', False)}")
+        if result.get("alerts_storage_status"):
+            print(f"alerts_storage_status={result['alerts_storage_status']}")
+        if result.get("alerts_delivery_status"):
+            print(f"alerts_delivery_status={result['alerts_delivery_status']}")
+        if result.get("alerts_delivery_channel"):
+            print(f"alerts_delivery_channel={result['alerts_delivery_channel']}")
+        if result.get("alerts_error"):
+            print(f"alerts_error={result['alerts_error']}")
         if result.get("status") != "success":
             print(f"error_category={result.get('error_category')}")
             print(f"error={result.get('error') or 'n/a'}")

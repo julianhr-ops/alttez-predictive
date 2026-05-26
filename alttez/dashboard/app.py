@@ -25,6 +25,7 @@ from alttez.features.poisson import PoissonEngine
 from alttez.ingestion.international import InternationalLoader
 from alttez.ingestion.live_matches import get_live_provider_order, ingest_live_matches_for_date, list_matches_for_date
 from alttez.ingestion.provider_healthcheck import run_healthcheck
+from alttez.operations.alerts import load_recent_alert_events
 
 
 load_local_env(override=True)
@@ -250,6 +251,11 @@ def cargar_agenda(fecha: str) -> pd.DataFrame:
 @st.cache_data(ttl=120)
 def cargar_provider_healthcheck() -> list[dict[str, str]]:
     return run_healthcheck(",".join(get_live_provider_order()))
+
+
+@st.cache_data(ttl=120)
+def cargar_alertas_recientes(limit: int = 10) -> list[dict]:
+    return load_recent_alert_events(limit=limit)
 
 
 def _get_team_profile(engine: PoissonEngine, team: str) -> dict:
@@ -613,6 +619,26 @@ def _render_sync_status(sync_result: dict | None, fecha: str) -> None:
     elif certification_audit_error:
         st.caption(f"No se pudo persistir la auditoria: {certification_audit_error}")
 
+    alerts = sync_result.get("alerts") or []
+    if alerts:
+        alerts_df = pd.DataFrame(alerts).rename(
+            columns={
+                "alert_level": "Nivel",
+                "alert_code": "Codigo",
+                "title": "Titulo",
+                "message": "Mensaje",
+                "storage_status": "Persistencia",
+                "delivery_channel": "Canal",
+                "delivery_status": "Entrega",
+            }
+        )
+        st.markdown("**Alertas del lote actual**")
+        st.dataframe(
+            alerts_df[["Nivel", "Codigo", "Titulo", "Mensaje", "Persistencia", "Canal", "Entrega"]],
+            width="stretch",
+            hide_index=True,
+        )
+
     attempts = sync_result.get("attempted_providers") or []
     if attempts:
         with st.expander("Ver auditoria del stack live", expanded=False):
@@ -651,6 +677,45 @@ def _render_provider_health_panel() -> None:
             }
         )
         st.dataframe(health_df, width="stretch", hide_index=True)
+
+
+def _render_recent_alerts_panel(limit: int = 10) -> None:
+    alerts = cargar_alertas_recientes(limit)
+    if not alerts:
+        return
+
+    with st.expander("Alertas recientes del sistema", expanded=False):
+        alerts_df = pd.DataFrame(alerts).rename(
+            columns={
+                "target_date": "Fecha",
+                "batch_id": "Lote",
+                "provider_used": "Proveedor",
+                "alert_level": "Nivel",
+                "alert_code": "Codigo",
+                "title": "Titulo",
+                "message": "Mensaje",
+                "storage_status": "Persistencia",
+                "delivery_channel": "Canal",
+                "delivery_status": "Entrega",
+                "created_at": "Creado",
+            }
+        )
+        display_columns = [
+            "Creado",
+            "Fecha",
+            "Nivel",
+            "Codigo",
+            "Titulo",
+            "Proveedor",
+            "Persistencia",
+            "Canal",
+            "Entrega",
+        ]
+        st.dataframe(
+            alerts_df[[column for column in display_columns if column in alerts_df.columns]],
+            width="stretch",
+            hide_index=True,
+        )
 
 
 def _render_recommendation_panel(result: dict) -> None:
@@ -1171,6 +1236,7 @@ def main() -> None:
     selected_sync_result = _current_sync_result(fecha_simulacion)
     _render_sync_status(selected_sync_result, str(fecha_simulacion))
     _render_provider_health_panel()
+    _render_recent_alerts_panel()
 
     if st.session_state.get("analysis_error"):
         st.warning(st.session_state["analysis_error"])

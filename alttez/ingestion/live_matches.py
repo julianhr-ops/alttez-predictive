@@ -20,6 +20,7 @@ from alttez.api.settings import load_local_env
 from alttez.ingestion.certification_audit import upsert_certification_audit
 from alttez.ingestion.certification import build_daily_certification_report, build_raw_match_payload, write_certification_report
 from alttez.ingestion.contracts import RawMatchPayload
+from alttez.operations.alerts import record_operational_alerts
 from alttez.ingestion.provider_stack import build_stack
 from alttez.ingestion.providers.base import ProviderFetchRequest
 from alttez.ingestion.raw_matches_api import RawMatchRecord, upsert_raw_matches
@@ -191,7 +192,7 @@ def reflect_tables(engine: Engine, schema: str = DEFAULT_SCHEMA) -> dict[str, Ta
     existing_tables = set(inspector.get_table_names(schema=schema))
     requested_tables = [
         table
-        for table in ("teams", "tournaments", "matches", "competition_groups", "certification_batches")
+        for table in ("teams", "tournaments", "matches", "competition_groups", "certification_batches", "alert_events")
         if table in existing_tables
     ]
     metadata.reflect(bind=engine, schema=schema, only=requested_tables)
@@ -594,6 +595,77 @@ def _certify_finished_batch(
     }
 
 
+def _finalize_operational_outputs(
+    sync_result: dict[str, Any],
+    target_date: date,
+    provider_used: str | None,
+    *,
+    database_url: str | None = None,
+    schema: str = DEFAULT_SCHEMA,
+    engine=None,
+    tables: dict[str, Table] | None = None,
+) -> dict[str, Any]:
+    finalized = dict(sync_result)
+    finalized.setdefault("certification_audit_persisted", False)
+    finalized.setdefault("certification_audit_error", None)
+    finalized.setdefault("alerts", [])
+    finalized.setdefault("alerts_total", 0)
+    finalized.setdefault("alerts_persisted", False)
+    finalized.setdefault("alerts_storage_status", "skipped")
+    finalized.setdefault("alerts_delivery_status", "skipped")
+    finalized.setdefault("alerts_delivery_channel", "dashboard")
+    finalized.setdefault("alerts_error", None)
+
+    local_engine = engine
+    local_tables = tables
+    if local_engine is None or local_tables is None:
+        try:
+            local_engine = get_engine(database_url)
+            local_tables = reflect_tables(local_engine, schema)
+        except Exception as exc:  # noqa: BLE001 - operational outputs should not block the batch.
+            try:
+                alert_result = record_operational_alerts(
+                    None,
+                    None,
+                    finalized,
+                    target_date=target_date,
+                    provider_used=provider_used,
+                )
+                finalized.update(alert_result)
+            except Exception as alert_exc:  # noqa: BLE001 - last resort only.
+                finalized["alerts_error"] = str(alert_exc)
+            if finalized.get("status") == "error":
+                finalized["alerts_error"] = finalized.get("alerts_error") or str(exc)
+            return finalized
+
+    try:
+        finalized["certification_audit_persisted"] = upsert_certification_audit(
+            local_engine,
+            local_tables.get("certification_batches"),
+            finalized,
+            target_date=target_date,
+            provider_used=provider_used,
+        )
+    except Exception as exc:  # noqa: BLE001 - audit persistence must not break the main sync.
+        finalized["certification_audit_error"] = str(exc)
+        logging.warning("Could not persist certification audit batch=%s detail=%s", finalized.get("certification_batch_id"), exc)
+
+    try:
+        alert_result = record_operational_alerts(
+            local_engine,
+            local_tables.get("alert_events"),
+            finalized,
+            target_date=target_date,
+            provider_used=provider_used,
+        )
+        finalized.update(alert_result)
+    except Exception as exc:  # noqa: BLE001 - alerts should be best-effort.
+        finalized["alerts_error"] = str(exc)
+        logging.warning("Could not persist operational alerts batch=%s detail=%s", finalized.get("certification_batch_id"), exc)
+
+    return finalized
+
+
 def map_api_football_status(short_status: str | None, goals: dict[str, Any]) -> str:
     if short_status in {"FT", "AET", "PEN"}:
         return "finished"
@@ -944,10 +1016,19 @@ def ingest_live_matches_for_date(
             "certification_quarantine_reason": "No scheduled matches were available for certification.",
             "certification_audit_persisted": False,
             "certification_audit_error": None,
+            "alerts": [],
+            "alerts_total": 0,
+            "alerts_persisted": False,
+            "alerts_storage_status": "skipped",
+            "alerts_delivery_status": "skipped",
+            "alerts_delivery_channel": "dashboard",
+            "alerts_error": None,
             "error_category": error_category,
             "error": error_detail,
         }
 
+    engine = None
+    tables: dict[str, Table] | None = None
     try:
         engine = get_engine(database_url)
         tables = reflect_tables(engine, schema)
@@ -978,7 +1059,7 @@ def ingest_live_matches_for_date(
             provider_used,
         )
     except Exception as exc:  # noqa: BLE001 - reporting should preserve dashboard uptime.
-        return {
+        sync_result = {
             "status": "error",
             "provider_used": provider_used,
             "attempted_providers": attempts,
@@ -997,9 +1078,25 @@ def ingest_live_matches_for_date(
             "certification_quarantine_reason": None,
             "certification_audit_persisted": False,
             "certification_audit_error": None,
+            "alerts": [],
+            "alerts_total": 0,
+            "alerts_persisted": False,
+            "alerts_storage_status": "skipped",
+            "alerts_delivery_status": "skipped",
+            "alerts_delivery_channel": "dashboard",
+            "alerts_error": None,
             "error_category": classify_sync_error(exc),
             "error": str(exc),
         }
+        return _finalize_operational_outputs(
+            sync_result,
+            target_date,
+            provider_used,
+            database_url=database_url,
+            schema=schema,
+            engine=engine,
+            tables=tables,
+        )
     sync_result = {
         "status": "success",
         "provider_used": provider_used,
@@ -1020,23 +1117,15 @@ def ingest_live_matches_for_date(
         "error_category": None,
         "error": None,
     }
-    certification_audit_persisted = False
-    certification_audit_error = None
-    try:
-        certification_audit_persisted = upsert_certification_audit(
-            engine,
-            tables.get("certification_batches"),
-            sync_result,
-            target_date=target_date,
-            provider_used=provider_used,
-        )
-    except Exception as exc:  # noqa: BLE001 - audit persistence should not break the main sync.
-        certification_audit_error = str(exc)
-        logging.warning("Could not persist certification audit batch=%s detail=%s", certification_result["batch_id"], exc)
-
-    sync_result["certification_audit_persisted"] = certification_audit_persisted
-    sync_result["certification_audit_error"] = certification_audit_error
-    return sync_result
+    return _finalize_operational_outputs(
+        sync_result,
+        target_date,
+        provider_used,
+        database_url=database_url,
+        schema=schema,
+        engine=engine,
+        tables=tables,
+    )
 
 
 def list_matches_for_date(

@@ -29,6 +29,8 @@ jobs:
       ALTTEZ_FOOTBALL_DATA_LIVE_COMPETITIONS: WC,EC
       ALTTEZ_STATSBOMB_OPEN_ROOT: ""
       ALTTEZ_LOCAL_JSON_PATH: artifacts/provider-fallback.json
+      ALTTEZ_ALERT_WEBHOOK_URL: ${{ secrets.ALTTEZ_ALERT_WEBHOOK_URL }}
+      ALTTEZ_ALERT_WEBHOOK_TIMEOUT_SECONDS: "8"
 
     steps:
       - name: Checkout
@@ -61,6 +63,8 @@ jobs:
           ALTTEZ_FOOTBALL_DATA_LIVE_COMPETITIONS=$env:ALTTEZ_FOOTBALL_DATA_LIVE_COMPETITIONS
           ALTTEZ_STATSBOMB_OPEN_ROOT=$env:ALTTEZ_STATSBOMB_OPEN_ROOT
           ALTTEZ_LOCAL_JSON_PATH=$env:ALTTEZ_LOCAL_JSON_PATH
+          ALTTEZ_ALERT_WEBHOOK_URL=$env:ALTTEZ_ALERT_WEBHOOK_URL
+          ALTTEZ_ALERT_WEBHOOK_TIMEOUT_SECONDS=$env:ALTTEZ_ALERT_WEBHOOK_TIMEOUT_SECONDS
           "@ | Set-Content -Path .env -Encoding utf8
 
       - name: Run daily process
@@ -76,4 +80,3 @@ jobs:
           path: artifacts/certification/*.json
           if-no-files-found: ignore
           retention-days: 14
-

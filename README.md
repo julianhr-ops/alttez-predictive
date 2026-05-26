@@ -143,6 +143,8 @@ Daily process runner:
 
 The same sequence is scheduled in GitHub Actions at 02:00 UTC through `.github/workflows/daily_process.yml`, where the workflow materializes a temporary `.env`, applies migrations, runs the live smoke pipeline, and uploads certification reports as build artifacts.
 
+If `ALTTEZ_ALERT_WEBHOOK_URL` is configured, the daily process also emits operational alerts for success, quarantine, provider degradation, empty batches, and hard failures. Those alerts are persisted in Supabase (`alert_events`) and shown in the dashboard, with optional delivery to an external webhook sink.
+
 ## Environment
 
 Copy the template and fill in the real credentials:
@@ -162,6 +164,8 @@ Important variables:
 - `ALTTEZ_FOOTBALL_DATA_KEY`
 - `ALTTEZ_STATSBOMB_OPEN_ROOT`
 - `ALTTEZ_LOCAL_JSON_PATH`
+- `ALTTEZ_ALERT_WEBHOOK_URL`
+- `ALTTEZ_ALERT_WEBHOOK_TIMEOUT_SECONDS`
 
 The runtime now auto-loads `.env` through `alttez.api.settings`, so the app no longer depends on shell-exported variables.
 
@@ -182,6 +186,7 @@ The canonical migration chain for fresh installs lives in:
 - [004_updated_at_triggers.sql](sql/supabase/migrations/004_updated_at_triggers.sql)
 - [005_international_results_compat_view.sql](sql/supabase/migrations/005_international_results_compat_view.sql)
 - [006_certification_batches.sql](sql/supabase/migrations/006_certification_batches.sql)
+- [007_alert_events.sql](sql/supabase/migrations/007_alert_events.sql)
 
 The compatibility view keeps the current analytical code working while the canonical schema evolves underneath.
 Dry-run the migration chain:
@@ -243,6 +248,7 @@ This lets us combine operational coverage, structured fallback, analytical richn
 More details:
 
 - [docs/provider-stack.md](docs/provider-stack.md)
+- [docs/uml/alttez_phase2.md](docs/uml/alttez_phase2.md)
 
 ## Notes for this branch
 
