@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import date
 
+from alttez.ingestion.certification_audit import build_certification_audit_row
 from alttez.ingestion.certification import build_daily_certification_report, build_raw_match_payload
 from alttez.ingestion.live_matches import RawMatchRecord, ScheduledMatch
 
@@ -109,7 +110,31 @@ class TestIngestionCertification(unittest.TestCase):
         self.assertEqual(report.rejected_records, 0)
         self.assertEqual(report.certification_status, "certified")
 
+    def test_build_certification_audit_row_serializes_sync_summary(self) -> None:
+        sync_result = {
+            "certification_status": "certified",
+            "certification_batch_id": "2026-05-26_api_football",
+            "certification_total_records": 1,
+            "certification_certified_records": 1,
+            "certification_rejected_records": 0,
+            "certification_coverage_pct": 94.5,
+            "certification_quarantine_reason": None,
+            "certification_report_path": "artifacts/certification/2026-05-26_api_football.json",
+        }
+
+        row = build_certification_audit_row(
+            sync_result,
+            target_date=date(2026, 5, 26),
+            provider_used="api_football",
+        )
+
+        self.assertEqual(row["batch_id"], "2026-05-26_api_football")
+        self.assertEqual(row["target_date"], date(2026, 5, 26))
+        self.assertEqual(row["provider_used"], "api_football")
+        self.assertTrue(row["certified"])
+        self.assertEqual(row["certification_status"], "certified")
+        self.assertEqual(row["payload"]["certification_total_records"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
-

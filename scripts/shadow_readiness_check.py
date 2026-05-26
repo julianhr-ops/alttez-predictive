@@ -58,6 +58,7 @@ def _check_python_sources() -> bool:
         ROOT / "alttez" / "features" / "poisson.py",
         ROOT / "alttez" / "ingestion" / "contracts.py",
         ROOT / "alttez" / "ingestion" / "certification.py",
+        ROOT / "alttez" / "ingestion" / "certification_audit.py",
         ROOT / "alttez" / "ingestion" / "providers" / "api_football.py",
         ROOT / "alttez" / "ingestion" / "live_matches.py",
         ROOT / "alttez" / "dashboard" / "app.py",

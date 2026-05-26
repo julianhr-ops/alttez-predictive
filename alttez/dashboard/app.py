@@ -570,6 +570,8 @@ def _render_sync_status(sync_result: dict | None, fecha: str) -> None:
     error_category = sync_result.get("error_category")
     certification_status = sync_result.get("certification_status")
     certification_report_path = sync_result.get("certification_report_path")
+    certification_audit_persisted = sync_result.get("certification_audit_persisted")
+    certification_audit_error = sync_result.get("certification_audit_error")
 
     if status == "success":
         st.success(
@@ -606,6 +608,10 @@ def _render_sync_status(sync_result: dict | None, fecha: str) -> None:
 
     if certification_report_path:
         st.caption(f"Reporte de certificacion: `{certification_report_path}`")
+    if certification_audit_persisted:
+        st.caption("Auditoria del lote persistida en Supabase.")
+    elif certification_audit_error:
+        st.caption(f"No se pudo persistir la auditoria: {certification_audit_error}")
 
     attempts = sync_result.get("attempted_providers") or []
     if attempts:

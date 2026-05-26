@@ -133,7 +133,7 @@ Persist the live agenda and verify readback from Supabase:
 venv\Scripts\python.exe scripts\smoke_live_pipeline.py --date 2026-05-26 --write
 ```
 
-When the live batch includes finished matches with enough metric coverage, ALTTEZ also writes a certification report under `artifacts/certification/` and the dashboard surfaces that status alongside the sync result.
+When the live batch includes finished matches with enough metric coverage, ALTTEZ also writes a certification report under `artifacts/certification/`, persists a batch audit row in Supabase, and the dashboard surfaces that status alongside the sync result.
 
 Daily process runner:
 
@@ -181,6 +181,7 @@ The canonical migration chain for fresh installs lives in:
 - [003_indexes.sql](sql/supabase/migrations/003_indexes.sql)
 - [004_updated_at_triggers.sql](sql/supabase/migrations/004_updated_at_triggers.sql)
 - [005_international_results_compat_view.sql](sql/supabase/migrations/005_international_results_compat_view.sql)
+- [006_certification_batches.sql](sql/supabase/migrations/006_certification_batches.sql)
 
 The compatibility view keeps the current analytical code working while the canonical schema evolves underneath.
 Dry-run the migration chain:

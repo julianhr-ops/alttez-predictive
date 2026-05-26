@@ -150,6 +150,9 @@ def run_smoke(
         print(f"certification_coverage_pct={result.get('certification_coverage_pct', 0.0)}")
         if result.get("certification_report_path"):
             print(f"certification_report_path={result['certification_report_path']}")
+        print(f"certification_audit_persisted={result.get('certification_audit_persisted', False)}")
+        if result.get("certification_audit_error"):
+            print(f"certification_audit_error={result['certification_audit_error']}")
         if result.get("status") != "success":
             print(f"error_category={result.get('error_category')}")
             print(f"error={result.get('error') or 'n/a'}")

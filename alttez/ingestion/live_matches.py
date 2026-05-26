@@ -17,6 +17,7 @@ from sqlalchemy.engine import Engine
 
 from alttez.api.db import get_engine
 from alttez.api.settings import load_local_env
+from alttez.ingestion.certification_audit import upsert_certification_audit
 from alttez.ingestion.certification import build_daily_certification_report, build_raw_match_payload, write_certification_report
 from alttez.ingestion.contracts import RawMatchPayload
 from alttez.ingestion.provider_stack import build_stack
@@ -188,7 +189,11 @@ def reflect_tables(engine: Engine, schema: str = DEFAULT_SCHEMA) -> dict[str, Ta
     metadata = MetaData(schema=schema)
     inspector = sqlalchemy_inspect(engine)
     existing_tables = set(inspector.get_table_names(schema=schema))
-    requested_tables = [table for table in ("teams", "tournaments", "matches", "competition_groups") if table in existing_tables]
+    requested_tables = [
+        table
+        for table in ("teams", "tournaments", "matches", "competition_groups", "certification_batches")
+        if table in existing_tables
+    ]
     metadata.reflect(bind=engine, schema=schema, only=requested_tables)
     return {table: metadata.tables[f"{schema}.{table}"] for table in requested_tables}
 
@@ -937,6 +942,8 @@ def ingest_live_matches_for_date(
             "certification_rejected_records": 0,
             "certification_coverage_pct": 0.0,
             "certification_quarantine_reason": "No scheduled matches were available for certification.",
+            "certification_audit_persisted": False,
+            "certification_audit_error": None,
             "error_category": error_category,
             "error": error_detail,
         }
@@ -988,10 +995,12 @@ def ingest_live_matches_for_date(
             "certification_rejected_records": 0,
             "certification_coverage_pct": 0.0,
             "certification_quarantine_reason": None,
+            "certification_audit_persisted": False,
+            "certification_audit_error": None,
             "error_category": classify_sync_error(exc),
             "error": str(exc),
         }
-    return {
+    sync_result = {
         "status": "success",
         "provider_used": provider_used,
         "attempted_providers": attempts,
@@ -1011,6 +1020,23 @@ def ingest_live_matches_for_date(
         "error_category": None,
         "error": None,
     }
+    certification_audit_persisted = False
+    certification_audit_error = None
+    try:
+        certification_audit_persisted = upsert_certification_audit(
+            engine,
+            tables.get("certification_batches"),
+            sync_result,
+            target_date=target_date,
+            provider_used=provider_used,
+        )
+    except Exception as exc:  # noqa: BLE001 - audit persistence should not break the main sync.
+        certification_audit_error = str(exc)
+        logging.warning("Could not persist certification audit batch=%s detail=%s", certification_result["batch_id"], exc)
+
+    sync_result["certification_audit_persisted"] = certification_audit_persisted
+    sync_result["certification_audit_error"] = certification_audit_error
+    return sync_result
 
 
 def list_matches_for_date(
