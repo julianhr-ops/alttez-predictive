@@ -1,0 +1,79 @@
+name: ALTTEZ Daily Process
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: alttez-daily-process
+  cancel-in-progress: false
+
+jobs:
+  daily-process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      ALTTEZ_DATA_SOURCE: auto
+      ALTTEZ_SUPABASE_VIEW: public.international_results_compat
+      ALTTEZ_ALLOW_LOCAL_FALLBACK: "true"
+      ALTTEZ_USE_SYSTEM_PROXY: "false"
+      ALTTEZ_PROVIDER_STACK: api_football,football_data_org,statsbomb_open,local_json
+      ALTTEZ_LIVE_PROVIDER_STACK: api_football,football_data_org,local_json
+      ALTTEZ_API_FOOTBALL_KEY: ${{ secrets.ALTTEZ_API_FOOTBALL_KEY }}
+      ALTTEZ_API_FOOTBALL_BASE_URL: https://v3.football.api-sports.io
+      ALTTEZ_FOOTBALL_DATA_KEY: ${{ secrets.ALTTEZ_FOOTBALL_DATA_KEY }}
+      ALTTEZ_FOOTBALL_DATA_BASE_URL: https://api.football-data.org/v4
+      ALTTEZ_FOOTBALL_DATA_LIVE_COMPETITIONS: WC,EC
+      ALTTEZ_STATSBOMB_OPEN_ROOT: ""
+      ALTTEZ_LOCAL_JSON_PATH: artifacts/provider-fallback.json
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Materialize runtime .env
+        shell: pwsh
+        run: |
+          @"
+          SUPABASE_DB_URL=$env:SUPABASE_DB_URL
+          ALTTEZ_DATA_SOURCE=$env:ALTTEZ_DATA_SOURCE
+          ALTTEZ_SUPABASE_VIEW=$env:ALTTEZ_SUPABASE_VIEW
+          ALTTEZ_ALLOW_LOCAL_FALLBACK=$env:ALTTEZ_ALLOW_LOCAL_FALLBACK
+          ALTTEZ_USE_SYSTEM_PROXY=$env:ALTTEZ_USE_SYSTEM_PROXY
+          ALTTEZ_PROVIDER_STACK=$env:ALTTEZ_PROVIDER_STACK
+          ALTTEZ_LIVE_PROVIDER_STACK=$env:ALTTEZ_LIVE_PROVIDER_STACK
+          ALTTEZ_API_FOOTBALL_KEY=$env:ALTTEZ_API_FOOTBALL_KEY
+          ALTTEZ_API_FOOTBALL_BASE_URL=$env:ALTTEZ_API_FOOTBALL_BASE_URL
+          ALTTEZ_FOOTBALL_DATA_KEY=$env:ALTTEZ_FOOTBALL_DATA_KEY
+          ALTTEZ_FOOTBALL_DATA_BASE_URL=$env:ALTTEZ_FOOTBALL_DATA_BASE_URL
+          ALTTEZ_FOOTBALL_DATA_LIVE_COMPETITIONS=$env:ALTTEZ_FOOTBALL_DATA_LIVE_COMPETITIONS
+          ALTTEZ_STATSBOMB_OPEN_ROOT=$env:ALTTEZ_STATSBOMB_OPEN_ROOT
+          ALTTEZ_LOCAL_JSON_PATH=$env:ALTTEZ_LOCAL_JSON_PATH
+          "@ | Set-Content -Path .env -Encoding utf8
+
+      - name: Run daily process
+        shell: pwsh
+        run: |
+          ./scripts/run_daily_process.ps1 -ApplyMigrations -WriteSmoke -Date ([DateTime]::UtcNow.ToString("yyyy-MM-dd"))
+
+      - name: Upload certification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alttez-certification-reports
+          path: artifacts/certification/*.json
+          if-no-files-found: ignore
+          retention-days: 14
+

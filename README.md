@@ -135,6 +135,14 @@ venv\Scripts\python.exe scripts\smoke_live_pipeline.py --date 2026-05-26 --write
 
 When the live batch includes finished matches with enough metric coverage, ALTTEZ also writes a certification report under `artifacts/certification/` and the dashboard surfaces that status alongside the sync result.
 
+Daily process runner:
+
+```powershell
+.\scripts\run_daily_process.ps1 -ApplyMigrations -WriteSmoke
+```
+
+The same sequence is scheduled in GitHub Actions at 02:00 UTC through `.github/workflows/daily_process.yml`, where the workflow materializes a temporary `.env`, applies migrations, runs the live smoke pipeline, and uploads certification reports as build artifacts.
+
 ## Environment
 
 Copy the template and fill in the real credentials:
