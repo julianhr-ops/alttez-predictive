@@ -49,8 +49,19 @@ def read_dataframe(sql: str, params: Optional[dict[str, Any]] = None, database_u
 def _ensure_sslmode(database_url: str) -> str:
     """Appends sslmode=require when the URL does not declare it explicitly."""
 
-    if "sslmode=" in database_url or not database_url.startswith(("postgresql://", "postgresql+psycopg://")):
-        return database_url
+    normalized_url = _normalize_postgres_driver(database_url)
+    if "sslmode=" in normalized_url or not normalized_url.startswith(("postgresql://", "postgresql+psycopg://")):
+        return normalized_url
 
-    separator = "&" if "?" in database_url else "?"
-    return f"{database_url}{separator}sslmode=require"
+    separator = "&" if "?" in normalized_url else "?"
+    return f"{normalized_url}{separator}sslmode=require"
+
+
+def _normalize_postgres_driver(database_url: str) -> str:
+    """Forces SQLAlchemy to use the installed psycopg v3 driver."""
+
+    if database_url.startswith("postgresql+psycopg://"):
+        return database_url
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return database_url
