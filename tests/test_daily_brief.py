@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from alttez.reports.daily_brief import _build_telegram_summary_text, _decision_tier, render_daily_brief_html
+from alttez.reports.daily_brief import (
+    _build_telegram_summary_text,
+    _decision_tier,
+    _executive_decision_label,
+    render_daily_brief_html,
+)
 
 
 class TestDailyBrief(unittest.TestCase):
@@ -145,7 +150,22 @@ class TestDailyBrief(unittest.TestCase):
         self.assertIn("Top decisiones", message)
         self.assertIn("Nigeria", message)
         self.assertIn("Victoria Nigeria", message)
+        self.assertIn("Decision principal", message)
         self.assertIn("Adjuntos", message)
+
+    def test_executive_decision_label_maps_match_priority(self) -> None:
+        self.assertEqual(
+            _executive_decision_label({"decision_tier": "Alta prioridad", "support_label": "Analizable"}),
+            "Decision principal",
+        )
+        self.assertEqual(
+            _executive_decision_label({"decision_tier": "Seguimiento", "support_label": "Soporte parcial"}),
+            "Vigilancia",
+        )
+        self.assertEqual(
+            _executive_decision_label({"decision_tier": "Baja confianza", "support_label": "Sin historial suficiente"}),
+            "Descarte",
+        )
 
 
 if __name__ == "__main__":

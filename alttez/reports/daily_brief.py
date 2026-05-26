@@ -415,6 +415,18 @@ def _delivery_channel() -> str:
     return "auto"
 
 
+def _executive_decision_label(match: dict[str, Any]) -> str:
+    decision_tier = safe_text(match.get("decision_tier")).lower()
+    support_label = safe_text(match.get("support_label")).lower()
+    if decision_tier == "alta prioridad":
+        return "Decision principal"
+    if decision_tier == "seguimiento" or support_label == "soporte parcial":
+        return "Vigilancia"
+    if support_label == "analizable":
+        return "Decision principal"
+    return "Descarte"
+
+
 def _build_telegram_summary_text(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     batch = payload["batch_summary"]
@@ -434,10 +446,12 @@ def _build_telegram_summary_text(payload: dict[str, Any]) -> str:
     if top_matches:
         lines.extend(["", "<b>Top decisiones</b>"])
         for index, match in enumerate(top_matches, start=1):
+            executive_decision = _executive_decision_label(match)
             lines.append(
                 (
                     f"{index}. <b>{html.escape(match['home_team'])} vs {html.escape(match['away_team'])}</b>\n"
-                    f"   {html.escape(safe_text(match.get('best_market'), 'N/D'))} "
+                    f"   {html.escape(executive_decision)} | "
+                    f"{html.escape(safe_text(match.get('best_market'), 'N/D'))} "
                     f"{_fmt_pct(match.get('best_market_probability'))} | "
                     f"Score {html.escape(safe_text(match.get('primary_score'), 'N/D'))} | "
                     f"EV {_fmt_float(match.get('primary_ev'), digits=3)} | "
