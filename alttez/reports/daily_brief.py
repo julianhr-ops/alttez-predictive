@@ -418,47 +418,36 @@ def _delivery_channel() -> str:
 def _build_telegram_summary_text(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     batch = payload["batch_summary"]
-    top_matches = summary.get("ranked_matches", [])[:5]
+    top_matches = summary.get("ranked_matches", [])[:3]
+    certification_status = safe_text(batch.get("certification_status"), "unknown").upper()
+    provider_used = safe_text(batch.get("provider_used"), "N/D")
     lines = [
-        f"<b>ALTTEZ Daily Decision Brief</b> - {payload['target_date']}",
+        f"<b>ALTTEZ | Agenda Ejecutiva</b> {payload['target_date']}",
         "",
-        (
-            f"<b>Lote:</b> {html.escape(safe_text(batch.get('certification_status'), 'unknown'))} | "
-            f"<b>Cobertura:</b> {html.escape(_fmt_float(summary.get('coverage_pct')))}% | "
-            f"<b>Proveedor:</b> {html.escape(safe_text(batch.get('provider_used'), 'N/D'))}"
-        ),
-        (
-            f"<b>Agenda:</b> {summary.get('total_matches', 0)} partidos | "
-            f"{summary.get('analyzable_matches', 0)} analizables | "
-            f"{summary.get('high_priority_matches', 0)} alta prioridad"
-        ),
-        (
-            f"<b>Alertas:</b> {summary.get('critical_alerts', 0)} criticas | "
-            f"{summary.get('warning_alerts', 0)} advertencias"
-        ),
+        f"<b>Lote</b> {html.escape(certification_status)} | Cobertura {html.escape(_fmt_float(summary.get('coverage_pct')))}% | Provider {html.escape(provider_used)}",
+        f"<b>Agenda</b> {summary.get('total_matches', 0)} partidos | {summary.get('analyzable_matches', 0)} analizables | {summary.get('high_priority_matches', 0)} alta prioridad",
+        f"<b>Riesgo</b> {summary.get('critical_alerts', 0)} criticas | {summary.get('warning_alerts', 0)} advertencias",
     ]
     if batch.get("quarantine_reason"):
-        lines.extend(["", f"<b>Quarantine:</b> {html.escape(safe_text(batch.get('quarantine_reason')))}"])
+        lines.extend(["", f"<b>Bloqueo lote</b> {html.escape(safe_text(batch.get('quarantine_reason')))}"])
 
     if top_matches:
-        lines.extend(["", "<b>Top partidos del dia</b>"])
+        lines.extend(["", "<b>Top decisiones</b>"])
         for index, match in enumerate(top_matches, start=1):
             lines.append(
                 (
-                    f"{index}. <b>{html.escape(match['home_team'])} vs {html.escape(match['away_team'])}</b> | "
-                    f"{html.escape(match['competition_label'])} | "
-                    f"{html.escape(safe_text(match.get('kickoff_at'), 'Por confirmar'))}\n"
-                    f"   Mercado: {html.escape(safe_text(match.get('best_market'), 'N/D'))} "
-                    f"({_fmt_pct(match.get('best_market_probability'))}) | "
-                    f"Pronostico: {html.escape(safe_text(match.get('primary_score'), 'N/D'))} | "
-                    f"EV: {_fmt_float(match.get('primary_ev'), digits=3)} | "
-                    f"Soporte: {html.escape(match['support_label'])}"
+                    f"{index}. <b>{html.escape(match['home_team'])} vs {html.escape(match['away_team'])}</b>\n"
+                    f"   {html.escape(safe_text(match.get('best_market'), 'N/D'))} "
+                    f"{_fmt_pct(match.get('best_market_probability'))} | "
+                    f"Score {html.escape(safe_text(match.get('primary_score'), 'N/D'))} | "
+                    f"EV {_fmt_float(match.get('primary_ev'), digits=3)} | "
+                    f"{html.escape(safe_text(match.get('support_label'), 'N/D'))}"
                 )
             )
     else:
-        lines.extend(["", "No hay partidos analizables para esta fecha."])
+        lines.extend(["", "Sin partidos analizables para hoy."])
 
-    lines.extend(["", "Se adjuntan el brief HTML y el payload JSON para revision."])
+    lines.extend(["", "<b>Adjuntos</b> brief HTML y payload JSON"])
     return "\n".join(lines)
 
 

@@ -108,7 +108,7 @@ class TestDailyBrief(unittest.TestCase):
         self.assertIn("Nigeria", html)
         self.assertIn("Provider degraded", html)
 
-    def test_build_telegram_summary_text_contains_priority_matches(self) -> None:
+    def test_build_telegram_summary_text_is_executive_and_compact(self) -> None:
         payload = {
             "target_date": "2026-05-26",
             "summary": {
@@ -141,9 +141,11 @@ class TestDailyBrief(unittest.TestCase):
 
         message = _build_telegram_summary_text(payload)
 
-        self.assertIn("ALTTEZ Daily Decision Brief", message)
+        self.assertIn("ALTTEZ | Agenda Ejecutiva", message)
+        self.assertIn("Top decisiones", message)
         self.assertIn("Nigeria", message)
         self.assertIn("Victoria Nigeria", message)
+        self.assertIn("Adjuntos", message)
 
 
 if __name__ == "__main__":
