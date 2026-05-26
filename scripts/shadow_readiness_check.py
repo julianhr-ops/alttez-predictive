@@ -51,6 +51,36 @@ def _check_env() -> bool:
     return ok
 
 
+def _check_delivery() -> bool:
+    print("\n[delivery]")
+    deliver_enabled = os.getenv("ALTTEZ_DAILY_BRIEF_DELIVER", "").strip().lower() == "true"
+    delivery_channel = os.getenv("ALTTEZ_DAILY_BRIEF_DELIVERY_CHANNEL", "").strip().lower() or "auto"
+    telegram_token = _secret_state("ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = _secret_state("ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID")
+    webhook_url = _secret_state("ALTTEZ_DAILY_BRIEF_WEBHOOK_URL")
+
+    telegram_ready = telegram_token != "missing-or-placeholder" and telegram_chat_id != "missing-or-placeholder"
+    webhook_ready = webhook_url != "missing-or-placeholder"
+    effective_channel = "telegram" if telegram_ready and delivery_channel in {"telegram", "auto"} else (
+        "webhook" if webhook_ready and delivery_channel in {"webhook", "auto"} else "none"
+    )
+
+    print(f"daily_brief_deliver={'true' if deliver_enabled else 'false'}")
+    print(f"daily_brief_channel={delivery_channel}")
+    print(f"telegram_bot_token={telegram_token}")
+    print(f"telegram_chat_id={telegram_chat_id}")
+    print(f"daily_brief_webhook={webhook_url}")
+    print(f"effective_delivery_channel={effective_channel}")
+
+    if not deliver_enabled:
+        return True
+    if delivery_channel == "telegram":
+        return telegram_ready
+    if delivery_channel == "webhook":
+        return webhook_ready
+    return telegram_ready or webhook_ready
+
+
 def _check_python_sources() -> bool:
     print("\n[syntax]")
     paths = (
@@ -165,6 +195,7 @@ def main() -> int:
 
     checks = [
         ("env", _check_env()),
+        ("delivery", _check_delivery()),
         ("syntax", _check_python_sources()),
         ("providers", _check_providers()),
         ("migrations", _check_migrations()),
