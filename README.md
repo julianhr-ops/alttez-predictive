@@ -168,6 +168,17 @@ The report includes:
 
 If `ALTTEZ_DAILY_BRIEF_DELIVER=true` and `ALTTEZ_DAILY_BRIEF_WEBHOOK_URL` is configured, the same report is also delivered automatically to the configured endpoint.
 
+Telegram delivery is also supported. If `ALTTEZ_DAILY_BRIEF_DELIVERY_CHANNEL=telegram`, configure:
+
+- `ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN`
+- `ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID`
+
+In that mode, ALTTEZ sends:
+
+- a structured summary message
+- the generated HTML brief as a Telegram document
+- the JSON payload as a Telegram document
+
 ## Environment
 
 Copy the template and fill in the real credentials:
@@ -189,8 +200,12 @@ Important variables:
 - `ALTTEZ_LOCAL_JSON_PATH`
 - `ALTTEZ_ALERT_WEBHOOK_URL`
 - `ALTTEZ_ALERT_WEBHOOK_TIMEOUT_SECONDS`
+- `ALTTEZ_DAILY_BRIEF_DELIVERY_CHANNEL`
 - `ALTTEZ_DAILY_BRIEF_WEBHOOK_URL`
 - `ALTTEZ_DAILY_BRIEF_WEBHOOK_TIMEOUT_SECONDS`
+- `ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN`
+- `ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID`
+- `ALTTEZ_DAILY_BRIEF_DELIVERY_TIMEOUT_SECONDS`
 - `ALTTEZ_DAILY_BRIEF_DELIVER`
 
 The runtime now auto-loads `.env` through `alttez.api.settings`, so the app no longer depends on shell-exported variables.

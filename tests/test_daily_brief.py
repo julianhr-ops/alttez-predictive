@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from alttez.reports.daily_brief import _decision_tier, render_daily_brief_html
+from alttez.reports.daily_brief import _build_telegram_summary_text, _decision_tier, render_daily_brief_html
 
 
 class TestDailyBrief(unittest.TestCase):
@@ -107,6 +107,43 @@ class TestDailyBrief(unittest.TestCase):
         self.assertIn("Agenda priorizada", html)
         self.assertIn("Nigeria", html)
         self.assertIn("Provider degraded", html)
+
+    def test_build_telegram_summary_text_contains_priority_matches(self) -> None:
+        payload = {
+            "target_date": "2026-05-26",
+            "summary": {
+                "total_matches": 2,
+                "analyzable_matches": 1,
+                "high_priority_matches": 1,
+                "critical_alerts": 0,
+                "warning_alerts": 1,
+                "coverage_pct": 91.2,
+                "ranked_matches": [
+                    {
+                        "home_team": "Nigeria",
+                        "away_team": "India",
+                        "competition_label": "Amistoso",
+                        "kickoff_at": "2026-05-26 18:00:00+00:00",
+                        "best_market": "Victoria Nigeria",
+                        "best_market_probability": 0.53,
+                        "primary_score": "1 - 0",
+                        "primary_ev": 5.337,
+                        "support_label": "Analizable",
+                    }
+                ],
+            },
+            "batch_summary": {
+                "provider_used": "api_football",
+                "certification_status": "certified",
+                "quarantine_reason": None,
+            },
+        }
+
+        message = _build_telegram_summary_text(payload)
+
+        self.assertIn("ALTTEZ Daily Decision Brief", message)
+        self.assertIn("Nigeria", message)
+        self.assertIn("Victoria Nigeria", message)
 
 
 if __name__ == "__main__":
