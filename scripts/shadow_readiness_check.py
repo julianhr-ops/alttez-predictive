@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 from alttez.api.settings import DEFAULT_ENV_PATH, load_local_env
 from alttez.api.migrations import discover_migration_files, render_migration_plan
 from alttez.features.poisson import PoissonEngine
+from alttez.ingestion.international import InternationalLoader
 from alttez.ingestion.live_matches import fetch_live_fixtures_from_stack
 from alttez.ingestion.provider_healthcheck import run_healthcheck
 
@@ -138,13 +139,19 @@ def _check_migrations() -> bool:
 def _check_model() -> bool:
     print("\n[model]")
     csv_path = ROOT / "storage" / "network" / "international_results.csv"
-    if not csv_path.exists():
-        print(f"historical_csv=missing path={csv_path}")
-        return False
-
-    df = pd.read_csv(csv_path)
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.dropna(subset=["home_score", "away_score"])
+    data_source = "local_csv"
+    try:
+        loader = InternationalLoader()
+        df = loader.fetch_data()
+        data_source = "international_loader"
+    except Exception as exc:  # noqa: BLE001 - readiness should report and degrade safely.
+        print(f"historical_loader=error detail={exc}")
+        if not csv_path.exists():
+            print(f"historical_csv=missing path={csv_path}")
+            return False
+        df = pd.read_csv(csv_path)
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.dropna(subset=["home_score", "away_score"])
 
     engine = PoissonEngine(
         years_window=4,
@@ -160,6 +167,7 @@ def _check_model() -> bool:
     away_profile = engine.get_team_profile(away_team)
     xg_home, xg_away = engine.predict_xg(home_team, away_team, is_neutral=False)
 
+    print(f"historical_source={data_source}")
     print(f"historical_rows={len(df)}")
     print(f"{home_team}_matches={int(home_profile.get('matches', 0))}")
     print(f"{away_team}_matches={int(away_profile.get('matches', 0))}")
