@@ -216,7 +216,7 @@ def dispatch_alert_webhook(alerts: list[dict[str, Any]], webhook_url: str | None
     load_local_env(override=False)
     target_url = webhook_url or os.getenv("ALTTEZ_ALERT_WEBHOOK_URL", "").strip()
     if not target_url:
-        return False, "No webhook configured."
+        return False, None
 
     payload = {
         "source": "alttez",
@@ -382,8 +382,10 @@ def record_operational_alerts(
     delivery_status = "skipped"
     delivery_channel = "dashboard"
     delivery_error = None
-    sent, delivery_error = dispatch_alert_webhook(alerts, webhook_url=webhook_url)
-    if webhook_url or os.getenv("ALTTEZ_ALERT_WEBHOOK_URL", "").strip():
+    webhook_configured = bool(webhook_url or os.getenv("ALTTEZ_ALERT_WEBHOOK_URL", "").strip())
+    sent = False
+    if webhook_configured:
+        sent, delivery_error = dispatch_alert_webhook(alerts, webhook_url=webhook_url)
         delivery_channel = "dashboard+webhook"
         delivery_status = "delivered" if sent else "failed"
 
@@ -415,7 +417,7 @@ def record_operational_alerts(
         "alerts_delivery_channel": delivery_channel,
         "alerts_error": (
             delivery_error
-            if not sent and delivery_channel != "dashboard"
+            if webhook_configured and not sent and delivery_channel != "dashboard"
             else telegram_error
             if not telegram_sent and should_send_telegram and _telegram_enabled()
             else None
