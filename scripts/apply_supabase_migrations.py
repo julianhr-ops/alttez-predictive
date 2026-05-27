@@ -9,7 +9,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from alttez.api.db import get_engine
-from alttez.api.migrations import apply_migrations, discover_migration_files, render_migration_plan
+from alttez.api.migrations import (
+    apply_migrations,
+    discover_migration_files,
+    discover_pending_migration_files,
+    render_migration_plan,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,16 +45,33 @@ def main() -> int:
     for item in render_migration_plan(migration_files):
         print(item)
 
+    if args.apply:
+        engine = get_engine(args.database_url)
+        pending_files, applied_names = discover_pending_migration_files(engine, args.migrations_dir)
+
+        print("\n[pending]")
+        if pending_files:
+            for item in render_migration_plan(pending_files):
+                print(item)
+        else:
+            print("none")
+
+        print(f"already_applied={len(applied_names)}")
+    else:
+        pending_files = migration_files
+
     if not args.apply:
         print("mode=dry-run")
         return 0
 
-    engine = get_engine(args.database_url)
     applied = apply_migrations(engine, args.migrations_dir)
 
     print("\n[apply]")
-    for item in render_migration_plan(applied):
-        print(item)
+    if applied:
+        for item in render_migration_plan(applied):
+            print(item)
+    else:
+        print("none")
     print("mode=apply")
     print(f"applied={len(applied)}")
     return 0
