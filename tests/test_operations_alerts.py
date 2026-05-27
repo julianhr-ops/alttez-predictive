@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import os
 import unittest
 from datetime import date
+from unittest.mock import patch
 
-from alttez.operations.alerts import build_operational_alerts, record_operational_alerts
+from alttez.operations.alerts import (
+    build_operational_alerts,
+    dispatch_alert_telegram,
+    record_operational_alerts,
+)
 
 
 class TestOperationalAlerts(unittest.TestCase):
@@ -56,6 +62,32 @@ class TestOperationalAlerts(unittest.TestCase):
         self.assertEqual(result["alerts_storage_status"], "skipped")
         self.assertEqual(result["alerts_delivery_channel"], "dashboard")
         self.assertEqual(result["alerts_delivery_status"], "skipped")
+
+    @patch("alttez.operations.alerts._send_telegram_message", return_value=(True, None))
+    def test_dispatch_alert_telegram_uses_configured_destination(self, mock_send) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "ALTTEZ_ALERTS_TELEGRAM_ENABLED": "true",
+                "ALTTEZ_ALERTS_TELEGRAM_BOT_TOKEN": "bot-token",
+                "ALTTEZ_ALERTS_TELEGRAM_CHAT_ID": "123",
+            },
+            clear=False,
+        ):
+            sent, error_message = dispatch_alert_telegram(
+                [
+                    {
+                        "alert_level": "critical",
+                        "title": "Pipeline fallo",
+                        "message": "Smoke pipeline failed.",
+                        "target_date": "2026-05-26",
+                        "provider_used": "pipeline",
+                    }
+                ]
+            )
+        self.assertTrue(sent)
+        self.assertIsNone(error_message)
+        mock_send.assert_called_once()
 
 
 if __name__ == "__main__":

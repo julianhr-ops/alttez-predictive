@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from alttez.dashboard.analysis_helpers import competition_class_label
+from alttez.operations.expansion_policy import load_expansion_candidates
 from alttez.operations.prediction_memory import (
     load_model_versions,
     load_prediction_metrics_by_competition,
@@ -24,6 +25,7 @@ def load_monitoring_snapshot() -> dict[str, object]:
         "by_confidence": load_prediction_metrics_by_confidence(),
         "recent_evaluations": load_recent_prediction_evaluations(),
         "model_versions": load_model_versions(),
+        "expansion_candidates": load_expansion_candidates(),
     }
 
 
@@ -47,6 +49,23 @@ def _render_model_versions_table(df: pd.DataFrame) -> None:
     for column in ("accuracy_1x2", "exact_score_hit_rate"):
         if column in display_df.columns:
             display_df[column] = _format_pct(display_df[column])
+    st.dataframe(display_df, width="stretch", hide_index=True)
+
+
+def _render_expansion_table(df: pd.DataFrame) -> None:
+    if df.empty:
+        st.info("Todavia no hay datos suficientes para evaluar expansion de competiciones.")
+        return
+
+    display_df = df.copy()
+    if "competition_class" in display_df.columns:
+        display_df["competition_class"] = display_df["competition_class"].map(competition_class_label)
+    for column in ("analyzable_rate", "accuracy_1x2"):
+        if column in display_df.columns:
+            display_df[column] = _format_pct(display_df[column])
+    for column in ("brier_score", "log_loss"):
+        if column in display_df.columns:
+            display_df[column] = _format_float(display_df[column])
     st.dataframe(display_df, width="stretch", hide_index=True)
 
 
@@ -128,6 +147,7 @@ def render_model_monitoring_dashboard() -> None:
     by_confidence = snapshot["by_confidence"]
     recent_evaluations = snapshot["recent_evaluations"]
     model_versions = snapshot["model_versions"]
+    expansion_candidates = snapshot["expansion_candidates"]
 
     st.markdown(
         """
@@ -205,6 +225,19 @@ def render_model_monitoring_dashboard() -> None:
             unsafe_allow_html=True,
         )
         _render_model_versions_table(model_versions)
+
+        st.markdown(
+            """
+            <div class="alttez-panel" style="margin-top:1rem;">
+                <div class="alttez-section-title">Politica de expansion</div>
+                <div class="alttez-section-copy">
+                    Solo conviene abrir mas competiciones cuando hay volumen historico, partidos analizables y calibracion cerrada suficiente.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        _render_expansion_table(expansion_candidates)
 
     with lower_right:
         st.markdown(

@@ -194,6 +194,31 @@ Manual challenger cycle:
 venv\Scripts\python.exe scripts\run_challenger_cycle.py --date 2026-05-26
 ```
 
+The challenger cycle now applies a formal governance rule:
+
+- `Brier Score` decides eligibility
+- `Log Loss` acts as a guardrail
+- `production_status` shows whether the challenger is only `eligible`, still `shadow`, or truly `active`
+- auto-promotion stays off by default unless `ALTTEZ_AUTO_PROMOTE_MODELS=true`
+
+### 8. Telegram incident alerts
+
+If you want critical pipeline failures to reach Telegram too, configure:
+
+```powershell
+ALTTEZ_ALERTS_TELEGRAM_ENABLED=true
+ALTTEZ_ALERTS_TELEGRAM_BOT_TOKEN=<bot-token>
+ALTTEZ_ALERTS_TELEGRAM_CHAT_ID=<chat-id>
+```
+
+The daily process now sends a short incident message when a critical stage fails, including:
+
+- readiness
+- migrations
+- smoke pipeline
+- daily brief
+- challenger cycle
+
 ## Environment
 
 Copy the template and fill in the real credentials:
@@ -232,6 +257,10 @@ The canonical migration chain for fresh installs lives in:
 - [003_indexes.sql](sql/supabase/migrations/003_indexes.sql)
 - [004_updated_at_triggers.sql](sql/supabase/migrations/004_updated_at_triggers.sql)
 - [005_international_results_compat_view.sql](sql/supabase/migrations/005_international_results_compat_view.sql)
+- [006_certification_batches.sql](sql/supabase/migrations/006_certification_batches.sql)
+- [007_alert_events.sql](sql/supabase/migrations/007_alert_events.sql)
+- [008_prediction_memory.sql](sql/supabase/migrations/008_prediction_memory.sql)
+- [009_model_governance.sql](sql/supabase/migrations/009_model_governance.sql)
 
 The compatibility view keeps the current analytical code working while the canonical schema evolves underneath.
 Dry-run the migration chain:

@@ -36,6 +36,9 @@ def main() -> int:
     print(f"challenger_brier={result['challenger']['brier_score']:.6f}")
     print(f"promotion_decision={result['promotion_decision']}")
     print(f"promotion_reason={result['promotion_reason']}")
+    print(f"production_status={result['production_status']}")
+    print(f"activation_mode={result['activation_mode']}")
+    print(f"governance_reason={result['governance_reason']}")
     return 0
 
 

@@ -30,6 +30,16 @@ def get_active_model_family() -> str:
     return os.getenv("ALTTEZ_ACTIVE_MODEL_FAMILY", DEFAULT_POISSON_MODEL_FAMILY).strip() or DEFAULT_POISSON_MODEL_FAMILY
 
 
+def production_supported_model_families() -> set[str]:
+    raw = os.getenv("ALTTEZ_SUPPORTED_PRODUCTION_MODEL_FAMILIES", DEFAULT_POISSON_MODEL_FAMILY)
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+def auto_promotion_enabled() -> bool:
+    raw = os.getenv("ALTTEZ_AUTO_PROMOTE_MODELS", "false").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def reflect_prediction_tables(engine: Engine, schema: str = DEFAULT_SCHEMA) -> dict[str, Table]:
     requested_tables = [
         "matches",
@@ -545,6 +555,36 @@ def upsert_model_version_record(
     return True
 
 
+def set_active_model_version_record(
+    engine: Engine,
+    model_versions_table: Table | None,
+    *,
+    active_version_key: str,
+    activation_mode: str,
+) -> bool:
+    if model_versions_table is None:
+        return False
+
+    with engine.begin() as connection:
+        connection.execute(
+            model_versions_table.update()
+            .where(model_versions_table.c.production_status == "active")
+            .values(production_status="archived")
+        )
+        connection.execute(
+            model_versions_table.update()
+            .where(model_versions_table.c.version_key == active_version_key)
+            .values(
+                status="champion",
+                production_status="active",
+                activation_mode=activation_mode,
+                activated_at=datetime.now(timezone.utc),
+                is_promotion_eligible=True,
+            )
+        )
+    return True
+
+
 def load_model_versions(*, database_url: str | None = None, limit: int = 20) -> pd.DataFrame:
     try:
         return read_dataframe(
@@ -562,6 +602,10 @@ def load_model_versions(*, database_url: str | None = None, limit: int = 20) -> 
                 accuracy_1x2,
                 exact_score_hit_rate,
                 status,
+                is_promotion_eligible,
+                production_status,
+                activation_mode,
+                activated_at,
                 promotion_reason,
                 artifact_path
             from public.model_versions

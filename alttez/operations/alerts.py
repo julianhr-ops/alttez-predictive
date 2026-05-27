@@ -6,6 +6,7 @@ import os
 from datetime import date, datetime, timezone
 from typing import Any
 from urllib import error, request
+import html
 
 from sqlalchemy import Table, select, text
 from sqlalchemy.dialects.postgresql import insert
@@ -18,6 +19,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 DEFAULT_ALERT_WEBHOOK_TIMEOUT_SECONDS = 8
+DEFAULT_ALERTS_TELEGRAM_ENABLED = False
 
 
 def _normalize_alert_key(value: Any) -> str:
@@ -238,6 +240,96 @@ def dispatch_alert_webhook(alerts: list[dict[str, Any]], webhook_url: str | None
         return False, str(exc)
 
 
+def _telegram_enabled() -> bool:
+    raw = os.getenv("ALTTEZ_ALERTS_TELEGRAM_ENABLED", str(DEFAULT_ALERTS_TELEGRAM_ENABLED)).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _telegram_token() -> str:
+    return (
+        os.getenv("ALTTEZ_ALERTS_TELEGRAM_BOT_TOKEN", "").strip()
+        or os.getenv("ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN", "").strip()
+    )
+
+
+def _telegram_chat_id() -> str:
+    return (
+        os.getenv("ALTTEZ_ALERTS_TELEGRAM_CHAT_ID", "").strip()
+        or os.getenv("ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID", "").strip()
+    )
+
+
+def _telegram_api_url(bot_token: str, method: str) -> str:
+    return f"https://api.telegram.org/bot{bot_token}/{method}"
+
+
+def _send_telegram_message(bot_token: str, chat_id: str, text: str) -> tuple[bool, str | None]:
+    data = json.dumps(
+        {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request_obj = request.Request(
+        _telegram_api_url(bot_token, "sendMessage"),
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(request_obj, timeout=_webhook_timeout_seconds()) as response:
+            if 200 <= int(getattr(response, "status", 200)) < 300:
+                return True, None
+            return False, f"Telegram returned HTTP {getattr(response, 'status', 'unknown')}."
+    except error.URLError as exc:
+        return False, str(exc)
+
+
+def _build_telegram_alert_text(alerts: list[dict[str, Any]]) -> str:
+    critical_alerts = [alert for alert in alerts if str(alert.get("alert_level")) == "critical"]
+    warning_alerts = [alert for alert in alerts if str(alert.get("alert_level")) == "warning"]
+    headline = "Incidente critico" if critical_alerts else "Alerta operativa"
+    primary = critical_alerts[0] if critical_alerts else warning_alerts[0] if warning_alerts else alerts[0]
+    target_date = str(primary.get("target_date") or "")
+    provider_used = str(primary.get("provider_used") or "N/D")
+    lines = [
+        f"<b>ALTTEZ | {headline}</b>",
+        f"<b>Fecha</b> {html.escape(target_date)}",
+        f"<b>Provider</b> {html.escape(provider_used)}",
+        f"<b>Evento</b> {html.escape(str(primary.get('title') or 'Incidente'))}",
+        html.escape(str(primary.get("message") or "")),
+    ]
+    if len(alerts) > 1:
+        lines.append(f"<b>Alertas en lote</b> {len(alerts)}")
+    return "\n".join(lines)
+
+
+def dispatch_alert_telegram(alerts: list[dict[str, Any]]) -> tuple[bool, str | None]:
+    load_local_env(override=False)
+    if not _telegram_enabled():
+        return False, "Telegram alerts disabled."
+    token = _telegram_token()
+    chat_id = _telegram_chat_id()
+    if not token or not chat_id:
+        return False, "Telegram alert destination is not configured."
+    telegram_text = _build_telegram_alert_text(alerts)
+    return _send_telegram_message(token, chat_id, telegram_text)
+
+
+def send_pipeline_incident_telegram(*, stage: str, target_date: str, message: str, level: str = "critical") -> tuple[bool, str | None]:
+    alert = {
+        "title": f"Pipeline fallo en {stage}",
+        "message": message,
+        "target_date": target_date,
+        "provider_used": "pipeline",
+        "alert_level": level,
+    }
+    return dispatch_alert_telegram([alert])
+
+
 def upsert_alert_events(engine: Engine, alert_table: Table | None, alerts: list[dict[str, Any]]) -> bool:
     if alert_table is None or not alerts:
         return False
@@ -295,6 +387,18 @@ def record_operational_alerts(
         delivery_channel = "dashboard+webhook"
         delivery_status = "delivered" if sent else "failed"
 
+    should_send_telegram = any(str(alert.get("alert_level")) in {"critical", "warning"} for alert in alerts)
+    telegram_sent = False
+    telegram_error = None
+    if should_send_telegram:
+        telegram_sent, telegram_error = dispatch_alert_telegram(alerts)
+        if _telegram_enabled():
+            delivery_channel = f"{delivery_channel}+telegram" if delivery_channel != "dashboard" else "dashboard+telegram"
+            if telegram_sent:
+                delivery_status = "delivered"
+            elif delivery_status == "skipped":
+                delivery_status = "failed"
+
     persisted = upsert_alert_events(engine, alert_table, alerts)
     storage_status = "skipped" if alert_table is None else ("stored" if persisted else "failed")
     for alert in alerts:
@@ -309,7 +413,13 @@ def record_operational_alerts(
         "alerts_storage_status": storage_status,
         "alerts_delivery_status": delivery_status,
         "alerts_delivery_channel": delivery_channel,
-        "alerts_error": delivery_error if not sent and delivery_channel != "dashboard" else None,
+        "alerts_error": (
+            delivery_error
+            if not sent and delivery_channel != "dashboard"
+            else telegram_error
+            if not telegram_sent and should_send_telegram and _telegram_enabled()
+            else None
+        ),
     }
 
 

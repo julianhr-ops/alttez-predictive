@@ -18,10 +18,13 @@ from alttez.features.poisson import PoissonEngine
 from alttez.experiments.tournament_oracle import build_probability_matrix
 from alttez.ingestion.international import InternationalLoader
 from alttez.operations.prediction_memory import (
+    auto_promotion_enabled,
     brier_score_1x2,
     get_active_model_family,
     get_active_model_version,
+    production_supported_model_families,
     reflect_prediction_tables,
+    set_active_model_version_record,
     upsert_model_version_record,
 )
 
@@ -211,6 +214,20 @@ def _promotion_decision(champion_metrics: dict[str, Any], challenger_metrics: di
     return True, "Challenger elegible por Brier; promotion controlado pendiente de activacion productiva."
 
 
+def _governance_decision(
+    *,
+    promote: bool,
+    challenger_family: str,
+) -> tuple[str, str, str]:
+    if not promote:
+        return "shadow", "blocked", "Challenger descartado por politica de metricas."
+    if challenger_family.lower() not in production_supported_model_families():
+        return "eligible", "blocked", "Elegible por Brier, pero su familia aun no esta habilitada para inferencia productiva."
+    if not auto_promotion_enabled():
+        return "eligible", "manual", "Elegible por Brier; pendiente de aprobacion explicita para activacion productiva."
+    return "active", "auto", "Promovido automaticamente por mejorar Brier sin deterioro material de Log Loss."
+
+
 def _write_report(report: dict[str, Any], report_dir: str | Path = DEFAULT_REPORT_DIR) -> Path:
     report_path = Path(report_dir)
     report_path.mkdir(parents=True, exist_ok=True)
@@ -236,6 +253,10 @@ def run_challenger_cycle(
     champion_metrics = _evaluate_poisson_champion(train_df, holdout_df)
     challenger_metrics = _evaluate_challenger(train_df, holdout_df)
     promote, promotion_reason = _promotion_decision(champion_metrics, challenger_metrics)
+    production_status, activation_mode, governance_reason = _governance_decision(
+        promote=promote,
+        challenger_family=challenger_metrics["model_family"],
+    )
 
     report = {
         "target_date": target_date.isoformat(),
@@ -247,6 +268,9 @@ def run_challenger_cycle(
         "challenger": challenger_metrics,
         "promotion_decision": promote,
         "promotion_reason": promotion_reason,
+        "production_status": production_status,
+        "activation_mode": activation_mode,
+        "governance_reason": governance_reason,
         "registry_persisted": False,
         "registry_error": None,
     }
@@ -277,6 +301,9 @@ def run_challenger_cycle(
                 "exact_score_hit_rate": champion_metrics["exact_score_hit_rate"],
                 "status": "champion",
                 "promotion_reason": "Champion baseline productivo actual.",
+                "is_promotion_eligible": True,
+                "production_status": "active" if production_status != "active" else "archived",
+                "activation_mode": "manual",
                 "artifact_path": str(artifact_path),
                 "metrics_payload": report["champion"],
             }
@@ -293,12 +320,23 @@ def run_challenger_cycle(
                 "accuracy_1x2": challenger_metrics["accuracy_1x2"],
                 "exact_score_hit_rate": challenger_metrics["exact_score_hit_rate"],
                 "status": "challenger" if promote else "rejected",
-                "promotion_reason": promotion_reason,
+                "promotion_reason": governance_reason,
+                "is_promotion_eligible": promote,
+                "production_status": production_status,
+                "activation_mode": activation_mode,
+                "activated_at": datetime.now(timezone.utc) if production_status == "active" else None,
                 "artifact_path": str(artifact_path),
                 "metrics_payload": report["challenger"],
             }
             upsert_model_version_record(engine, model_versions_table, champion_row)
             upsert_model_version_record(engine, model_versions_table, challenger_row)
+            if production_status == "active":
+                set_active_model_version_record(
+                    engine,
+                    model_versions_table,
+                    active_version_key=challenger_row["version_key"],
+                    activation_mode=activation_mode,
+                )
             report["registry_persisted"] = True
     except Exception as exc:  # noqa: BLE001 - challenger evaluation should still produce the artifact.
         report["registry_error"] = str(exc)
