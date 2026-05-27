@@ -7,30 +7,62 @@ import streamlit as st
 from alttez.dashboard.analysis_helpers import competition_class_label
 from alttez.inference.world_cup_2026 import load_latest_world_cup_2026_report
 from alttez.operations.expansion_policy import load_expansion_candidates
-from alttez.operations.prediction_memory import (
-    load_active_model_record,
-    load_model_versions,
-    load_prediction_metrics_by_competition,
-    load_prediction_metrics_by_confidence,
-    load_prediction_metrics_by_model,
-    load_prediction_overview,
-    load_recent_prediction_evaluations,
-)
+
+
+def _prediction_memory_unavailable_snapshot() -> dict[str, object]:
+    return {
+        "overview": {
+            "evaluated_predictions": 0,
+            "brier_score": 0.0,
+            "log_loss": 0.0,
+            "accuracy_1x2": 0.0,
+            "exact_score_hit_rate": 0.0,
+        },
+        "by_model": pd.DataFrame(),
+        "by_competition": pd.DataFrame(),
+        "by_confidence": pd.DataFrame(),
+        "recent_evaluations": pd.DataFrame(),
+        "model_versions": pd.DataFrame(),
+        "active_model": None,
+        "prediction_memory_error": (
+            "No se pudo cargar el registry/memory del modelo. "
+            "La interfaz sigue operativa con fallback local."
+        ),
+    }
 
 
 @st.cache_data(ttl=300)
 def load_monitoring_snapshot() -> dict[str, object]:
-    return {
-        "overview": load_prediction_overview(),
-        "by_model": load_prediction_metrics_by_model(),
-        "by_competition": load_prediction_metrics_by_competition(),
-        "by_confidence": load_prediction_metrics_by_confidence(),
-        "recent_evaluations": load_recent_prediction_evaluations(),
-        "model_versions": load_model_versions(),
-        "expansion_candidates": load_expansion_candidates(),
-        "active_model": load_active_model_record(),
-        "world_cup_report": load_latest_world_cup_2026_report(),
-    }
+    try:
+        from alttez.operations.prediction_memory import (
+            load_active_model_record,
+            load_model_versions,
+            load_prediction_metrics_by_competition,
+            load_prediction_metrics_by_confidence,
+            load_prediction_metrics_by_model,
+            load_prediction_overview,
+            load_recent_prediction_evaluations,
+        )
+    except Exception:
+        snapshot = _prediction_memory_unavailable_snapshot()
+    else:
+        try:
+            snapshot = {
+                "overview": load_prediction_overview(),
+                "by_model": load_prediction_metrics_by_model(),
+                "by_competition": load_prediction_metrics_by_competition(),
+                "by_confidence": load_prediction_metrics_by_confidence(),
+                "recent_evaluations": load_recent_prediction_evaluations(),
+                "model_versions": load_model_versions(),
+                "active_model": load_active_model_record(),
+                "prediction_memory_error": None,
+            }
+        except Exception:
+            snapshot = _prediction_memory_unavailable_snapshot()
+
+    snapshot["expansion_candidates"] = load_expansion_candidates()
+    snapshot["world_cup_report"] = load_latest_world_cup_2026_report()
+    return snapshot
 
 
 def _format_pct(series: pd.Series) -> pd.Series:
@@ -218,6 +250,7 @@ def render_model_monitoring_dashboard() -> None:
     expansion_candidates = snapshot["expansion_candidates"]
     active_model = snapshot["active_model"]
     world_cup_report = snapshot["world_cup_report"]
+    prediction_memory_error = snapshot.get("prediction_memory_error")
 
     st.markdown(
         """
@@ -230,6 +263,9 @@ def render_model_monitoring_dashboard() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+    if prediction_memory_error:
+        st.warning(str(prediction_memory_error))
 
     metrics = st.columns(5, gap="medium")
     metrics[0].metric("Predicciones evaluadas", int(overview["evaluated_predictions"]))

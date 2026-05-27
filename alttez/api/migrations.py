@@ -84,6 +84,15 @@ MIGRATION_PROBES: dict[str, str] = {
               and column_name = 'production_status'
         )
     """,
+    "010_klement_macro_features.sql": """
+        select exists (
+            select 1
+            from information_schema.columns
+            where table_schema = 'public'
+              and table_name = 'teams'
+              and column_name = 'gdp_per_capita'
+        )
+    """,
 }
 
 

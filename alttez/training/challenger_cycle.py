@@ -14,10 +14,9 @@ from sklearn.metrics import accuracy_score, log_loss
 from xgboost import XGBClassifier
 
 from alttez.api.db import get_engine
-from alttez.features.elo import EloEngine
+from alttez.features.klement import build_klement_feature_state, load_enriched_historical_matches
 from alttez.features.poisson import PoissonEngine
 from alttez.experiments.tournament_oracle import build_probability_matrix
-from alttez.ingestion.international import InternationalLoader
 from alttez.operations.prediction_memory import (
     auto_promotion_enabled,
     brier_score_1x2,
@@ -46,6 +45,19 @@ FEATURE_COLUMNS = [
     "away_recent_points",
     "home_recent_goal_diff",
     "away_recent_goal_diff",
+    "gdp_per_capita_home",
+    "gdp_per_capita_away",
+    "gdp_per_capita_diff",
+    "home_elo_delta_30",
+    "away_elo_delta_30",
+    "elo_delta_diff_30",
+    "home_historical_knockout_weight",
+    "away_historical_knockout_weight",
+    "knockout_weight_diff",
+    "home_continent_advantage",
+    "away_continent_advantage",
+    "continent_advantage_diff",
+    "is_knockout",
 ]
 
 
@@ -97,16 +109,15 @@ def _build_recent_form_features(df: pd.DataFrame, window: int = 6) -> pd.DataFra
     return df
 
 
-def _build_challenger_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    elo_engine = EloEngine()
-    elo_df = elo_engine.compute_elo_features(df.copy())
-    elo_df["is_neutral"] = elo_df["neutral"].astype(int)
-    elo_df = _build_recent_form_features(elo_df)
-    elo_df["outcome_label"] = elo_df.apply(
+def _build_challenger_dataset(df: pd.DataFrame, *, database_url: str | None = None) -> pd.DataFrame:
+    feature_df, _ = build_klement_feature_state(df.copy(), database_url=database_url)
+    feature_df["is_neutral"] = feature_df["neutral"].astype(int)
+    feature_df = _build_recent_form_features(feature_df)
+    feature_df["outcome_label"] = feature_df.apply(
         lambda row: _outcome_label(int(row["home_score"]), int(row["away_score"])),
         axis=1,
     )
-    return elo_df
+    return feature_df
 
 
 def _evaluate_poisson_champion(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> dict[str, Any]:
@@ -266,9 +277,8 @@ def run_challenger_cycle(
     report_dir: str | Path = DEFAULT_REPORT_DIR,
     evaluation_matches: int = DEFAULT_EVALUATION_MATCHES,
 ) -> dict[str, Any]:
-    loader = InternationalLoader()
-    historical_df = loader.fetch_data().sort_values("date").reset_index(drop=True)
-    challenger_df = _build_challenger_dataset(historical_df)
+    historical_df = load_enriched_historical_matches(database_url=database_url).sort_values("date").reset_index(drop=True)
+    challenger_df = _build_challenger_dataset(historical_df, database_url=database_url)
     eval_size = min(evaluation_matches, max(60, len(challenger_df) // 20))
     train_df = challenger_df.iloc[:-eval_size].copy()
     holdout_df = challenger_df.iloc[-eval_size:].copy()
@@ -367,4 +377,5 @@ def run_challenger_cycle(
 
     report["artifact_path"] = str(report_path)
     report["model_artifact_path"] = str(model_artifact_path)
+    _write_report(report, report_dir=report_dir)
     return report

@@ -419,10 +419,14 @@ def _build_telegram_summary_text(payload: dict[str, Any]) -> str:
     top_matches = summary.get("ranked_matches", [])[:3]
     certification_status = safe_text(batch.get("certification_status"), "unknown").upper()
     provider_used = safe_text(batch.get("provider_used"), "N/D")
+    model_family = safe_text(payload.get("model_family"), "poisson")
+    model_version = safe_text(payload.get("model_version"), "ALTTEZ")
+    fallback_suffix = " | fallback" if payload.get("used_fallback") else ""
     lines = [
         f"<b>ALTTEZ | Agenda Ejecutiva</b> {payload['target_date']}",
         "",
         f"<b>Lote</b> {html.escape(certification_status)} | Cobertura {html.escape(_fmt_float(summary.get('coverage_pct')))}% | Provider {html.escape(provider_used)}",
+        f"<b>Modelo</b> {html.escape(model_family)} / {html.escape(model_version)}{fallback_suffix}",
         f"<b>Agenda</b> {summary.get('total_matches', 0)} partidos | {summary.get('analyzable_matches', 0)} analizables | {summary.get('high_priority_matches', 0)} alta prioridad",
         f"<b>Riesgo</b> {summary.get('critical_alerts', 0)} criticas | {summary.get('warning_alerts', 0)} advertencias",
     ]
@@ -803,6 +807,8 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
           <h2>Estado operativo</h2>
           <p><strong>Proveedor activo:</strong> {html.escape(safe_text(batch.get('provider_used'), 'N/D'))}</p>
           <p><strong>Certificacion:</strong> {html.escape(safe_text(batch.get('certification_status'), 'unknown'))}</p>
+          <p><strong>Modelo activo:</strong> {html.escape(safe_text(payload.get('model_family'), 'poisson'))} / {html.escape(safe_text(payload.get('model_version'), 'ALTTEZ'))}</p>
+          <p><strong>Fallback:</strong> {'Si' if payload.get('used_fallback') else 'No'}{(' | ' + html.escape(safe_text(payload.get('fallback_reason')))) if payload.get('fallback_reason') else ''}</p>
           <p><strong>Registros del lote:</strong> {batch.get('total_records', 0)} total | {batch.get('certified_records', 0)} certificados | {batch.get('rejected_records', 0)} rechazados</p>
           <p><strong>Cobertura:</strong> {html.escape(_fmt_float(batch.get('coverage_pct')))}%</p>
           <p><strong>Quarantine reason:</strong> {html.escape(safe_text(batch.get('quarantine_reason'), 'Sin motivo activo'))}</p>

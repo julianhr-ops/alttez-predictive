@@ -117,6 +117,9 @@ class TestDailyBrief(unittest.TestCase):
     def test_build_telegram_summary_text_is_executive_and_compact(self) -> None:
         payload = {
             "target_date": "2026-05-26",
+            "model_family": "xgboost",
+            "model_version": "xgboost-challenger-v1",
+            "used_fallback": False,
             "summary": {
                 "total_matches": 2,
                 "analyzable_matches": 1,
@@ -152,6 +155,7 @@ class TestDailyBrief(unittest.TestCase):
         self.assertIn("Nigeria", message)
         self.assertIn("Victoria Nigeria", message)
         self.assertIn("Decision principal", message)
+        self.assertIn("xgboost / xgboost-challenger-v1", message)
         self.assertIn("Adjuntos", message)
 
     def test_executive_decision_label_maps_match_priority(self) -> None:

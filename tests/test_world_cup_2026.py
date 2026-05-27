@@ -3,10 +3,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 
-from alttez.inference.router import build_active_predictor
-from alttez.inference.world_cup_2026 import load_world_cup_2026_config, simulate_world_cup_2026
+from alttez.inference.router import ActiveModelSelection, BaseMatchPredictor, build_active_predictor
+from alttez.inference.world_cup_2026 import _sample_match, load_world_cup_2026_config, simulate_world_cup_2026
 
 
 def _historical_df() -> pd.DataFrame:
@@ -38,7 +39,7 @@ def _historical_df() -> pd.DataFrame:
 
 class TestWorldCup2026Simulation(unittest.TestCase):
     def test_simulation_runs_with_official_config(self) -> None:
-        with patch("alttez.inference.router.load_active_model_record", return_value=None):
+        with patch("alttez.inference.router._load_active_model_record_safe", return_value=None):
             predictor = build_active_predictor(_historical_df(), "2026-05-27")
 
         report = simulate_world_cup_2026(
@@ -54,6 +55,102 @@ class TestWorldCup2026Simulation(unittest.TestCase):
         self.assertEqual(len(probabilities), 48)
         self.assertAlmostEqual(champion_sum, 1.0, places=6)
         self.assertEqual(report["model_family"], predictor.model_family)
+
+    def test_simulation_passes_world_cup_context_to_predictor(self) -> None:
+        class CapturingPredictor(BaseMatchPredictor):
+            def __init__(self) -> None:
+                super().__init__(
+                    selection=ActiveModelSelection(
+                        version_key=None,
+                        model_version="test-model",
+                        model_family="test-family",
+                        artifact_path=None,
+                        requested_production_status="active",
+                    )
+                )
+                self.contexts: list[dict[str, object]] = []
+
+            def get_team_profile(self, team: str) -> dict[str, float]:
+                return {"matches": 10.0, "effective_matches": 10.0}
+
+            def predict_match(
+                self,
+                home_team: str,
+                away_team: str,
+                *,
+                is_neutral: bool = False,
+                is_knockout: bool = False,
+                max_goals: int = 7,
+                tournament_context: dict[str, object] | None = None,
+            ) -> dict[str, object]:
+                self.contexts.append(tournament_context or {})
+                return {
+                    "prob_home": 0.5,
+                    "prob_draw": 0.2,
+                    "prob_away": 0.3,
+                    "prob_matrix": None,
+                }
+
+        predictor = CapturingPredictor()
+        simulate_world_cup_2026(
+            predictor,
+            config=load_world_cup_2026_config(),
+            iterations=1,
+            random_seed=3,
+        )
+
+        self.assertTrue(predictor.contexts)
+        self.assertTrue(all(item.get("tournament") == "FIFA World Cup 2026" for item in predictor.contexts))
+        self.assertTrue(all(item.get("edition") == 2026 for item in predictor.contexts))
+
+    def test_simulation_uses_xgboost_outcome_probabilities_instead_of_poisson_matrix(self) -> None:
+        class XGBoostLikePredictor(BaseMatchPredictor):
+            def __init__(self) -> None:
+                super().__init__(
+                    selection=ActiveModelSelection(
+                        version_key=None,
+                        model_version="xgboost-test",
+                        model_family="xgboost",
+                        artifact_path=None,
+                        requested_production_status="active",
+                    )
+                )
+
+            def get_team_profile(self, team: str) -> dict[str, float]:
+                return {"matches": 10.0, "effective_matches": 10.0}
+
+            def predict_match(
+                self,
+                home_team: str,
+                away_team: str,
+                *,
+                is_neutral: bool = False,
+                is_knockout: bool = False,
+                max_goals: int = 7,
+                tournament_context: dict[str, object] | None = None,
+            ) -> dict[str, object]:
+                return {
+                    "model_family": "xgboost",
+                    "prob_home": 0.0,
+                    "prob_draw": 0.0,
+                    "prob_away": 1.0,
+                    "prob_matrix": np.array([[1.0, 0.0], [0.0, 0.0]]),
+                }
+
+        predictor = XGBoostLikePredictor()
+        match = _sample_match(
+            predictor,
+            "Home",
+            "Away",
+            rng=np.random.default_rng(3),
+            is_neutral=True,
+            is_knockout=False,
+            tournament_context={"tournament": "FIFA World Cup 2026", "edition": 2026},
+        )
+
+        self.assertEqual(match.home_score, 0)
+        self.assertEqual(match.away_score, 1)
+        self.assertEqual(match.winner, "Away")
 
 
 if __name__ == "__main__":

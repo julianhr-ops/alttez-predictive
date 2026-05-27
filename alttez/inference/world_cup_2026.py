@@ -84,17 +84,28 @@ def _sample_match(
     rng: np.random.Generator,
     is_neutral: bool,
     is_knockout: bool,
+    tournament_context: dict[str, Any] | None = None,
     prediction_cache: dict[tuple[str, str, bool, bool], dict[str, Any]] | None = None,
 ) -> SimulatedMatch:
     cache_key = (home_team, away_team, is_neutral, is_knockout)
     if prediction_cache is not None and cache_key in prediction_cache:
         prediction = prediction_cache[cache_key]
     else:
-        prediction = predictor.predict_match(home_team, away_team, is_neutral=is_neutral, is_knockout=is_knockout)
+        prediction = predictor.predict_match(
+            home_team,
+            away_team,
+            is_neutral=is_neutral,
+            is_knockout=is_knockout,
+            tournament_context=tournament_context,
+        )
         if prediction_cache is not None:
             prediction_cache[cache_key] = prediction
+    model_family = str(prediction.get("model_family") or "").strip().lower()
     prob_matrix = prediction.get("prob_matrix")
-    if isinstance(prob_matrix, np.ndarray) and prob_matrix.size:
+    # XGBoost currently calibrates 1X2 outcome probabilities and reuses the Poisson
+    # score matrix only as a UI baseline. Tournament simulation must sample from the
+    # challenger outcome probabilities instead of the inherited Poisson matrix.
+    if model_family != "xgboost" and isinstance(prob_matrix, np.ndarray) and prob_matrix.size:
         probabilities = prob_matrix.astype(float).ravel()
         probabilities = probabilities / probabilities.sum()
         flat_index = int(rng.choice(np.arange(len(probabilities)), p=probabilities))
@@ -155,6 +166,7 @@ def _simulate_group_stage(
     predictor: BaseMatchPredictor,
     *,
     rng: np.random.Generator,
+    tournament_context: dict[str, Any] | None = None,
     prediction_cache: dict[tuple[str, str, bool, bool], dict[str, Any]],
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     standings: dict[str, list[dict[str, Any]]] = {}
@@ -186,6 +198,7 @@ def _simulate_group_stage(
                 rng=rng,
                 is_neutral=True,
                 is_knockout=False,
+                tournament_context=tournament_context,
                 prediction_cache=prediction_cache,
             )
             home_row = table_rows[match.home_team]
@@ -326,6 +339,7 @@ def _play_knockout_round(
     *,
     rng: np.random.Generator,
     third_pool_rows: list[dict[str, Any]] | None = None,
+    tournament_context: dict[str, Any] | None = None,
     prediction_cache: dict[tuple[str, str, bool, bool], dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     winners: list[dict[str, Any]] = []
@@ -351,6 +365,7 @@ def _play_knockout_round(
             rng=rng,
             is_neutral=True,
             is_knockout=True,
+            tournament_context=tournament_context,
             prediction_cache=prediction_cache,
         )
         winner_team = match.winner or match.home_team
@@ -383,6 +398,10 @@ def simulate_world_cup_2026(
     knockout_fixtures = config.get("knockout_fixtures") or []
     if not knockout_fixtures:
         raise ValueError("La configuracion del Mundial 2026 no declara `knockout_fixtures`.")
+    tournament_context = {
+        "tournament": str(config.get("tournament") or "FIFA World Cup 2026"),
+        "edition": int(config.get("edition") or 2026),
+    }
 
     teams = sorted({team for group_teams in groups.values() for team in group_teams})
     stage_counts: dict[str, dict[str, int]] = {
@@ -403,6 +422,7 @@ def simulate_world_cup_2026(
             groups,
             predictor,
             rng=rng,
+            tournament_context=tournament_context,
             prediction_cache=prediction_cache,
         )
         latest_standings = standings
@@ -429,6 +449,7 @@ def simulate_world_cup_2026(
                     predictor,
                     rng=rng,
                     third_pool_rows=qualified_thirds,
+                    tournament_context=tournament_context,
                     prediction_cache=prediction_cache,
                 )
             else:
@@ -437,6 +458,7 @@ def simulate_world_cup_2026(
                     lookup,
                     predictor,
                     rng=rng,
+                    tournament_context=tournament_context,
                     prediction_cache=prediction_cache,
                 )
             match_log.extend(played_matches)

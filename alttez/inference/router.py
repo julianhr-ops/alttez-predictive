@@ -12,13 +12,12 @@ import pandas as pd
 
 from alttez.dashboard.analysis_helpers import support_level
 from alttez.experiments.tournament_oracle import build_probability_matrix, optimize_prediction
-from alttez.features.elo import EloEngine
+from alttez.features.klement import build_klement_feature_state, build_match_feature_payload
 from alttez.features.poisson import PoissonEngine
-from alttez.operations.prediction_memory import (
-    DEFAULT_POISSON_MODEL_FAMILY,
-    DEFAULT_POISSON_MODEL_VERSION,
-    load_active_model_record,
-)
+
+
+DEFAULT_POISSON_MODEL_VERSION = "poisson-champion-v2"
+DEFAULT_POISSON_MODEL_FAMILY = "poisson"
 
 
 DEFAULT_POISSON_KWARGS = {
@@ -37,6 +36,19 @@ XGBOOST_FEATURE_COLUMNS = [
     "away_recent_points",
     "home_recent_goal_diff",
     "away_recent_goal_diff",
+    "gdp_per_capita_home",
+    "gdp_per_capita_away",
+    "gdp_per_capita_diff",
+    "home_elo_delta_30",
+    "away_elo_delta_30",
+    "elo_delta_diff_30",
+    "home_historical_knockout_weight",
+    "away_historical_knockout_weight",
+    "knockout_weight_diff",
+    "home_continent_advantage",
+    "away_continent_advantage",
+    "continent_advantage_diff",
+    "is_knockout",
 ]
 DEFAULT_MAX_GOALS = 7
 
@@ -165,6 +177,7 @@ class BaseMatchPredictor(ABC):
         is_neutral: bool = False,
         is_knockout: bool = False,
         max_goals: int = DEFAULT_MAX_GOALS,
+        tournament_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -200,6 +213,7 @@ class PoissonMatchPredictor(BaseMatchPredictor):
         is_neutral: bool = False,
         is_knockout: bool = False,
         max_goals: int = DEFAULT_MAX_GOALS,
+        tournament_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         profile_local = self.get_team_profile(home_team)
         profile_visitante = self.get_team_profile(away_team)
@@ -283,6 +297,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         *,
         selection: ActiveModelSelection,
         poisson_kwargs: dict[str, Any] | None = None,
+        database_url: str | None = None,
     ) -> None:
         super().__init__(selection=selection)
         if not selection.artifact_path:
@@ -298,6 +313,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         self.model_version = str(artifact.get("model_version") or selection.model_version)
         self.model_family = str(artifact.get("model_family") or selection.model_family)
         cutoff = pd.to_datetime(target_date)
+        self.target_date = cutoff
         self.historical_df = historical_df.loc[historical_df["date"] < cutoff].copy()
         self.poisson_baseline = PoissonMatchPredictor(
             self.historical_df,
@@ -311,39 +327,27 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             ),
             poisson_kwargs=poisson_kwargs,
         )
-        self.elo_state = self._build_elo_state(self.historical_df)
         self.recent_state = _build_recent_form_state(self.historical_df)
+        _, self.klement_state = build_klement_feature_state(self.historical_df, database_url=database_url)
 
-    @staticmethod
-    def _build_elo_state(df: pd.DataFrame) -> dict[str, float]:
-        working_df = df.copy()
-        if "home_result" not in working_df.columns:
-            working_df["home_result"] = np.where(
-                working_df["home_score"] > working_df["away_score"],
-                1.0,
-                np.where(working_df["home_score"] == working_df["away_score"], 0.5, 0.0),
-            )
-        if "tournament" not in working_df.columns:
-            working_df["tournament"] = "International"
-        elo_engine = EloEngine()
-        elo_engine.compute_elo_features(working_df)
-        return dict(elo_engine.ratings)
-
-    def _feature_frame(self, home_team: str, away_team: str, is_neutral: bool) -> pd.DataFrame:
-        home_elo = float(self.elo_state.get(home_team, 1500.0))
-        away_elo = float(self.elo_state.get(away_team, 1500.0))
-        home_form = self.recent_state.get(home_team, {})
-        away_form = self.recent_state.get(away_team, {})
-        feature_row = {
-            "elo_difference": home_elo - away_elo,
-            "elo_home_before": home_elo,
-            "elo_away_before": away_elo,
-            "is_neutral": int(is_neutral),
-            "home_recent_points": float(home_form.get("recent_points_per_match", 0.0)),
-            "away_recent_points": float(away_form.get("recent_points_per_match", 0.0)),
-            "home_recent_goal_diff": float(home_form.get("recent_goal_diff_per_match", 0.0)),
-            "away_recent_goal_diff": float(away_form.get("recent_goal_diff_per_match", 0.0)),
-        }
+    def _feature_frame(
+        self,
+        home_team: str,
+        away_team: str,
+        is_neutral: bool,
+        is_knockout: bool,
+        tournament_context: dict[str, Any] | None,
+    ) -> pd.DataFrame:
+        feature_row = build_match_feature_payload(
+            home_team=home_team,
+            away_team=away_team,
+            is_neutral=is_neutral,
+            is_knockout=is_knockout,
+            recent_state=self.recent_state,
+            klement_state=self.klement_state,
+            reference_date=self.target_date,
+            tournament_context=tournament_context,
+        )
         return pd.DataFrame([{column: feature_row.get(column, 0.0) for column in self.feature_columns}])
 
     def get_team_profile(self, team: str) -> dict[str, float]:
@@ -357,6 +361,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         is_neutral: bool = False,
         is_knockout: bool = False,
         max_goals: int = DEFAULT_MAX_GOALS,
+        tournament_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         baseline = self.poisson_baseline.predict_match(
             home_team,
@@ -364,6 +369,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             is_neutral=is_neutral,
             is_knockout=is_knockout,
             max_goals=max_goals,
+            tournament_context=tournament_context,
         )
         baseline["model_version"] = self.model_version
         baseline["model_family"] = self.model_family
@@ -374,7 +380,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         if not baseline["prediction_supported"]:
             return baseline
 
-        feature_df = self._feature_frame(home_team, away_team, is_neutral)
+        feature_df = self._feature_frame(home_team, away_team, is_neutral, is_knockout, tournament_context)
         probabilities = self.model.predict_proba(feature_df)[0]
         probability_map = {label: float(probabilities[idx]) for idx, label in enumerate(self.label_order)}
         probability_map.setdefault("H", 0.0)
@@ -415,6 +421,19 @@ def _selection_from_record(record: dict[str, Any] | None) -> ActiveModelSelectio
     )
 
 
+def _load_active_model_record_safe(*, database_url: str | None = None) -> dict[str, Any] | None:
+    # Keep inference bootable even if the model registry stack is temporarily unavailable.
+    try:
+        from alttez.operations.prediction_memory import load_active_model_record
+    except Exception:
+        return None
+
+    try:
+        return load_active_model_record(database_url=database_url)
+    except Exception:
+        return None
+
+
 def build_active_predictor(
     historical_df: pd.DataFrame,
     target_date: date | str,
@@ -427,7 +446,7 @@ def build_active_predictor(
     else:
         target_date_str = str(target_date)
 
-    selection = _selection_from_record(load_active_model_record(database_url=database_url))
+    selection = _selection_from_record(_load_active_model_record_safe(database_url=database_url))
     family = selection.model_family.strip().lower()
 
     if family == "xgboost":
@@ -437,6 +456,7 @@ def build_active_predictor(
                 target_date_str,
                 selection=selection,
                 poisson_kwargs=poisson_kwargs,
+                database_url=database_url,
             )
         except Exception as exc:  # noqa: BLE001 - production fallback should keep the pipeline alive.
             return PoissonMatchPredictor(

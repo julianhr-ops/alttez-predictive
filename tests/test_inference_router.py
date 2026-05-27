@@ -41,7 +41,7 @@ def _historical_df() -> pd.DataFrame:
 
 class TestInferenceRouter(unittest.TestCase):
     def test_build_active_predictor_defaults_to_poisson_when_no_registry_record(self) -> None:
-        with patch("alttez.inference.router.load_active_model_record", return_value=None):
+        with patch("alttez.inference.router._load_active_model_record_safe", return_value=None):
             predictor = build_active_predictor(_historical_df(), "2026-05-27")
             prediction = predictor.predict_match("Mexico", "USA", is_neutral=True)
 
@@ -70,6 +70,11 @@ class TestInferenceRouter(unittest.TestCase):
                     "away_recent_points",
                     "home_recent_goal_diff",
                     "away_recent_goal_diff",
+                    "gdp_per_capita_diff",
+                    "home_continent_advantage",
+                    "away_continent_advantage",
+                    "continent_advantage_diff",
+                    "is_knockout",
                 ],
                 "label_order": ["H", "D", "A"],
                 "model_version": "xgboost-active-v1",
@@ -84,7 +89,7 @@ class TestInferenceRouter(unittest.TestCase):
             "artifact_path": str(artifact_path),
             "production_status": "active",
         }
-        with patch("alttez.inference.router.load_active_model_record", return_value=active_record):
+        with patch("alttez.inference.router._load_active_model_record_safe", return_value=active_record):
             predictor = build_active_predictor(_historical_df(), "2026-05-27")
             prediction = predictor.predict_match("Mexico", "USA", is_neutral=True)
 
@@ -93,6 +98,57 @@ class TestInferenceRouter(unittest.TestCase):
         self.assertEqual(prediction["model_version"], "xgboost-active-v1")
         self.assertAlmostEqual(float(prediction["prob_home"]), 0.58, places=2)
         self.assertEqual(prediction["best_market"], "Victoria Mexico")
+
+    def test_xgboost_feature_payload_includes_klement_context(self) -> None:
+        artifact_dir = Path("artifacts/test-router")
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifact_dir / "xgboost-klement.joblib"
+        joblib.dump(
+            {
+                "model": DummyProbabilityModel(),
+                "feature_columns": [
+                    "gdp_per_capita_diff",
+                    "home_continent_advantage",
+                    "away_continent_advantage",
+                    "continent_advantage_diff",
+                    "is_knockout",
+                ],
+                "label_order": ["H", "D", "A"],
+                "model_version": "xgboost-klement-v1",
+                "model_family": "xgboost",
+            },
+            artifact_path,
+        )
+        active_record = {
+            "version_key": "xgboost-klement-v1:2026-05-27",
+            "model_version": "xgboost-klement-v1",
+            "model_family": "xgboost",
+            "artifact_path": str(artifact_path),
+            "production_status": "active",
+        }
+        macro_context = {
+            "mexico": {"gdp_per_capita": 12000.0, "confederation_code": "CONCACAF"},
+            "germany": {"gdp_per_capita": 50000.0, "confederation_code": "UEFA"},
+        }
+        with (
+            patch("alttez.inference.router._load_active_model_record_safe", return_value=active_record),
+            patch("alttez.features.klement.load_team_macro_context", return_value=macro_context),
+        ):
+            predictor = build_active_predictor(_historical_df(), "2026-05-27")
+            prediction = predictor.predict_match(
+                "Mexico",
+                "Germany",
+                is_neutral=True,
+                is_knockout=True,
+                tournament_context={"tournament": "FIFA World Cup 2026", "edition": 2026},
+            )
+
+        payload = prediction["xgboost_feature_payload"]
+        self.assertEqual(payload["is_knockout"], 1)
+        self.assertEqual(payload["home_continent_advantage"], 1.0)
+        self.assertEqual(payload["away_continent_advantage"], 0.0)
+        self.assertEqual(payload["continent_advantage_diff"], 1.0)
+        self.assertEqual(payload["gdp_per_capita_diff"], -38000.0)
 
 
 if __name__ == "__main__":
