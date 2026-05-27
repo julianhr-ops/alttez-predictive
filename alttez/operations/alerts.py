@@ -246,17 +246,11 @@ def _telegram_enabled() -> bool:
 
 
 def _telegram_token() -> str:
-    return (
-        os.getenv("ALTTEZ_ALERTS_TELEGRAM_BOT_TOKEN", "").strip()
-        or os.getenv("ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN", "").strip()
-    )
+    return os.getenv("ALTTEZ_ALERTS_TELEGRAM_BOT_TOKEN", "").strip()
 
 
 def _telegram_chat_id() -> str:
-    return (
-        os.getenv("ALTTEZ_ALERTS_TELEGRAM_CHAT_ID", "").strip()
-        or os.getenv("ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID", "").strip()
-    )
+    return os.getenv("ALTTEZ_ALERTS_TELEGRAM_CHAT_ID", "").strip()
 
 
 def _telegram_api_url(bot_token: str, method: str) -> str:
