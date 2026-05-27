@@ -141,7 +141,7 @@ Daily process runner:
 .\scripts\run_daily_process.ps1 -ApplyMigrations -WriteSmoke
 ```
 
-The same sequence is scheduled in GitHub Actions at 02:00 UTC through `.github/workflows/daily_process.yml`, where the workflow materializes a temporary `.env`, applies migrations, runs the live smoke pipeline, and uploads certification reports as build artifacts. Daily brief delivery is enabled automatically only when the required Telegram or webhook secrets are present.
+The same sequence is scheduled in GitHub Actions at 02:00 UTC through `.github/workflows/daily_process.yml`, where the workflow materializes a temporary `.env`, applies migrations, runs the live smoke pipeline, generates the daily brief, runs the champion-vs-challenger batch, and uploads certification plus model-evaluation artifacts. Daily brief delivery is enabled automatically only when the required Telegram or webhook secrets are present.
 
 ### 6. Daily brief to Telegram
 
@@ -168,6 +168,31 @@ GitHub Actions setup:
 - `ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID`
 
 Once those secrets exist, the scheduled workflow sends the brief every day at `02:00 UTC`.
+
+### 7. Prediction memory and model monitoring
+
+ALTTEZ now keeps point-in-time prediction memory in Supabase:
+
+- `prediction_runs`
+- `match_predictions`
+- `prediction_evaluations`
+- `model_versions`
+
+The daily brief persists the exact probabilities emitted for the day, and the live sync closes evaluations once those matches finish. The Streamlit dashboard now includes a dedicated `Rendimiento del modelo` view with:
+
+- historical `Brier Score`
+- `Log Loss`
+- `1X2 accuracy`
+- exact score hit rate
+- metrics by `model_version`
+- confidence-band calibration
+- champion vs challenger registry
+
+Manual challenger cycle:
+
+```powershell
+venv\Scripts\python.exe scripts\run_challenger_cycle.py --date 2026-05-26
+```
 
 ## Environment
 
@@ -241,7 +266,7 @@ If your checkout blocks writes into `.git`, use `git config core.hooksPath .gith
 - `alttez.features.poisson.PoissonEngine`
 - `alttez.experiments.world_cup_prep`
 - `alttez.experiments.train_world_cup`
-- `alttez.experiments.tournament_oracle`
+- `alttez.experiments.tournament_oracle`  
 
 ### Tournament optimizer
 

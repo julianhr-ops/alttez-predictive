@@ -21,6 +21,7 @@ from alttez.ingestion.certification_audit import upsert_certification_audit
 from alttez.ingestion.certification import build_daily_certification_report, build_raw_match_payload, write_certification_report
 from alttez.ingestion.contracts import RawMatchPayload
 from alttez.operations.alerts import record_operational_alerts
+from alttez.operations.prediction_memory import close_finished_prediction_evaluations
 from alttez.ingestion.provider_stack import build_stack
 from alttez.ingestion.providers.base import ProviderFetchRequest
 from alttez.ingestion.raw_matches_api import RawMatchRecord, upsert_raw_matches
@@ -192,7 +193,18 @@ def reflect_tables(engine: Engine, schema: str = DEFAULT_SCHEMA) -> dict[str, Ta
     existing_tables = set(inspector.get_table_names(schema=schema))
     requested_tables = [
         table
-        for table in ("teams", "tournaments", "matches", "competition_groups", "certification_batches", "alert_events")
+        for table in (
+            "teams",
+            "tournaments",
+            "matches",
+            "competition_groups",
+            "certification_batches",
+            "alert_events",
+            "prediction_runs",
+            "match_predictions",
+            "prediction_evaluations",
+            "model_versions",
+        )
         if table in existing_tables
     ]
     metadata.reflect(bind=engine, schema=schema, only=requested_tables)
@@ -615,6 +627,8 @@ def _finalize_operational_outputs(
     finalized.setdefault("alerts_delivery_status", "skipped")
     finalized.setdefault("alerts_delivery_channel", "dashboard")
     finalized.setdefault("alerts_error", None)
+    finalized.setdefault("prediction_evaluations_closed", 0)
+    finalized.setdefault("prediction_evaluation_error", None)
 
     local_engine = engine
     local_tables = tables
@@ -649,6 +663,17 @@ def _finalize_operational_outputs(
     except Exception as exc:  # noqa: BLE001 - audit persistence must not break the main sync.
         finalized["certification_audit_error"] = str(exc)
         logging.warning("Could not persist certification audit batch=%s detail=%s", finalized.get("certification_batch_id"), exc)
+
+    try:
+        evaluation_result = close_finished_prediction_evaluations(
+            engine=local_engine,
+            tables=local_tables,
+            target_date=target_date,
+        )
+        finalized.update(evaluation_result)
+    except Exception as exc:  # noqa: BLE001 - evaluation closure must not break the main batch.
+        finalized["prediction_evaluation_error"] = str(exc)
+        logging.warning("Could not close prediction evaluations date=%s detail=%s", target_date, exc)
 
     try:
         alert_result = record_operational_alerts(
@@ -946,6 +971,8 @@ def upsert_scheduled_matches(
             "season_label": stmt.excluded.season_label,
             "stage": stmt.excluded.stage,
             "status": stmt.excluded.status,
+            "home_score": stmt.excluded.home_score,
+            "away_score": stmt.excluded.away_score,
             "tournament_id": stmt.excluded.tournament_id,
             "home_team_id": stmt.excluded.home_team_id,
             "away_team_id": stmt.excluded.away_team_id,

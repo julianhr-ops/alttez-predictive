@@ -16,6 +16,7 @@ $preflight = Join-Path $root "scripts\shadow_readiness_check.py"
 $migrations = Join-Path $root "scripts\apply_supabase_migrations.py"
 $smoke = Join-Path $root "scripts\smoke_live_pipeline.py"
 $brief = Join-Path $root "scripts\generate_daily_brief.py"
+$challenger = Join-Path $root "scripts\run_challenger_cycle.py"
 
 Set-Location $root
 
@@ -68,6 +69,16 @@ if ($env:ALTTEZ_DAILY_BRIEF_DELIVER -eq "true") {
 & $python @briefArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Daily brief generation failed."
+}
+
+Write-Output "PROCESS: challenger cycle"
+$challengerArgs = @($challenger, "--date", $Date)
+if ($DatabaseUrl) {
+    $challengerArgs += @("--database-url", $DatabaseUrl)
+}
+& $python @challengerArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Challenger cycle failed."
 }
 
 Write-Output "PROCESS: complete"

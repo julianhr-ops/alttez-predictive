@@ -105,3 +105,12 @@ jobs:
             artifacts/reports/*.json
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Upload challenger reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alttez-model-evals
+          path: artifacts/model-evals/*.json
+          if-no-files-found: ignore
+          retention-days: 14

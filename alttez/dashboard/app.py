@@ -19,6 +19,7 @@ from alttez.dashboard.analysis_helpers import (
     support_level as _support_level,
     support_status as _support_status,
 )
+from alttez.dashboard.model_monitoring import render_model_monitoring_dashboard
 from alttez.dashboard.theme import build_brand_css
 from alttez.experiments.tournament_oracle import build_probability_matrix, optimize_prediction
 from alttez.features.poisson import PoissonEngine
@@ -1174,6 +1175,7 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Centro de control")
+        dashboard_view = st.radio("Vista", ["Agenda diaria", "Rendimiento del modelo"])
         fecha_simulacion = st.date_input("Fecha de agenda", value=default_date)
         fase_torneo = st.radio("Formato de puntuacion", ["Fase de Grupos", "Eliminacion Directa"])
         ventana = st.slider("Ventana de analisis (anos)", min_value=1, max_value=10, value=4)
@@ -1214,6 +1216,11 @@ def main() -> None:
 
     st.markdown('<div class="alttez-shell">', unsafe_allow_html=True)
     _render_hero(fecha_simulacion, fase_torneo, agenda_df)
+
+    if dashboard_view == "Rendimiento del modelo":
+        render_model_monitoring_dashboard()
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
 
     top_left, top_right = st.columns([1.45, 1], gap="large")
 

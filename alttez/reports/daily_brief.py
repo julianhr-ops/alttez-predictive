@@ -30,6 +30,11 @@ from alttez.experiments.tournament_oracle import build_probability_matrix, optim
 from alttez.features.poisson import PoissonEngine
 from alttez.ingestion.international import InternationalLoader
 from alttez.ingestion.live_matches import list_matches_for_date
+from alttez.operations.prediction_memory import (
+    get_active_model_family,
+    get_active_model_version,
+    persist_daily_predictions,
+)
 
 
 DEFAULT_REPORT_DIR = Path("artifacts/reports")
@@ -373,6 +378,8 @@ def build_daily_brief_payload(
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "target_date": target_date.isoformat(),
+        "model_version": get_active_model_version(),
+        "model_family": get_active_model_family(),
         "batch_summary": batch_summary,
         "alert_summary": alert_summary,
         "summary": summary,
@@ -954,6 +961,7 @@ def generate_daily_brief(
     database_url: str | None = None,
     report_dir: str | Path = DEFAULT_REPORT_DIR,
     deliver: bool = False,
+    persist_predictions: bool = True,
 ) -> dict[str, Any]:
     payload = build_daily_brief_payload(target_date, database_url=database_url)
     html_path, json_path = write_daily_brief(payload, report_dir=report_dir)
@@ -963,6 +971,20 @@ def generate_daily_brief(
         "delivery_channel": "none",
         "delivery_error": None,
     }
+    persistence = {
+        "prediction_run_id": None,
+        "prediction_run_row_id": None,
+        "prediction_persisted": False,
+        "prediction_rows": 0,
+        "prediction_error": None,
+    }
+    if persist_predictions:
+        try:
+            persistence = persist_daily_predictions(payload, database_url=database_url)
+            if persistence.get("prediction_run_id"):
+                payload["prediction_run_id"] = persistence["prediction_run_id"]
+        except Exception as exc:  # noqa: BLE001 - report generation should survive persistence issues.
+            persistence["prediction_error"] = str(exc)
     if deliver:
         delivery["delivery_attempted"] = True
         html_content = html_path.read_text(encoding="utf-8")
@@ -975,6 +997,7 @@ def generate_daily_brief(
         "payload": payload,
         "html_path": str(html_path),
         "json_path": str(json_path),
+        **persistence,
         **delivery,
     }
 
@@ -999,8 +1022,13 @@ def main() -> int:
     )
     print(f"daily_brief_html={result['html_path']}")
     print(f"daily_brief_json={result['json_path']}")
+    print(f"prediction_run_id={result.get('prediction_run_id') or 'none'}")
+    print(f"prediction_persisted={result.get('prediction_persisted', False)}")
+    print(f"prediction_rows={result.get('prediction_rows', 0)}")
     print(f"daily_brief_delivery_status={result['delivery_status']}")
     print(f"daily_brief_delivery_channel={result['delivery_channel']}")
+    if result.get("prediction_error"):
+        print(f"prediction_error={result['prediction_error']}")
     if result.get("delivery_error"):
         print(f"daily_brief_delivery_error={result['delivery_error']}")
     return 0
