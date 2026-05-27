@@ -6,6 +6,7 @@ from alttez.reports.daily_brief import (
     _build_telegram_summary_text,
     _decision_tier,
     _executive_decision_label,
+    exit_code_for_brief_result,
     render_daily_brief_html,
 )
 
@@ -165,6 +166,16 @@ class TestDailyBrief(unittest.TestCase):
         self.assertEqual(
             _executive_decision_label({"decision_tier": "Baja confianza", "support_label": "Sin historial suficiente"}),
             "Descarte",
+        )
+
+    def test_exit_code_for_brief_result_fails_when_delivery_requested_but_not_delivered(self) -> None:
+        self.assertEqual(
+            exit_code_for_brief_result({"delivery_status": "failed"}, deliver_requested=True),
+            1,
+        )
+        self.assertEqual(
+            exit_code_for_brief_result({"delivery_status": "skipped"}, deliver_requested=False),
+            0,
         )
 
 

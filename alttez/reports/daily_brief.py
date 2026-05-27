@@ -1002,6 +1002,12 @@ def generate_daily_brief(
     }
 
 
+def exit_code_for_brief_result(result: dict[str, Any], *, deliver_requested: bool) -> int:
+    if deliver_requested and result.get("delivery_status") != "delivered":
+        return 1
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate the ALTTEZ Daily Decision Brief.")
     parser.add_argument("--date", default=date.today().isoformat(), help="Target date in YYYY-MM-DD format.")
@@ -1031,7 +1037,7 @@ def main() -> int:
         print(f"prediction_error={result['prediction_error']}")
     if result.get("delivery_error"):
         print(f"daily_brief_delivery_error={result['delivery_error']}")
-    return 0
+    return exit_code_for_brief_result(result, deliver_requested=args.deliver)
 
 
 if __name__ == "__main__":
