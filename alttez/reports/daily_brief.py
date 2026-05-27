@@ -24,15 +24,11 @@ from alttez.dashboard.analysis_helpers import (
     competition_class_label,
     filter_noise_matches,
     safe_text,
-    support_level,
 )
-from alttez.experiments.tournament_oracle import build_probability_matrix, optimize_prediction
-from alttez.features.poisson import PoissonEngine
+from alttez.inference import BaseMatchPredictor, build_active_predictor
 from alttez.ingestion.international import InternationalLoader
 from alttez.ingestion.live_matches import list_matches_for_date
 from alttez.operations.prediction_memory import (
-    get_active_model_family,
-    get_active_model_version,
     persist_daily_predictions,
 )
 
@@ -40,22 +36,6 @@ from alttez.operations.prediction_memory import (
 DEFAULT_REPORT_DIR = Path("artifacts/reports")
 DEFAULT_MAX_GOALS = 7
 DEFAULT_DELIVERY_TIMEOUT_SECONDS = 10
-
-
-def _build_engine(df: pd.DataFrame, target_date: str) -> PoissonEngine:
-    engine = PoissonEngine(
-        years_window=4,
-        prior_matches=8,
-        min_history_matches=5,
-        recency_half_life_days=365,
-        recent_form_matches=6,
-    )
-    engine.fit(df, target_date=target_date)
-    return engine
-
-
-def _get_team_profile(engine: PoissonEngine, team: str) -> dict[str, float]:
-    return engine.get_team_profile(team)
 
 
 def _build_result_summary(prob_matrix, team_a: str, team_b: str) -> pd.DataFrame:
@@ -113,9 +93,9 @@ def _is_knockout_stage(stage: str | None) -> bool:
     return any(keyword in lowered for keyword in keywords)
 
 
-def _support_lookup_from_engine(engine: PoissonEngine, row_dict: dict[str, Any]) -> tuple[bool, bool]:
-    home_profile = _get_team_profile(engine, row_dict["home_team"])
-    away_profile = _get_team_profile(engine, row_dict["away_team"])
+def _support_lookup_from_predictor(predictor: BaseMatchPredictor, row_dict: dict[str, Any]) -> tuple[bool, bool]:
+    home_profile = predictor.get_team_profile(row_dict["home_team"])
+    away_profile = predictor.get_team_profile(row_dict["away_team"])
     return home_profile.get("matches", 0.0) > 0, away_profile.get("matches", 0.0) > 0
 
 
@@ -230,13 +210,21 @@ def _format_probability(value: float) -> str:
     return f"{value:.1%}"
 
 
-def _build_match_brief(row_dict: dict[str, Any], engine: PoissonEngine, max_goals: int = DEFAULT_MAX_GOALS) -> dict[str, Any]:
+def _build_match_brief(row_dict: dict[str, Any], predictor: BaseMatchPredictor, max_goals: int = DEFAULT_MAX_GOALS) -> dict[str, Any]:
     home_team = row_dict["home_team"]
     away_team = row_dict["away_team"]
-    profile_local = _get_team_profile(engine, home_team)
-    profile_visitante = _get_team_profile(engine, away_team)
-    prediction_supported, support_message = _is_prediction_supported(profile_local, profile_visitante)
-    support_label = support_level(profile_local.get("matches", 0) > 0, profile_visitante.get("matches", 0) > 0)
+    prediction = predictor.predict_match(
+        home_team,
+        away_team,
+        is_neutral=bool(row_dict.get("is_neutral", False)),
+        is_knockout=_is_knockout_stage(safe_text(row_dict.get("stage"), "Fase por confirmar")),
+        max_goals=max_goals,
+    )
+    profile_local = prediction["profile_local"]
+    profile_visitante = prediction["profile_visitante"]
+    prediction_supported = bool(prediction["prediction_supported"])
+    support_message = prediction["support_message"]
+    support_label = prediction["support_label"]
 
     brief = {
         "match_id": row_dict.get("id"),
@@ -266,6 +254,10 @@ def _build_match_brief(row_dict: dict[str, Any], engine: PoissonEngine, max_goal
         "recent_points_visitante": float(profile_visitante.get("recent_points_per_match", 0.0)),
         "recent_goal_diff_local": float(profile_local.get("recent_goal_diff_per_match", 0.0)),
         "recent_goal_diff_visitante": float(profile_visitante.get("recent_goal_diff_per_match", 0.0)),
+        "model_version": prediction["model_version"],
+        "model_family": prediction["model_family"],
+        "used_fallback": bool(prediction.get("used_fallback", False)),
+        "fallback_reason": prediction.get("fallback_reason"),
     }
 
     if not prediction_supported:
@@ -287,40 +279,25 @@ def _build_match_brief(row_dict: dict[str, Any], engine: PoissonEngine, max_goal
         )
         return brief
 
-    lambda_h, lambda_a = engine.predict_xg(home_team, away_team, is_neutral=brief["is_neutral"])
-    prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals)
-    recommendations = optimize_prediction(prob_matrix, is_knockout=_is_knockout_stage(brief["stage"])).head(4).copy()
-    recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
-    result_summary = _build_result_summary(prob_matrix, home_team, away_team)
-    recommendation_summary = build_recommendation_summary(
-        {
-            "recomendaciones": recommendations,
-            "result_summary": result_summary,
-        }
-    )
-
-    best_market = recommendation_summary.get("best_market") or {}
-    probabilities = {
-        row["Mercado"]: float(row["Probabilidad"])
-        for row in result_summary.to_dict(orient="records")
-    }
     avg_confidence = (brief["confidence_local"] + brief["confidence_visitante"]) / 2
-    best_market_probability = float(best_market.get("Probabilidad", 0.0) or 0.0)
+    best_market_probability = float(prediction.get("best_market_probability", 0.0) or 0.0)
 
     brief.update(
         {
-            "lambda_h": lambda_h,
-            "lambda_a": lambda_a,
-            "xg_total": round(lambda_h + lambda_a, 2),
-            "primary_score": recommendation_summary.get("primary_score", "N/D"),
-            "primary_ev": recommendation_summary.get("primary_ev"),
-            "best_market": safe_text(best_market.get("Mercado"), "Por definir"),
+            "lambda_h": prediction.get("lambda_h"),
+            "lambda_a": prediction.get("lambda_a"),
+            "xg_total": round(float(prediction["lambda_h"]) + float(prediction["lambda_a"]), 2),
+            "primary_score": prediction.get("primary_score", "N/D"),
+            "primary_ev": prediction.get("primary_ev"),
+            "best_market": safe_text(prediction.get("best_market"), "Por definir"),
             "best_market_probability": best_market_probability,
-            "prob_home": probabilities.get(f"Victoria {home_team}"),
-            "prob_draw": probabilities.get("Empate"),
-            "prob_away": probabilities.get(f"Victoria {away_team}"),
+            "prob_home": prediction.get("prob_home"),
+            "prob_draw": prediction.get("prob_draw"),
+            "prob_away": prediction.get("prob_away"),
             "decision_tier": _decision_tier(support_label, avg_confidence, best_market_probability),
-            "alternatives": recommendations.iloc[1:4].to_dict(orient="records"),
+            "alternatives": prediction.get("recommendations", pd.DataFrame()).iloc[1:4].to_dict(orient="records")
+            if isinstance(prediction.get("recommendations"), pd.DataFrame)
+            else [],
         }
     )
     return brief
@@ -364,13 +341,13 @@ def build_daily_brief_payload(
     agenda_df = list_matches_for_date(target_date, include_statuses=include_statuses, database_url=database_url)
     historical_loader = InternationalLoader()
     historical_df = historical_loader.fetch_data()
-    engine = _build_engine(historical_df, target_date.isoformat())
+    predictor = build_active_predictor(historical_df, target_date, database_url=database_url)
     filtered_agenda = filter_noise_matches(
         agenda_df,
-        lambda row_dict: _support_lookup_from_engine(engine, row_dict),
+        lambda row_dict: _support_lookup_from_predictor(predictor, row_dict),
     )
 
-    match_briefs = [_build_match_brief(row._asdict(), engine) for row in filtered_agenda.itertuples(index=False)]
+    match_briefs = [_build_match_brief(row._asdict(), predictor) for row in filtered_agenda.itertuples(index=False)]
     batch_summary = _load_batch_summary(target_date, database_url=database_url)
     alert_summary = _load_alert_summary(target_date, database_url=database_url)
     summary = _summarize_brief(match_briefs, batch_summary, alert_summary)
@@ -378,8 +355,10 @@ def build_daily_brief_payload(
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "target_date": target_date.isoformat(),
-        "model_version": get_active_model_version(),
-        "model_family": get_active_model_family(),
+        "model_version": predictor.model_version,
+        "model_family": predictor.model_family,
+        "used_fallback": predictor.used_fallback,
+        "fallback_reason": predictor.fallback_reason,
         "batch_summary": batch_summary,
         "alert_summary": alert_summary,
         "summary": summary,
@@ -852,7 +831,7 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
     </section>
 
     <div class="footer">
-      Generado en {html.escape(payload['generated_at'])} | Fuente de agenda: Supabase canonical matches | Motor: Poisson ALTTEZ
+      Generado en {html.escape(payload['generated_at'])} | Fuente de agenda: Supabase canonical matches | Motor: {html.escape(safe_text(payload.get('model_family'), 'poisson'))} / {html.escape(safe_text(payload.get('model_version'), 'ALTTEZ'))}
     </div>
   </div>
 </body>

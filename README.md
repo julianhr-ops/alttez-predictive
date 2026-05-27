@@ -201,6 +201,56 @@ The challenger cycle now applies a formal governance rule:
 - `production_status` shows whether the challenger is only `eligible`, still `shadow`, or truly `active`
 - auto-promotion stays off by default unless `ALTTEZ_AUTO_PROMOTE_MODELS=true`
 
+The production router now resolves the active model directly from `public.model_versions`. If the active artifact is not loadable, ALTTEZ falls back automatically to the Poisson champion and leaves that trace in the brief and dashboard payload.
+
+Manual activation and rollback:
+
+```powershell
+venv\Scripts\python.exe scripts\activate_model_version.py --version-key <version-key>
+venv\Scripts\python.exe scripts\rollback_active_model.py
+```
+
+To allow XGBoost as a production family, keep:
+
+```powershell
+ALTTEZ_SUPPORTED_PRODUCTION_MODEL_FAMILIES=poisson,xgboost
+```
+
+### 7.1. Mundial 2026 simulator
+
+ALTTEZ now includes a dedicated `World Cup 2026` simulator that runs on the same active predictor used by the daily brief.
+
+Run it with:
+
+```powershell
+venv\Scripts\python.exe scripts\run_world_cup_2026_simulation.py --date 2026-05-27 --iterations 500
+```
+
+The simulator expects a local JSON configuration at:
+
+```text
+storage/world_cup_2026/world_cup_2026_config.json
+```
+
+That file should declare:
+
+- `groups`
+- `knockout_fixtures`
+
+Artifacts are written under:
+
+```text
+artifacts/world-cup-2026/
+```
+
+For a fast validation pass, use `--iterations 100`.
+
+The `Rendimiento del modelo` panel now shows:
+
+- the current `active` model
+- challengers `eligible` or `blocked`
+- and the latest `Mundial 2026` simulation artifact when available
+
 ### 8. Telegram incident alerts
 
 If you want critical pipeline failures to reach Telegram too, configure:

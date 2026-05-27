@@ -13,8 +13,7 @@ if str(ROOT) not in sys.path:
 
 from alttez.api.settings import load_local_env
 from alttez.dashboard.analysis_helpers import build_recommendation_summary
-from alttez.experiments.tournament_oracle import build_probability_matrix, optimize_prediction
-from alttez.features.poisson import PoissonEngine
+from alttez.inference import BaseMatchPredictor, build_active_predictor
 from alttez.ingestion.international import InternationalLoader
 from alttez.ingestion.live_matches import (
     fetch_live_fixtures_from_stack,
@@ -24,47 +23,11 @@ from alttez.ingestion.live_matches import (
 from alttez.ingestion.provider_healthcheck import run_healthcheck
 
 
-def _build_engine(df: pd.DataFrame, target_date: str) -> PoissonEngine:
-    engine = PoissonEngine(
-        years_window=4,
-        prior_matches=8,
-        min_history_matches=5,
-        recency_half_life_days=365,
-        recent_form_matches=6,
-    )
-    engine.fit(df, target_date=target_date)
-    return engine
-
-
-def _build_result_summary(prob_matrix, team_a: str, team_b: str) -> pd.DataFrame:
-    home_win = 0.0
-    draw = 0.0
-    away_win = 0.0
-    max_goals = prob_matrix.shape[0] - 1
-
-    for home_goals in range(max_goals + 1):
-        for away_goals in range(max_goals + 1):
-            probability = prob_matrix[home_goals, away_goals]
-            if home_goals > away_goals:
-                home_win += probability
-            elif home_goals < away_goals:
-                away_win += probability
-            else:
-                draw += probability
-
-    return pd.DataFrame(
-        {
-            "Mercado": [f"Victoria {team_a}", "Empate", f"Victoria {team_b}"],
-            "Probabilidad": [home_win, draw, away_win],
-        }
-    )
-
-
-def _pick_fixture(fixtures, engine: PoissonEngine):
+def _pick_fixture(fixtures, predictor: BaseMatchPredictor):
     for fixture in fixtures:
-        if engine.get_team_profile(fixture.home_team).get("matches", 0) > 0 or engine.get_team_profile(fixture.away_team).get(
-            "matches", 0
-        ) > 0:
+        if predictor.get_team_profile(fixture.home_team).get("matches", 0) > 0 or predictor.get_team_profile(
+            fixture.away_team
+        ).get("matches", 0) > 0:
             return fixture
     return fixtures[0]
 
@@ -106,13 +69,17 @@ def run_smoke(
     historical_df = historical_loader.fetch_data()
     print(f"historical_rows={len(historical_df)}")
 
-    engine = _build_engine(historical_df, target_date.isoformat())
-    fixture = _pick_fixture(fixtures, engine)
-    lambda_home, lambda_away = engine.predict_xg(fixture.home_team, fixture.away_team, is_neutral=fixture.is_neutral)
-    prob_matrix = build_probability_matrix(lambda_home, lambda_away, max_goals=7)
-    recommendations = optimize_prediction(prob_matrix, is_knockout=False).head(5).copy()
-    recommendations["EV"] = recommendations["EV"].map(lambda value: round(value, 3))
-    result_summary = _build_result_summary(prob_matrix, fixture.home_team, fixture.away_team)
+    predictor = build_active_predictor(historical_df, target_date, database_url=database_url)
+    fixture = _pick_fixture(fixtures, predictor)
+    prediction = predictor.predict_match(
+        fixture.home_team,
+        fixture.away_team,
+        is_neutral=fixture.is_neutral,
+        is_knockout=False,
+        max_goals=7,
+    )
+    recommendations = prediction.get("recommendations", pd.DataFrame())
+    result_summary = prediction.get("result_summary", pd.DataFrame())
     recommendation_summary = build_recommendation_summary(
         {
             "recomendaciones": recommendations,
@@ -125,8 +92,13 @@ def run_smoke(
     print(f"provider={fixture.provider}")
     print(f"tournament={fixture.tournament_name}")
     print(f"kickoff={fixture.kickoff_at or 'n/a'}")
-    print(f"xg_home={lambda_home}")
-    print(f"xg_away={lambda_away}")
+    print(f"model_version={prediction.get('model_version')}")
+    print(f"model_family={prediction.get('model_family')}")
+    print(f"used_fallback={prediction.get('used_fallback', False)}")
+    if prediction.get("fallback_reason"):
+        print(f"fallback_reason={prediction['fallback_reason']}")
+    print(f"xg_home={prediction.get('lambda_h')}")
+    print(f"xg_away={prediction.get('lambda_a')}")
     print(f"primary_prediction={recommendation_summary.get('primary_score', 'n/a')}")
     print(f"primary_ev={recommendation_summary.get('primary_ev', 'n/a')}")
     print(

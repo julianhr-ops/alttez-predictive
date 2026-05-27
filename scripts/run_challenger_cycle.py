@@ -32,6 +32,8 @@ def main() -> int:
         evaluation_matches=args.evaluation_matches,
     )
     print(f"challenger_artifact_path={result['artifact_path']}")
+    if result.get("model_artifact_path"):
+        print(f"challenger_model_artifact_path={result['model_artifact_path']}")
     print(f"champion_brier={result['champion']['brier_score']:.6f}")
     print(f"challenger_brier={result['challenger']['brier_score']:.6f}")
     print(f"promotion_decision={result['promotion_decision']}")

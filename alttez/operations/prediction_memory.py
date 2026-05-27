@@ -19,6 +19,7 @@ from alttez.api.settings import load_local_env
 DEFAULT_SCHEMA = "public"
 DEFAULT_POISSON_MODEL_VERSION = "poisson-champion-v2"
 DEFAULT_POISSON_MODEL_FAMILY = "poisson"
+DEFAULT_SUPPORTED_PRODUCTION_MODEL_FAMILIES = "poisson,xgboost"
 DEFAULT_EVALUATION_EPSILON = 1e-9
 
 
@@ -31,7 +32,7 @@ def get_active_model_family() -> str:
 
 
 def production_supported_model_families() -> set[str]:
-    raw = os.getenv("ALTTEZ_SUPPORTED_PRODUCTION_MODEL_FAMILIES", DEFAULT_POISSON_MODEL_FAMILY)
+    raw = os.getenv("ALTTEZ_SUPPORTED_PRODUCTION_MODEL_FAMILIES", DEFAULT_SUPPORTED_PRODUCTION_MODEL_FAMILIES)
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
 
 
@@ -617,3 +618,127 @@ def load_model_versions(*, database_url: str | None = None, limit: int = 20) -> 
         )
     except Exception:
         return pd.DataFrame()
+
+
+def load_active_model_record(*, database_url: str | None = None) -> dict[str, Any] | None:
+    try:
+        df = read_dataframe(
+            """
+            select
+                version_key,
+                model_version,
+                model_family,
+                training_cutoff,
+                trained_at,
+                status,
+                is_promotion_eligible,
+                production_status,
+                activation_mode,
+                activated_at,
+                promotion_reason,
+                artifact_path,
+                metrics_payload
+            from public.model_versions
+            where production_status = 'active'
+            order by coalesce(activated_at, trained_at) desc
+            limit 1
+            """,
+            database_url=database_url,
+        )
+    except Exception:
+        return None
+
+    if df.empty:
+        return None
+    return df.iloc[0].to_dict()
+
+
+def load_model_version_record(version_key: str, *, database_url: str | None = None) -> dict[str, Any] | None:
+    try:
+        df = read_dataframe(
+            """
+            select
+                version_key,
+                model_version,
+                model_family,
+                training_cutoff,
+                trained_at,
+                status,
+                is_promotion_eligible,
+                production_status,
+                activation_mode,
+                activated_at,
+                promotion_reason,
+                artifact_path,
+                metrics_payload
+            from public.model_versions
+            where version_key = :version_key
+            limit 1
+            """,
+            params={"version_key": version_key},
+            database_url=database_url,
+        )
+    except Exception:
+        return None
+
+    if df.empty:
+        return None
+    return df.iloc[0].to_dict()
+
+
+def activate_model_version_by_key(
+    version_key: str,
+    *,
+    database_url: str | None = None,
+    activation_mode: str = "manual",
+) -> dict[str, Any]:
+    load_local_env(override=True)
+    engine = get_engine(database_url)
+    tables = reflect_prediction_tables(engine)
+    model_versions_table = tables.get("model_versions")
+    if model_versions_table is None:
+        return {"activated": False, "error": "model_versions table is not available."}
+
+    target_record = load_model_version_record(version_key, database_url=database_url)
+    if not target_record:
+        return {"activated": False, "error": f"Model version `{version_key}` not found."}
+
+    target_family = str(target_record.get("model_family") or "").strip().lower()
+    if target_family not in production_supported_model_families():
+        return {
+            "activated": False,
+            "error": f"Model family `{target_family}` is not enabled for production inference.",
+        }
+
+    set_active_model_version_record(
+        engine,
+        model_versions_table,
+        active_version_key=version_key,
+        activation_mode=activation_mode,
+    )
+    return {"activated": True, "version_key": version_key, "model_family": target_family}
+
+
+def rollback_active_model_to_poisson(*, database_url: str | None = None) -> dict[str, Any]:
+    load_local_env(override=True)
+    try:
+        df = read_dataframe(
+            """
+            select version_key
+            from public.model_versions
+            where lower(model_family) = 'poisson'
+            order by coalesce(activated_at, trained_at) desc
+            limit 1
+            """,
+            database_url=database_url,
+        )
+    except Exception as exc:
+        return {"activated": False, "error": str(exc)}
+
+    if df.empty:
+        return {"activated": False, "error": "No Poisson model version is available for rollback."}
+
+    version_key = str(df.iloc[0]["version_key"])
+    result = activate_model_version_by_key(version_key, database_url=database_url, activation_mode="manual")
+    result["rollback_to_poisson"] = True
+    return result

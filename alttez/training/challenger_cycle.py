@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, log_loss
@@ -36,6 +37,16 @@ DEFAULT_REPORT_DIR = Path("artifacts/model-evals")
 DEFAULT_CHALLENGER_VERSION = "xgboost-challenger-v1"
 DEFAULT_EVALUATION_MATCHES = 250
 DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE = 0.01
+FEATURE_COLUMNS = [
+    "elo_difference",
+    "elo_home_before",
+    "elo_away_before",
+    "is_neutral",
+    "home_recent_points",
+    "away_recent_points",
+    "home_recent_goal_diff",
+    "away_recent_goal_diff",
+]
 
 
 def _outcome_label(home_score: int, away_score: int) -> str:
@@ -148,25 +159,15 @@ def _evaluate_poisson_champion(train_df: pd.DataFrame, holdout_df: pd.DataFrame)
 
 
 def _build_feature_matrices(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    feature_columns = [
-        "elo_difference",
-        "elo_home_before",
-        "elo_away_before",
-        "is_neutral",
-        "home_recent_points",
-        "away_recent_points",
-        "home_recent_goal_diff",
-        "away_recent_goal_diff",
-    ]
     label_map = {"H": 0, "D": 1, "A": 2}
-    x_train = train_df[feature_columns].fillna(0.0)
-    x_holdout = holdout_df[feature_columns].fillna(0.0)
+    x_train = train_df[FEATURE_COLUMNS].fillna(0.0)
+    x_holdout = holdout_df[FEATURE_COLUMNS].fillna(0.0)
     y_train = train_df["outcome_label"].map(label_map)
     y_holdout = holdout_df["outcome_label"].map(label_map)
     return x_train, x_holdout, y_train, y_holdout
 
 
-def _evaluate_challenger(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> dict[str, Any]:
+def _train_challenger(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> tuple[dict[str, Any], dict[str, Any]]:
     x_train, x_holdout, y_train, y_holdout = _build_feature_matrices(train_df, holdout_df)
     model = XGBClassifier(
         objective="multi:softprob",
@@ -196,7 +197,7 @@ def _evaluate_challenger(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> di
             )
         )
 
-    return {
+    metrics = {
         "model_version": DEFAULT_CHALLENGER_VERSION,
         "model_family": "xgboost",
         "brier_score": float(sum(brier_values) / len(brier_values)),
@@ -204,6 +205,15 @@ def _evaluate_challenger(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> di
         "accuracy_1x2": float(accuracy_score(y_holdout, predictions)),
         "exact_score_hit_rate": None,
     }
+    artifact_bundle = {
+        "model": model,
+        "feature_columns": FEATURE_COLUMNS,
+        "label_order": ["H", "D", "A"],
+        "model_version": DEFAULT_CHALLENGER_VERSION,
+        "model_family": "xgboost",
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return metrics, artifact_bundle
 
 
 def _promotion_decision(champion_metrics: dict[str, Any], challenger_metrics: dict[str, Any]) -> tuple[bool, str]:
@@ -236,6 +246,19 @@ def _write_report(report: dict[str, Any], report_dir: str | Path = DEFAULT_REPOR
     return output_path
 
 
+def _write_model_artifact(
+    artifact_bundle: dict[str, Any],
+    *,
+    target_date: date,
+    report_dir: str | Path = DEFAULT_REPORT_DIR,
+) -> Path:
+    artifact_dir = Path(report_dir).parent / "model-artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = artifact_dir / f"{artifact_bundle['model_version']}-{target_date.isoformat()}.joblib"
+    joblib.dump(artifact_bundle, artifact_path)
+    return artifact_path
+
+
 def run_challenger_cycle(
     target_date: date,
     *,
@@ -251,7 +274,7 @@ def run_challenger_cycle(
     holdout_df = challenger_df.iloc[-eval_size:].copy()
 
     champion_metrics = _evaluate_poisson_champion(train_df, holdout_df)
-    challenger_metrics = _evaluate_challenger(train_df, holdout_df)
+    challenger_metrics, challenger_artifact = _train_challenger(train_df, holdout_df)
     promote, promotion_reason = _promotion_decision(champion_metrics, challenger_metrics)
     production_status, activation_mode, governance_reason = _governance_decision(
         promote=promote,
@@ -274,7 +297,8 @@ def run_challenger_cycle(
         "registry_persisted": False,
         "registry_error": None,
     }
-    artifact_path = _write_report(report, report_dir=report_dir)
+    report_path = _write_report(report, report_dir=report_dir)
+    model_artifact_path = _write_model_artifact(challenger_artifact, target_date=target_date, report_dir=report_dir)
 
     try:
         engine = get_engine(database_url)
@@ -304,7 +328,7 @@ def run_challenger_cycle(
                 "is_promotion_eligible": True,
                 "production_status": "active" if production_status != "active" else "archived",
                 "activation_mode": "manual",
-                "artifact_path": str(artifact_path),
+                "artifact_path": str(report_path),
                 "metrics_payload": report["champion"],
             }
             challenger_row = {
@@ -325,7 +349,7 @@ def run_challenger_cycle(
                 "production_status": production_status,
                 "activation_mode": activation_mode,
                 "activated_at": datetime.now(timezone.utc) if production_status == "active" else None,
-                "artifact_path": str(artifact_path),
+                "artifact_path": str(model_artifact_path),
                 "metrics_payload": report["challenger"],
             }
             upsert_model_version_record(engine, model_versions_table, champion_row)
@@ -341,5 +365,6 @@ def run_challenger_cycle(
     except Exception as exc:  # noqa: BLE001 - challenger evaluation should still produce the artifact.
         report["registry_error"] = str(exc)
 
-    report["artifact_path"] = str(artifact_path)
+    report["artifact_path"] = str(report_path)
+    report["model_artifact_path"] = str(model_artifact_path)
     return report

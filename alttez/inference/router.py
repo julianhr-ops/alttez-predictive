@@ -1,0 +1,458 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+import joblib
+import numpy as np
+import pandas as pd
+
+from alttez.dashboard.analysis_helpers import support_level
+from alttez.experiments.tournament_oracle import build_probability_matrix, optimize_prediction
+from alttez.features.elo import EloEngine
+from alttez.features.poisson import PoissonEngine
+from alttez.operations.prediction_memory import (
+    DEFAULT_POISSON_MODEL_FAMILY,
+    DEFAULT_POISSON_MODEL_VERSION,
+    load_active_model_record,
+)
+
+
+DEFAULT_POISSON_KWARGS = {
+    "years_window": 4,
+    "prior_matches": 8,
+    "min_history_matches": 5,
+    "recency_half_life_days": 365,
+    "recent_form_matches": 6,
+}
+XGBOOST_FEATURE_COLUMNS = [
+    "elo_difference",
+    "elo_home_before",
+    "elo_away_before",
+    "is_neutral",
+    "home_recent_points",
+    "away_recent_points",
+    "home_recent_goal_diff",
+    "away_recent_goal_diff",
+]
+DEFAULT_MAX_GOALS = 7
+
+
+def _recent_average(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return float(sum(values) / len(values))
+
+
+def _build_recent_form_state(df: pd.DataFrame, window: int = 6) -> dict[str, dict[str, float]]:
+    ordered = df.sort_values("date").reset_index(drop=True).copy()
+    team_points: dict[str, list[float]] = {}
+    team_goal_diff: dict[str, list[float]] = {}
+    latest_state: dict[str, dict[str, float]] = {}
+
+    for row in ordered.itertuples(index=False):
+        home_team = row.home_team
+        away_team = row.away_team
+        team_points.setdefault(home_team, [])
+        team_points.setdefault(away_team, [])
+        team_goal_diff.setdefault(home_team, [])
+        team_goal_diff.setdefault(away_team, [])
+
+        latest_state[home_team] = {
+            "recent_points_per_match": _recent_average(team_points[home_team][-window:]),
+            "recent_goal_diff_per_match": _recent_average(team_goal_diff[home_team][-window:]),
+        }
+        latest_state[away_team] = {
+            "recent_points_per_match": _recent_average(team_points[away_team][-window:]),
+            "recent_goal_diff_per_match": _recent_average(team_goal_diff[away_team][-window:]),
+        }
+
+        home_points = 3.0 if row.home_score > row.away_score else 1.0 if row.home_score == row.away_score else 0.0
+        away_points = 3.0 if row.away_score > row.home_score else 1.0 if row.home_score == row.away_score else 0.0
+        goal_diff = float(row.home_score - row.away_score)
+        team_points[home_team].append(home_points)
+        team_points[away_team].append(away_points)
+        team_goal_diff[home_team].append(goal_diff)
+        team_goal_diff[away_team].append(-goal_diff)
+
+    for team in set(ordered["home_team"]).union(set(ordered["away_team"])):
+        latest_state.setdefault(
+            team,
+            {
+                "recent_points_per_match": 0.0,
+                "recent_goal_diff_per_match": 0.0,
+            },
+        )
+    return latest_state
+
+
+def _numeric_result_summary(prob_matrix: np.ndarray, team_a: str, team_b: str) -> pd.DataFrame:
+    home_win = 0.0
+    draw = 0.0
+    away_win = 0.0
+    max_goals = prob_matrix.shape[0] - 1
+
+    for home_goals in range(max_goals + 1):
+        for away_goals in range(max_goals + 1):
+            probability = float(prob_matrix[home_goals, away_goals])
+            if home_goals > away_goals:
+                home_win += probability
+            elif home_goals < away_goals:
+                away_win += probability
+            else:
+                draw += probability
+
+    return pd.DataFrame(
+        {
+            "Mercado": [f"Victoria {team_a}", "Empate", f"Victoria {team_b}"],
+            "Probabilidad": [home_win, draw, away_win],
+        }
+    )
+
+
+def _is_prediction_supported(profile_local: dict[str, float], profile_visitante: dict[str, float]) -> tuple[bool, str | None]:
+    local_matches = float(profile_local.get("matches", 0.0))
+    away_matches = float(profile_visitante.get("matches", 0.0))
+    local_effective = float(profile_local.get("effective_matches", 0.0))
+    away_effective = float(profile_visitante.get("effective_matches", 0.0))
+
+    if local_matches <= 0 and away_matches <= 0:
+        return False, "Sin historial compatible para ambos equipos."
+    if local_effective <= 0 and away_effective <= 0:
+        return False, "Sin soporte estadistico efectivo para ambos equipos."
+    return True, None
+
+
+@dataclass(slots=True)
+class ActiveModelSelection:
+    version_key: str | None
+    model_version: str
+    model_family: str
+    artifact_path: str | None
+    requested_production_status: str
+
+
+class BaseMatchPredictor(ABC):
+    def __init__(
+        self,
+        *,
+        selection: ActiveModelSelection,
+        used_fallback: bool = False,
+        fallback_reason: str | None = None,
+    ) -> None:
+        self.requested_version_key = selection.version_key
+        self.requested_model_version = selection.model_version
+        self.requested_model_family = selection.model_family
+        self.requested_production_status = selection.requested_production_status
+        self.model_version = selection.model_version
+        self.model_family = selection.model_family
+        self.used_fallback = used_fallback
+        self.fallback_reason = fallback_reason
+
+    @abstractmethod
+    def get_team_profile(self, team: str) -> dict[str, float]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def predict_match(
+        self,
+        home_team: str,
+        away_team: str,
+        *,
+        is_neutral: bool = False,
+        is_knockout: bool = False,
+        max_goals: int = DEFAULT_MAX_GOALS,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+
+class PoissonMatchPredictor(BaseMatchPredictor):
+    def __init__(
+        self,
+        historical_df: pd.DataFrame,
+        target_date: str,
+        *,
+        selection: ActiveModelSelection,
+        poisson_kwargs: dict[str, Any] | None = None,
+        used_fallback: bool = False,
+        fallback_reason: str | None = None,
+    ) -> None:
+        super().__init__(selection=selection, used_fallback=used_fallback, fallback_reason=fallback_reason)
+        self.model_version = DEFAULT_POISSON_MODEL_VERSION if used_fallback else selection.model_version
+        self.model_family = DEFAULT_POISSON_MODEL_FAMILY
+        kwargs = DEFAULT_POISSON_KWARGS.copy()
+        if poisson_kwargs:
+            kwargs.update(poisson_kwargs)
+        self.engine = PoissonEngine(**kwargs)
+        self.engine.fit(historical_df, target_date=target_date)
+
+    def get_team_profile(self, team: str) -> dict[str, float]:
+        return self.engine.get_team_profile(team)
+
+    def predict_match(
+        self,
+        home_team: str,
+        away_team: str,
+        *,
+        is_neutral: bool = False,
+        is_knockout: bool = False,
+        max_goals: int = DEFAULT_MAX_GOALS,
+    ) -> dict[str, Any]:
+        profile_local = self.get_team_profile(home_team)
+        profile_visitante = self.get_team_profile(away_team)
+        prediction_supported, support_message = _is_prediction_supported(profile_local, profile_visitante)
+        support_label = support_level(profile_local.get("matches", 0) > 0, profile_visitante.get("matches", 0) > 0)
+
+        if not prediction_supported:
+            return {
+                "model_version": self.model_version,
+                "model_family": self.model_family,
+                "requested_model_version": self.requested_model_version,
+                "requested_model_family": self.requested_model_family,
+                "used_fallback": self.used_fallback,
+                "fallback_reason": self.fallback_reason,
+                "profile_local": profile_local,
+                "profile_visitante": profile_visitante,
+                "prediction_supported": False,
+                "support_message": support_message,
+                "support_label": support_label,
+                "lambda_h": None,
+                "lambda_a": None,
+                "prob_matrix": None,
+                "prob_home": None,
+                "prob_draw": None,
+                "prob_away": None,
+                "result_summary": pd.DataFrame(),
+                "recommendations": pd.DataFrame(),
+                "primary_score": "N/D",
+                "primary_ev": None,
+                "best_market": "Sin soporte",
+                "best_market_probability": 0.0,
+            }
+
+        lambda_h, lambda_a = self.engine.predict_xg(home_team, away_team, is_neutral=is_neutral)
+        prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals)
+        recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
+        recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
+        result_summary = _numeric_result_summary(prob_matrix, home_team, away_team)
+        result_probabilities = {
+            row["Mercado"]: float(row["Probabilidad"])
+            for row in result_summary.to_dict(orient="records")
+        }
+        best_market = max(
+            result_summary.to_dict(orient="records"),
+            key=lambda row: float(row["Probabilidad"]),
+        )
+        primary_row = recommendations.iloc[0].to_dict() if not recommendations.empty else {"Pronostico": "N/D", "EV": None}
+
+        return {
+            "model_version": self.model_version,
+            "model_family": self.model_family,
+            "requested_model_version": self.requested_model_version,
+            "requested_model_family": self.requested_model_family,
+            "used_fallback": self.used_fallback,
+            "fallback_reason": self.fallback_reason,
+            "profile_local": profile_local,
+            "profile_visitante": profile_visitante,
+            "prediction_supported": True,
+            "support_message": None,
+            "support_label": support_label,
+            "lambda_h": float(lambda_h),
+            "lambda_a": float(lambda_a),
+            "prob_matrix": prob_matrix,
+            "prob_home": result_probabilities.get(f"Victoria {home_team}"),
+            "prob_draw": result_probabilities.get("Empate"),
+            "prob_away": result_probabilities.get(f"Victoria {away_team}"),
+            "result_summary": result_summary,
+            "recommendations": recommendations,
+            "primary_score": str(primary_row.get("Pronostico") or "N/D"),
+            "primary_ev": primary_row.get("EV"),
+            "best_market": str(best_market.get("Mercado") or "Por definir"),
+            "best_market_probability": float(best_market.get("Probabilidad") or 0.0),
+        }
+
+
+class XGBoostMatchPredictor(BaseMatchPredictor):
+    def __init__(
+        self,
+        historical_df: pd.DataFrame,
+        target_date: str,
+        *,
+        selection: ActiveModelSelection,
+        poisson_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(selection=selection)
+        if not selection.artifact_path:
+            raise FileNotFoundError("El modelo activo XGBoost no declara artifact_path.")
+        artifact_path = Path(selection.artifact_path)
+        if not artifact_path.exists():
+            raise FileNotFoundError(f"No existe el artefacto XGBoost activo: {artifact_path}")
+
+        artifact = joblib.load(artifact_path)
+        self.model = artifact["model"]
+        self.feature_columns = list(artifact.get("feature_columns") or XGBOOST_FEATURE_COLUMNS)
+        self.label_order = list(artifact.get("label_order") or ["H", "D", "A"])
+        self.model_version = str(artifact.get("model_version") or selection.model_version)
+        self.model_family = str(artifact.get("model_family") or selection.model_family)
+        cutoff = pd.to_datetime(target_date)
+        self.historical_df = historical_df.loc[historical_df["date"] < cutoff].copy()
+        self.poisson_baseline = PoissonMatchPredictor(
+            self.historical_df,
+            target_date,
+            selection=ActiveModelSelection(
+                version_key=selection.version_key,
+                model_version=self.model_version,
+                model_family=self.model_family,
+                artifact_path=selection.artifact_path,
+                requested_production_status=selection.requested_production_status,
+            ),
+            poisson_kwargs=poisson_kwargs,
+        )
+        self.elo_state = self._build_elo_state(self.historical_df)
+        self.recent_state = _build_recent_form_state(self.historical_df)
+
+    @staticmethod
+    def _build_elo_state(df: pd.DataFrame) -> dict[str, float]:
+        working_df = df.copy()
+        if "home_result" not in working_df.columns:
+            working_df["home_result"] = np.where(
+                working_df["home_score"] > working_df["away_score"],
+                1.0,
+                np.where(working_df["home_score"] == working_df["away_score"], 0.5, 0.0),
+            )
+        if "tournament" not in working_df.columns:
+            working_df["tournament"] = "International"
+        elo_engine = EloEngine()
+        elo_engine.compute_elo_features(working_df)
+        return dict(elo_engine.ratings)
+
+    def _feature_frame(self, home_team: str, away_team: str, is_neutral: bool) -> pd.DataFrame:
+        home_elo = float(self.elo_state.get(home_team, 1500.0))
+        away_elo = float(self.elo_state.get(away_team, 1500.0))
+        home_form = self.recent_state.get(home_team, {})
+        away_form = self.recent_state.get(away_team, {})
+        feature_row = {
+            "elo_difference": home_elo - away_elo,
+            "elo_home_before": home_elo,
+            "elo_away_before": away_elo,
+            "is_neutral": int(is_neutral),
+            "home_recent_points": float(home_form.get("recent_points_per_match", 0.0)),
+            "away_recent_points": float(away_form.get("recent_points_per_match", 0.0)),
+            "home_recent_goal_diff": float(home_form.get("recent_goal_diff_per_match", 0.0)),
+            "away_recent_goal_diff": float(away_form.get("recent_goal_diff_per_match", 0.0)),
+        }
+        return pd.DataFrame([{column: feature_row.get(column, 0.0) for column in self.feature_columns}])
+
+    def get_team_profile(self, team: str) -> dict[str, float]:
+        return self.poisson_baseline.get_team_profile(team)
+
+    def predict_match(
+        self,
+        home_team: str,
+        away_team: str,
+        *,
+        is_neutral: bool = False,
+        is_knockout: bool = False,
+        max_goals: int = DEFAULT_MAX_GOALS,
+    ) -> dict[str, Any]:
+        baseline = self.poisson_baseline.predict_match(
+            home_team,
+            away_team,
+            is_neutral=is_neutral,
+            is_knockout=is_knockout,
+            max_goals=max_goals,
+        )
+        baseline["model_version"] = self.model_version
+        baseline["model_family"] = self.model_family
+        baseline["requested_model_version"] = self.requested_model_version
+        baseline["requested_model_family"] = self.requested_model_family
+        baseline["used_fallback"] = self.used_fallback
+        baseline["fallback_reason"] = self.fallback_reason
+        if not baseline["prediction_supported"]:
+            return baseline
+
+        feature_df = self._feature_frame(home_team, away_team, is_neutral)
+        probabilities = self.model.predict_proba(feature_df)[0]
+        probability_map = {label: float(probabilities[idx]) for idx, label in enumerate(self.label_order)}
+        probability_map.setdefault("H", 0.0)
+        probability_map.setdefault("D", 0.0)
+        probability_map.setdefault("A", 0.0)
+
+        market_rows = [
+            {"Mercado": f"Victoria {home_team}", "Probabilidad": probability_map["H"]},
+            {"Mercado": "Empate", "Probabilidad": probability_map["D"]},
+            {"Mercado": f"Victoria {away_team}", "Probabilidad": probability_map["A"]},
+        ]
+        best_market = max(market_rows, key=lambda row: float(row["Probabilidad"]))
+        baseline["prob_home"] = probability_map["H"]
+        baseline["prob_draw"] = probability_map["D"]
+        baseline["prob_away"] = probability_map["A"]
+        baseline["result_summary"] = pd.DataFrame(market_rows)
+        baseline["best_market"] = str(best_market["Mercado"])
+        baseline["best_market_probability"] = float(best_market["Probabilidad"])
+        baseline["xgboost_feature_payload"] = feature_df.iloc[0].to_dict()
+        return baseline
+
+
+def _selection_from_record(record: dict[str, Any] | None) -> ActiveModelSelection:
+    if not record:
+        return ActiveModelSelection(
+            version_key=None,
+            model_version=DEFAULT_POISSON_MODEL_VERSION,
+            model_family=DEFAULT_POISSON_MODEL_FAMILY,
+            artifact_path=None,
+            requested_production_status="active",
+        )
+    return ActiveModelSelection(
+        version_key=record.get("version_key"),
+        model_version=str(record.get("model_version") or DEFAULT_POISSON_MODEL_VERSION),
+        model_family=str(record.get("model_family") or DEFAULT_POISSON_MODEL_FAMILY),
+        artifact_path=record.get("artifact_path"),
+        requested_production_status=str(record.get("production_status") or "active"),
+    )
+
+
+def build_active_predictor(
+    historical_df: pd.DataFrame,
+    target_date: date | str,
+    *,
+    database_url: str | None = None,
+    poisson_kwargs: dict[str, Any] | None = None,
+) -> BaseMatchPredictor:
+    if isinstance(target_date, date):
+        target_date_str = target_date.isoformat()
+    else:
+        target_date_str = str(target_date)
+
+    selection = _selection_from_record(load_active_model_record(database_url=database_url))
+    family = selection.model_family.strip().lower()
+
+    if family == "xgboost":
+        try:
+            return XGBoostMatchPredictor(
+                historical_df,
+                target_date_str,
+                selection=selection,
+                poisson_kwargs=poisson_kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001 - production fallback should keep the pipeline alive.
+            return PoissonMatchPredictor(
+                historical_df,
+                target_date_str,
+                selection=selection,
+                poisson_kwargs=poisson_kwargs,
+                used_fallback=True,
+                fallback_reason=str(exc),
+            )
+
+    return PoissonMatchPredictor(
+        historical_df,
+        target_date_str,
+        selection=selection,
+        poisson_kwargs=poisson_kwargs,
+        used_fallback=False,
+        fallback_reason=None,
+    )

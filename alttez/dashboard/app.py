@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-import inspect
 
 import altair as alt
 import pandas as pd
@@ -21,8 +20,7 @@ from alttez.dashboard.analysis_helpers import (
 )
 from alttez.dashboard.model_monitoring import render_model_monitoring_dashboard
 from alttez.dashboard.theme import build_brand_css
-from alttez.experiments.tournament_oracle import build_probability_matrix, optimize_prediction
-from alttez.features.poisson import PoissonEngine
+from alttez.inference import build_active_predictor
 from alttez.ingestion.international import InternationalLoader
 from alttez.ingestion.live_matches import get_live_provider_order, ingest_live_matches_for_date, list_matches_for_date
 from alttez.ingestion.provider_healthcheck import run_healthcheck
@@ -259,7 +257,7 @@ def cargar_alertas_recientes(limit: int = 10) -> list[dict]:
     return load_recent_alert_events(limit=limit)
 
 
-def _get_team_profile(engine: PoissonEngine, team: str) -> dict:
+def _get_team_profile(engine, team: str) -> dict:
     default_profile = {
         "home_attack": 1.0,
         "away_attack": 1.0,
@@ -291,21 +289,6 @@ def _get_team_profile(engine: PoissonEngine, team: str) -> dict:
         return _normalize(team_stats.get(team))
 
     return default_profile
-
-
-def _build_poisson_engine(ventana: int, prior_matches: int, recency_half_life_days: int) -> PoissonEngine:
-    signature = inspect.signature(PoissonEngine.__init__)
-    kwargs = {
-        "years_window": ventana,
-        "prior_matches": prior_matches,
-    }
-    if "min_history_matches" in signature.parameters:
-        kwargs["min_history_matches"] = 5
-    if "recency_half_life_days" in signature.parameters:
-        kwargs["recency_half_life_days"] = recency_half_life_days
-    if "recent_form_matches" in signature.parameters:
-        kwargs["recent_form_matches"] = 6
-    return PoissonEngine(**kwargs)
 
 
 def _build_scoreline_table(prob_matrix, top_n: int = 8) -> pd.DataFrame:
@@ -838,24 +821,36 @@ def _run_analysis(
     max_goles: int,
     match_context: dict | None = None,
 ) -> dict:
-    engine = _build_poisson_engine(ventana, prior_matches, recency_half_life_days)
-    engine.fit(df, target_date=fecha_simulacion)
+    predictor = build_active_predictor(
+        df,
+        fecha_simulacion,
+        poisson_kwargs={
+            "years_window": ventana,
+            "prior_matches": prior_matches,
+            "min_history_matches": 5,
+            "recency_half_life_days": recency_half_life_days,
+            "recent_form_matches": 6,
+        },
+    )
+    prediction = predictor.predict_match(
+        equipo_local,
+        equipo_visitante,
+        is_neutral=is_neutral,
+        is_knockout=is_knockout,
+        max_goals=max_goles,
+    )
 
-    lambda_h, lambda_a = engine.predict_xg(equipo_local, equipo_visitante, is_neutral=is_neutral)
-    prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goles)
-
-    recomendaciones = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
-    recomendaciones["EV"] = recomendaciones["EV"].map(lambda value: round(value, 3))
-
-    profile_local = _get_team_profile(engine, equipo_local)
-    profile_visitante = _get_team_profile(engine, equipo_visitante)
+    profile_local = prediction["profile_local"]
+    profile_visitante = prediction["profile_visitante"]
     prediction_supported, support_message = _is_prediction_supported(profile_local, profile_visitante)
     if not prediction_supported:
         raise ValueError(
             f"{support_message} Equipos evaluados: `{equipo_local}` y `{equipo_visitante}`."
         )
 
-    result_summary_chart = _build_result_summary(prob_matrix, equipo_local, equipo_visitante, format_percent=False)
+    prob_matrix = prediction["prob_matrix"]
+    recomendaciones = prediction.get("recommendations", pd.DataFrame())
+    result_summary_chart = prediction.get("result_summary", pd.DataFrame()).copy()
     score_heatmap_df = _build_score_heatmap_df(prob_matrix)
     strength_chart_df = _build_strength_chart_df(
         equipo_local=equipo_local,
@@ -897,8 +892,12 @@ def _run_analysis(
         "prior_matches": prior_matches,
         "recency_half_life_days": recency_half_life_days,
         "max_goles": max_goles,
-        "lambda_h": lambda_h,
-        "lambda_a": lambda_a,
+        "lambda_h": prediction["lambda_h"],
+        "lambda_a": prediction["lambda_a"],
+        "model_version": prediction["model_version"],
+        "model_family": prediction["model_family"],
+        "used_fallback": bool(prediction.get("used_fallback", False)),
+        "fallback_reason": prediction.get("fallback_reason"),
         "matches_local": int(profile_local.get("matches", 0.0)),
         "matches_visitante": int(profile_visitante.get("matches", 0.0)),
         "effective_matches_local": float(profile_local.get("effective_matches", 0.0)),
