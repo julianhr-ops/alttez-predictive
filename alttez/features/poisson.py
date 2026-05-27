@@ -125,7 +125,10 @@ class PoissonEngine:
             lambda_a = stats_a["home_attack"] * stats_b["away_defense"] * self.global_home_avg_goals
             lambda_b = stats_b["away_attack"] * stats_a["home_defense"] * self.global_away_avg_goals
 
-        return float(round(max(lambda_a, 0.05), 2)), float(round(max(lambda_b, 0.05), 2))
+        lambda_a *= self._recent_form_factor(stats_a, stats_b)
+        lambda_b *= self._recent_form_factor(stats_b, stats_a)
+
+        return float(max(lambda_a, 0.05)), float(max(lambda_b, 0.05))
 
     def get_team_profile(self, team: str) -> Dict[str, float]:
         """Expone el perfil de un equipo sin depender de metodos privados."""
@@ -183,9 +186,19 @@ class PoissonEngine:
         if raw_matches <= 0:
             return 0.0
 
-        maturity = min(raw_matches / max(self.min_history_matches * 2, 1), 1.0)
-        recency_support = min(weighted_matches / max(self.min_history_matches, 1), 1.0)
+        maturity = min(raw_matches / max(self.min_history_matches * 4, 1), 1.0)
+        recency_support = min(weighted_matches / max(self.min_history_matches * 3, 1), 1.0)
         return 0.5 * maturity + 0.5 * recency_support
+
+    def _recent_form_factor(self, team_stats: Dict[str, float], opponent_stats: Dict[str, float]) -> float:
+        points_delta = (team_stats.get("recent_points_per_match", 0.0) - opponent_stats.get("recent_points_per_match", 0.0)) / 3.0
+        goal_delta = (team_stats.get("recent_goal_diff_per_match", 0.0) - opponent_stats.get("recent_goal_diff_per_match", 0.0)) / 2.0
+        confidence_weight = min(
+            (team_stats.get("confidence", 0.0) + opponent_stats.get("confidence", 0.0)) / 2.0,
+            1.0,
+        )
+        adjustment = 1.0 + confidence_weight * ((0.12 * points_delta) + (0.08 * goal_delta))
+        return max(0.82, min(1.18, adjustment))
 
     def _resolve_stats(self, team: str) -> Dict[str, float]:
         stats = self.team_stats.get(team)
