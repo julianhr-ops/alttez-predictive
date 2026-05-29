@@ -9,11 +9,13 @@ venv/
 artifacts/
 !artifacts/.gitkeep
 screenshots/
+.omc/
 
 storage/network/statsbomb-open-data/
 storage/network/statsbomb-open-data-archive/
 storage/network/open-data-master/
 storage/network/*.csv
+storage/network/*.xlsx
 
 .DS_Store
 Thumbs.db
