@@ -19,3 +19,5 @@ storage/network/*.xlsx
 
 .DS_Store
 Thumbs.db
+
+.agents/
