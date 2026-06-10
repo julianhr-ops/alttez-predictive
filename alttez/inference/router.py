@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date
@@ -11,8 +12,16 @@ import numpy as np
 import pandas as pd
 
 from alttez.dashboard.analysis_helpers import support_level
-from alttez.experiments.tournament_oracle import build_probability_matrix, optimize_prediction
-from alttez.features.klement import build_klement_feature_state, build_match_feature_payload
+from alttez.experiments.tournament_oracle import (
+    DEFAULT_DIXON_COLES_RHO,
+    build_probability_matrix,
+    optimize_prediction,
+)
+from alttez.features.klement import (
+    MODEL_FEATURE_COLUMNS,
+    build_klement_feature_state,
+    build_match_feature_payload,
+)
 from alttez.features.poisson import PoissonEngine
 
 
@@ -27,29 +36,8 @@ DEFAULT_POISSON_KWARGS = {
     "recency_half_life_days": 365,
     "recent_form_matches": 6,
 }
-XGBOOST_FEATURE_COLUMNS = [
-    "elo_difference",
-    "elo_home_before",
-    "elo_away_before",
-    "is_neutral",
-    "home_recent_points",
-    "away_recent_points",
-    "home_recent_goal_diff",
-    "away_recent_goal_diff",
-    "gdp_per_capita_home",
-    "gdp_per_capita_away",
-    "gdp_per_capita_diff",
-    "home_elo_delta_30",
-    "away_elo_delta_30",
-    "elo_delta_diff_30",
-    "home_historical_knockout_weight",
-    "away_historical_knockout_weight",
-    "knockout_weight_diff",
-    "home_continent_advantage",
-    "away_continent_advantage",
-    "continent_advantage_diff",
-    "is_knockout",
-]
+# Single source of truth lives in alttez.features.klement; aliased for compatibility.
+XGBOOST_FEATURE_COLUMNS = MODEL_FEATURE_COLUMNS
 DEFAULT_MAX_GOALS = 7
 
 
@@ -125,16 +113,30 @@ def _numeric_result_summary(prob_matrix: np.ndarray, team_a: str, team_b: str) -
     )
 
 
+def _support_threshold() -> int:
+    raw = os.getenv("ALTTEZ_MIN_SUPPORTED_MATCHES", "5").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 5
+
+
 def _is_prediction_supported(profile_local: dict[str, float], profile_visitante: dict[str, float]) -> tuple[bool, str | None]:
     local_matches = float(profile_local.get("matches", 0.0))
     away_matches = float(profile_visitante.get("matches", 0.0))
     local_effective = float(profile_local.get("effective_matches", 0.0))
     away_effective = float(profile_visitante.get("effective_matches", 0.0))
+    threshold = _support_threshold()
+    if threshold <= 0:
+        return True, None  # gating disabled
 
-    if local_matches <= 0 and away_matches <= 0:
-        return False, "Sin historial compatible para ambos equipos."
-    if local_effective <= 0 and away_effective <= 0:
-        return False, "Sin soporte estadistico efectivo para ambos equipos."
+    # Stricter gating: BOTH teams must clear the minimum history and have effective
+    # (recency-weighted) support. This drops matchups that would only produce noise
+    # instead of letting a single well-covered team carry an unsupported prediction.
+    if min(local_matches, away_matches) < threshold:
+        return False, f"Historial insuficiente: se requieren >= {threshold} partidos por equipo."
+    if min(local_effective, away_effective) <= 0:
+        return False, "Sin soporte estadistico efectivo reciente para ambos equipos."
     return True, None
 
 
@@ -248,7 +250,7 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             }
 
         lambda_h, lambda_a = self.engine.predict_xg(home_team, away_team, is_neutral=is_neutral)
-        prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals)
+        prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=DEFAULT_DIXON_COLES_RHO)
         recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
         result_summary = _numeric_result_summary(prob_matrix, home_team, away_team)
@@ -307,7 +309,9 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             raise FileNotFoundError(f"No existe el artefacto XGBoost activo: {artifact_path}")
 
         artifact = joblib.load(artifact_path)
-        self.model = artifact["model"]
+        self.artifact_schema_version = int(artifact.get("artifact_schema_version") or 1)
+        self.model = artifact.get("model")
+        self.models = dict(artifact.get("models") or {})
         self.feature_columns = list(artifact.get("feature_columns") or XGBOOST_FEATURE_COLUMNS)
         self.label_order = list(artifact.get("label_order") or ["H", "D", "A"])
         self.model_version = str(artifact.get("model_version") or selection.model_version)
@@ -381,24 +385,49 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             return baseline
 
         feature_df = self._feature_frame(home_team, away_team, is_neutral, is_knockout, tournament_context)
-        probabilities = self.model.predict_proba(feature_df)[0]
-        probability_map = {label: float(probabilities[idx]) for idx, label in enumerate(self.label_order)}
-        probability_map.setdefault("H", 0.0)
-        probability_map.setdefault("D", 0.0)
-        probability_map.setdefault("A", 0.0)
+        if self.artifact_schema_version >= 2 and self.models:
+            lambda_h = max(float(self.models["home_goals"].predict(feature_df)[0]), 0.05)
+            lambda_a = max(float(self.models["away_goals"].predict(feature_df)[0]), 0.05)
+            prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=DEFAULT_DIXON_COLES_RHO)
+            recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
+            recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
+            result_summary = _numeric_result_summary(prob_matrix, home_team, away_team)
+            result_probabilities = {
+                row["Mercado"]: float(row["Probabilidad"])
+                for row in result_summary.to_dict(orient="records")
+            }
+            market_rows = result_summary.to_dict(orient="records")
+            primary_row = recommendations.iloc[0].to_dict() if not recommendations.empty else {"Pronostico": "N/D", "EV": None}
+            baseline["lambda_h"] = float(lambda_h)
+            baseline["lambda_a"] = float(lambda_a)
+            baseline["prob_matrix"] = prob_matrix
+            baseline["prob_home"] = result_probabilities.get(f"Victoria {home_team}")
+            baseline["prob_draw"] = result_probabilities.get("Empate")
+            baseline["prob_away"] = result_probabilities.get(f"Victoria {away_team}")
+            baseline["result_summary"] = result_summary
+            baseline["recommendations"] = recommendations
+            baseline["primary_score"] = str(primary_row.get("Pronostico") or "N/D")
+            baseline["primary_ev"] = primary_row.get("EV")
+        else:
+            probabilities = self.model.predict_proba(feature_df)[0]
+            probability_map = {label: float(probabilities[idx]) for idx, label in enumerate(self.label_order)}
+            probability_map.setdefault("H", 0.0)
+            probability_map.setdefault("D", 0.0)
+            probability_map.setdefault("A", 0.0)
+            market_rows = [
+                {"Mercado": f"Victoria {home_team}", "Probabilidad": probability_map["H"]},
+                {"Mercado": "Empate", "Probabilidad": probability_map["D"]},
+                {"Mercado": f"Victoria {away_team}", "Probabilidad": probability_map["A"]},
+            ]
+            baseline["prob_home"] = probability_map["H"]
+            baseline["prob_draw"] = probability_map["D"]
+            baseline["prob_away"] = probability_map["A"]
+            baseline["result_summary"] = pd.DataFrame(market_rows)
 
-        market_rows = [
-            {"Mercado": f"Victoria {home_team}", "Probabilidad": probability_map["H"]},
-            {"Mercado": "Empate", "Probabilidad": probability_map["D"]},
-            {"Mercado": f"Victoria {away_team}", "Probabilidad": probability_map["A"]},
-        ]
         best_market = max(market_rows, key=lambda row: float(row["Probabilidad"]))
-        baseline["prob_home"] = probability_map["H"]
-        baseline["prob_draw"] = probability_map["D"]
-        baseline["prob_away"] = probability_map["A"]
-        baseline["result_summary"] = pd.DataFrame(market_rows)
         baseline["best_market"] = str(best_market["Mercado"])
         baseline["best_market_probability"] = float(best_market["Probabilidad"])
+        baseline["artifact_schema_version"] = self.artifact_schema_version
         baseline["xgboost_feature_payload"] = feature_df.iloc[0].to_dict()
         return baseline
 

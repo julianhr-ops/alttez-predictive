@@ -10,13 +10,18 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, log_loss
-from xgboost import XGBClassifier
+from sklearn.metrics import log_loss
+from xgboost import XGBRegressor
 
 from alttez.api.db import get_engine
-from alttez.features.klement import build_klement_feature_state, load_enriched_historical_matches
+from alttez.experiments.tournament_oracle import DEFAULT_DIXON_COLES_RHO, build_probability_matrix
+from alttez.features.klement import (
+    MODEL_FEATURE_COLUMNS,
+    build_klement_feature_state,
+    load_enriched_historical_matches,
+)
 from alttez.features.poisson import PoissonEngine
-from alttez.experiments.tournament_oracle import build_probability_matrix
+from alttez.features.selection import snap_split_index
 from alttez.operations.prediction_memory import (
     auto_promotion_enabled,
     brier_score_1x2,
@@ -33,32 +38,13 @@ logging.basicConfig(level=logging.INFO)
 
 
 DEFAULT_REPORT_DIR = Path("artifacts/model-evals")
-DEFAULT_CHALLENGER_VERSION = "xgboost-challenger-v1"
+DEFAULT_CHALLENGER_VERSION = "xgboost-challenger-v2"
 DEFAULT_EVALUATION_MATCHES = 250
 DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE = 0.01
-FEATURE_COLUMNS = [
-    "elo_difference",
-    "elo_home_before",
-    "elo_away_before",
-    "is_neutral",
-    "home_recent_points",
-    "away_recent_points",
-    "home_recent_goal_diff",
-    "away_recent_goal_diff",
-    "gdp_per_capita_home",
-    "gdp_per_capita_away",
-    "gdp_per_capita_diff",
-    "home_elo_delta_30",
-    "away_elo_delta_30",
-    "elo_delta_diff_30",
-    "home_historical_knockout_weight",
-    "away_historical_knockout_weight",
-    "knockout_weight_diff",
-    "home_continent_advantage",
-    "away_continent_advantage",
-    "continent_advantage_diff",
-    "is_knockout",
-]
+DEFAULT_CHAMPION_REFIT_INTERVAL = 25
+DEFAULT_MAX_GOALS = 7
+# Single source of truth lives in alttez.features.klement; aliased for compatibility.
+FEATURE_COLUMNS = MODEL_FEATURE_COLUMNS
 
 
 def _outcome_label(home_score: int, away_score: int) -> str:
@@ -120,111 +106,280 @@ def _build_challenger_dataset(df: pd.DataFrame, *, database_url: str | None = No
     return feature_df
 
 
-def _evaluate_poisson_champion(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> dict[str, Any]:
-    engine = PoissonEngine(
-        years_window=4,
-        prior_matches=8,
-        min_history_matches=5,
-        recency_half_life_days=365,
-        recent_form_matches=6,
-    )
-    cutoff = pd.to_datetime(holdout_df.iloc[0]["date"]).date().isoformat()
-    engine.fit(train_df, target_date=cutoff)
+def _score_prediction_row(
+    *,
+    prob_matrix: np.ndarray,
+    actual_home_score: int,
+    actual_away_score: int,
+) -> dict[str, Any]:
+    prob_home = float(np.tril(prob_matrix, -1).sum())
+    prob_draw = float(prob_matrix.diagonal().sum())
+    prob_away = float(np.triu(prob_matrix, 1).sum())
+    predicted_outcome = max(
+        (("H", prob_home), ("D", prob_draw), ("A", prob_away)),
+        key=lambda item: item[1],
+    )[0]
+    actual_outcome = _outcome_label(actual_home_score, actual_away_score)
+    max_score = divmod(int(prob_matrix.argmax()), prob_matrix.shape[1])
+    return {
+        "predicted_outcome": predicted_outcome,
+        "actual_outcome": actual_outcome,
+        "brier": brier_score_1x2(prob_home, prob_draw, prob_away, actual_outcome),
+        "prob_home": prob_home,
+        "prob_draw": prob_draw,
+        "prob_away": prob_away,
+        "exact_hit": int(max_score[0] == actual_home_score and max_score[1] == actual_away_score),
+    }
 
-    rows = []
-    for row in holdout_df.itertuples(index=False):
-        lambda_home, lambda_away = engine.predict_xg(row.home_team, row.away_team, is_neutral=bool(row.neutral))
-        prob_matrix = build_probability_matrix(lambda_home, lambda_away, max_goals=7)
-        prob_home = float(np.tril(prob_matrix, -1).sum())
-        prob_draw = float(prob_matrix.diagonal().sum())
-        prob_away = float(np.triu(prob_matrix, 1).sum())
-        predicted_outcome = max(
-            (("H", prob_home), ("D", prob_draw), ("A", prob_away)),
-            key=lambda item: item[1],
-        )[0]
-        actual_outcome = _outcome_label(int(row.home_score), int(row.away_score))
-        max_score = divmod(int(prob_matrix.argmax()), prob_matrix.shape[1])
-        rows.append(
-            {
-                "predicted_outcome": predicted_outcome,
-                "actual_outcome": actual_outcome,
-                "brier": brier_score_1x2(prob_home, prob_draw, prob_away, actual_outcome),
-                "prob_home": prob_home,
-                "prob_draw": prob_draw,
-                "prob_away": prob_away,
-                "exact_hit": int(max_score[0] == int(row.home_score) and max_score[1] == int(row.away_score)),
-            }
-        )
 
+def expected_calibration_error(eval_df: pd.DataFrame, *, n_bins: int = 10) -> float:
+    """Expected Calibration Error sobre la confianza del 1X2 (max prob por fila).
+
+    Mide la brecha entre confianza promedio y acierto real por bin; 0 = perfecta
+    calibracion. Complementa Brier/LogLoss exponiendo el sesgo sistematico de
+    confianza del modelo.
+    """
+
+    if eval_df.empty:
+        return 0.0
+
+    confidence = eval_df[["prob_home", "prob_draw", "prob_away"]].to_numpy().max(axis=1)
+    correct = (eval_df["predicted_outcome"] == eval_df["actual_outcome"]).to_numpy().astype(float)
+    total = len(eval_df)
+
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    for lower, upper in zip(bin_edges[:-1], bin_edges[1:]):
+        in_bin = (confidence > lower) & (confidence <= upper)
+        bin_size = int(in_bin.sum())
+        if bin_size == 0:
+            continue
+        bin_confidence = float(confidence[in_bin].mean())
+        bin_accuracy = float(correct[in_bin].mean())
+        ece += (bin_size / total) * abs(bin_accuracy - bin_confidence)
+    return float(ece)
+
+
+def _summarize_probability_rows(
+    rows: list[dict[str, Any]],
+    *,
+    model_version: str,
+    model_family: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     eval_df = pd.DataFrame(rows)
     probability_matrix = eval_df[["prob_home", "prob_draw", "prob_away"]].to_numpy()
     y_true = eval_df["actual_outcome"].map({"H": 0, "D": 1, "A": 2}).to_numpy()
-    return {
-        "model_version": get_active_model_version(),
-        "model_family": get_active_model_family(),
+    summary = {
+        "model_version": model_version,
+        "model_family": model_family,
         "brier_score": float(eval_df["brier"].mean()),
         "log_loss": float(log_loss(y_true, probability_matrix, labels=[0, 1, 2])),
         "accuracy_1x2": float((eval_df["predicted_outcome"] == eval_df["actual_outcome"]).mean()),
         "exact_score_hit_rate": float(eval_df["exact_hit"].mean()),
+        "expected_calibration_error": expected_calibration_error(eval_df),
     }
+    if extra:
+        summary.update(extra)
+    return summary
 
 
-def _build_feature_matrices(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    label_map = {"H": 0, "D": 1, "A": 2}
-    x_train = train_df[FEATURE_COLUMNS].fillna(0.0)
-    x_holdout = holdout_df[FEATURE_COLUMNS].fillna(0.0)
-    y_train = train_df["outcome_label"].map(label_map)
-    y_holdout = holdout_df["outcome_label"].map(label_map)
-    return x_train, x_holdout, y_train, y_holdout
+def _append_history_row(history_df: pd.DataFrame, row: Any) -> pd.DataFrame:
+    next_row = pd.DataFrame([row._asdict()])
+    return pd.concat([history_df, next_row], ignore_index=True)
 
 
-def _train_challenger(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> tuple[dict[str, Any], dict[str, Any]]:
-    x_train, x_holdout, y_train, y_holdout = _build_feature_matrices(train_df, holdout_df)
-    model = XGBClassifier(
-        objective="multi:softprob",
-        num_class=3,
-        n_estimators=140,
-        learning_rate=0.05,
+def _evaluate_poisson_champion(
+    train_df: pd.DataFrame,
+    holdout_df: pd.DataFrame,
+    *,
+    champion_refit_interval: int = DEFAULT_CHAMPION_REFIT_INTERVAL,
+) -> dict[str, Any]:
+    history_df = train_df.sort_values("date").reset_index(drop=True).copy()
+    ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
+    rows = []
+    refit_count = 0
+    engine: PoissonEngine | None = None
+
+    for index, row in enumerate(ordered_holdout.itertuples(index=False)):
+        if engine is None or index % champion_refit_interval == 0:
+            cutoff = pd.to_datetime(row.date).date().isoformat()
+            engine = PoissonEngine(
+                years_window=4,
+                prior_matches=8,
+                min_history_matches=5,
+                recency_half_life_days=365,
+                recent_form_matches=6,
+            )
+            engine.fit(history_df, target_date=cutoff)
+            refit_count += 1
+
+        lambda_home, lambda_away = engine.predict_xg(row.home_team, row.away_team, is_neutral=bool(row.neutral))
+        prob_matrix = build_probability_matrix(
+            lambda_home, lambda_away, max_goals=DEFAULT_MAX_GOALS, rho=DEFAULT_DIXON_COLES_RHO
+        )
+        rows.append(
+            _score_prediction_row(
+                prob_matrix=prob_matrix,
+                actual_home_score=int(row.home_score),
+                actual_away_score=int(row.away_score),
+            )
+        )
+        history_df = _append_history_row(history_df, row)
+
+    return _summarize_probability_rows(
+        rows,
+        model_version=get_active_model_version(),
+        model_family=get_active_model_family(),
+        extra={"refit_count": refit_count, "champion_refit_interval": champion_refit_interval},
+    )
+
+
+DEFAULT_MIN_EARLY_STOPPING_SAMPLES = 50
+
+
+def _split_training_and_validation(train_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """Carve a strictly disjoint, date-aligned validation tail for early stopping.
+
+    Returns ``(core_train, validation_df)`` when there is enough data to split on a
+    clean date boundary, or ``(ordered, None)`` when the dataset is too small to
+    carve a disjoint validation set (in which case the caller must train without
+    early stopping rather than validating on data the model has already seen).
+    """
+
+    ordered = train_df.sort_values("date").reset_index(drop=True)
+    if len(ordered) < DEFAULT_MIN_EARLY_STOPPING_SAMPLES:
+        return ordered, None
+
+    validation_size = max(10, len(ordered) // 10)
+    validation_size = min(validation_size, len(ordered) - 10)
+    # Snap to a date boundary so the validation set never shares a match-day with
+    # the training core (avoids intra-day leakage into eval_set).
+    split_index = snap_split_index(ordered, len(ordered) - validation_size, "date")
+    if split_index <= 0 or split_index >= len(ordered):
+        return ordered, None
+
+    core_train = ordered.iloc[:split_index].copy()
+    validation_df = ordered.iloc[split_index:].copy()
+    if core_train.empty or validation_df.empty:
+        return ordered, None
+    return core_train, validation_df
+
+
+def _build_goal_regressor(use_early_stopping: bool = True) -> XGBRegressor:
+    params: dict[str, Any] = dict(
+        objective="count:poisson",
+        n_estimators=400,
+        learning_rate=0.03,
         max_depth=4,
-        subsample=0.95,
-        colsample_bytree=0.95,
-        eval_metric="mlogloss",
+        subsample=0.9,
+        colsample_bytree=0.9,
+        eval_metric="poisson-nloglik",
         random_state=0,
         n_jobs=-1,
     )
-    model.fit(x_train, y_train)
-    probabilities = model.predict_proba(x_holdout)
-    predictions = probabilities.argmax(axis=1)
+    if use_early_stopping:
+        # XGBoost raises if early_stopping_rounds is set without an eval_set, so the
+        # flag is only added when a disjoint validation set is available.
+        params["early_stopping_rounds"] = 40
+    return XGBRegressor(**params)
 
-    brier_values = []
-    for index, actual_label in enumerate(y_holdout.to_numpy()):
-        actual_outcome = "H" if actual_label == 0 else "D" if actual_label == 1 else "A"
-        brier_values.append(
-            brier_score_1x2(
-                probabilities[index, 0],
-                probabilities[index, 1],
-                probabilities[index, 2],
-                actual_outcome,
-            )
+
+def _fit_goal_models(train_df: pd.DataFrame) -> dict[str, Any]:
+    train_core, validation_df = _split_training_and_validation(train_df)
+    use_early_stopping = validation_df is not None
+    x_train = train_core[FEATURE_COLUMNS].fillna(0.0)
+
+    home_model = _build_goal_regressor(use_early_stopping=use_early_stopping)
+    away_model = _build_goal_regressor(use_early_stopping=use_early_stopping)
+
+    if use_early_stopping:
+        x_validation = validation_df[FEATURE_COLUMNS].fillna(0.0)
+        home_model.fit(
+            x_train,
+            train_core["home_score"],
+            eval_set=[(x_validation, validation_df["home_score"])],
+            verbose=False,
         )
+        away_model.fit(
+            x_train,
+            train_core["away_score"],
+            eval_set=[(x_validation, validation_df["away_score"])],
+            verbose=False,
+        )
+    else:
+        home_model.fit(x_train, train_core["home_score"], verbose=False)
+        away_model.fit(x_train, train_core["away_score"], verbose=False)
 
-    metrics = {
-        "model_version": DEFAULT_CHALLENGER_VERSION,
-        "model_family": "xgboost",
-        "brier_score": float(sum(brier_values) / len(brier_values)),
-        "log_loss": float(log_loss(y_holdout, probabilities, labels=[0, 1, 2])),
-        "accuracy_1x2": float(accuracy_score(y_holdout, predictions)),
-        "exact_score_hit_rate": None,
+    return {
+        "home_goals": home_model,
+        "away_goals": away_model,
+        "best_iteration": {
+            "home_goals": int(getattr(home_model, "best_iteration", home_model.n_estimators - 1)),
+            "away_goals": int(getattr(away_model, "best_iteration", away_model.n_estimators - 1)),
+        },
+        "validation_samples": int(len(validation_df)) if validation_df is not None else 0,
+        "train_samples": int(len(train_core)),
     }
+
+
+def _train_challenger(train_df: pd.DataFrame) -> dict[str, Any]:
+    fitted_models = _fit_goal_models(train_df)
     artifact_bundle = {
-        "model": model,
+        "artifact_schema_version": 2,
+        "models": {
+            "home_goals": fitted_models["home_goals"],
+            "away_goals": fitted_models["away_goals"],
+        },
         "feature_columns": FEATURE_COLUMNS,
-        "label_order": ["H", "D", "A"],
         "model_version": DEFAULT_CHALLENGER_VERSION,
         "model_family": "xgboost",
         "trained_at": datetime.now(timezone.utc).isoformat(),
+        "best_iteration": fitted_models["best_iteration"],
+        "train_samples": fitted_models["train_samples"],
+        "validation_samples": fitted_models["validation_samples"],
     }
-    return metrics, artifact_bundle
+    return artifact_bundle
+
+
+def _evaluate_challenger(
+    artifact_bundle: dict[str, Any],
+    holdout_df: pd.DataFrame,
+) -> dict[str, Any]:
+    # Holdout features in challenger_df are already causal (each row's elo_*_before,
+    # recent form and knockout weight only depend on earlier matches), so we can score
+    # the whole window in a single vectorized pass instead of rebuilding the feature
+    # state per match. The lambda values are identical to a per-row rebuild.
+    ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
+    feature_columns = list(artifact_bundle.get("feature_columns") or FEATURE_COLUMNS)
+    x_holdout = ordered_holdout[feature_columns].fillna(0.0)
+
+    models = artifact_bundle["models"]
+    lambdas_home = np.maximum(np.asarray(models["home_goals"].predict(x_holdout), dtype=float), 0.05)
+    lambdas_away = np.maximum(np.asarray(models["away_goals"].predict(x_holdout), dtype=float), 0.05)
+
+    rows = []
+    for index, row in enumerate(ordered_holdout.itertuples(index=False)):
+        prob_matrix = build_probability_matrix(
+            float(lambdas_home[index]),
+            float(lambdas_away[index]),
+            max_goals=DEFAULT_MAX_GOALS,
+            rho=DEFAULT_DIXON_COLES_RHO,
+        )
+        rows.append(
+            _score_prediction_row(
+                prob_matrix=prob_matrix,
+                actual_home_score=int(row.home_score),
+                actual_away_score=int(row.away_score),
+            )
+        )
+
+    return _summarize_probability_rows(
+        rows,
+        model_version=artifact_bundle["model_version"],
+        model_family=artifact_bundle["model_family"],
+        extra={"best_iteration": artifact_bundle.get("best_iteration")},
+    )
 
 
 def _promotion_decision(champion_metrics: dict[str, Any], challenger_metrics: dict[str, Any]) -> tuple[bool, str]:
@@ -276,15 +431,25 @@ def run_challenger_cycle(
     database_url: str | None = None,
     report_dir: str | Path = DEFAULT_REPORT_DIR,
     evaluation_matches: int = DEFAULT_EVALUATION_MATCHES,
+    champion_refit_interval: int = DEFAULT_CHAMPION_REFIT_INTERVAL,
 ) -> dict[str, Any]:
     historical_df = load_enriched_historical_matches(database_url=database_url).sort_values("date").reset_index(drop=True)
     challenger_df = _build_challenger_dataset(historical_df, database_url=database_url)
+    challenger_df = challenger_df.sort_values("date").reset_index(drop=True)
     eval_size = min(evaluation_matches, max(60, len(challenger_df) // 20))
-    train_df = challenger_df.iloc[:-eval_size].copy()
-    holdout_df = challenger_df.iloc[-eval_size:].copy()
+    # Snap the split to a date boundary so a single match-day never straddles train/holdout.
+    split_index = snap_split_index(challenger_df, len(challenger_df) - eval_size, "date")
+    split_index = min(max(split_index, 1), len(challenger_df) - 1)
+    train_df = challenger_df.iloc[:split_index].copy()
+    holdout_df = challenger_df.iloc[split_index:].copy()
 
-    champion_metrics = _evaluate_poisson_champion(train_df, holdout_df)
-    challenger_metrics, challenger_artifact = _train_challenger(train_df, holdout_df)
+    champion_metrics = _evaluate_poisson_champion(
+        train_df,
+        holdout_df,
+        champion_refit_interval=champion_refit_interval,
+    )
+    challenger_artifact = _train_challenger(train_df)
+    challenger_metrics = _evaluate_challenger(challenger_artifact, holdout_df)
     promote, promotion_reason = _promotion_decision(champion_metrics, challenger_metrics)
     production_status, activation_mode, governance_reason = _governance_decision(
         promote=promote,

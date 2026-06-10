@@ -6,6 +6,12 @@ from alttez.features.poisson import PoissonEngine
 from alttez.ingestion.international import InternationalLoader
 
 
+# Typical Dixon-Coles low-score dependence parameter. Negative rho lifts the
+# probability of draws and low-scoring lines that the independent Poisson product
+# systematically underestimates.
+DEFAULT_DIXON_COLES_RHO = -0.13
+
+
 def calcular_puntos(pred_h: int, pred_a: int, real_h: int, real_a: int, is_knockout: bool = False) -> int:
     """Aplica el reglamento del torneo."""
 
@@ -24,8 +30,28 @@ def calcular_puntos(pred_h: int, pred_a: int, real_h: int, real_a: int, is_knock
     return pts
 
 
-def build_probability_matrix(lambda_home: float, lambda_away: float, max_goals: int = 7) -> np.ndarray:
-    """Construye y normaliza la matriz de probabilidad de marcadores."""
+def _apply_dixon_coles(prob_matrix: np.ndarray, lambda_home: float, lambda_away: float, rho: float) -> None:
+    """Aplica in-place la correccion Dixon-Coles a las 4 celdas de marcador bajo."""
+
+    prob_matrix[0, 0] *= 1.0 - lambda_home * lambda_away * rho
+    prob_matrix[0, 1] *= 1.0 + lambda_home * rho
+    prob_matrix[1, 0] *= 1.0 + lambda_away * rho
+    prob_matrix[1, 1] *= 1.0 - rho
+    np.clip(prob_matrix, 0.0, None, out=prob_matrix)
+
+
+def build_probability_matrix(
+    lambda_home: float,
+    lambda_away: float,
+    max_goals: int = 7,
+    rho: float = 0.0,
+) -> np.ndarray:
+    """Construye y normaliza la matriz de probabilidad de marcadores.
+
+    Si ``rho != 0`` aplica la correccion Dixon-Coles a las celdas de marcador bajo
+    (0-0, 0-1, 1-0, 1-1) antes de normalizar, corrigiendo la subestimacion de
+    empates propia del producto Poisson independiente.
+    """
 
     prob_matrix = np.zeros((max_goals + 1, max_goals + 1))
     for home_goals in range(max_goals + 1):
@@ -33,6 +59,9 @@ def build_probability_matrix(lambda_home: float, lambda_away: float, max_goals: 
             prob_matrix[home_goals, away_goals] = (
                 poisson.pmf(home_goals, lambda_home) * poisson.pmf(away_goals, lambda_away)
             )
+
+    if rho != 0.0:
+        _apply_dixon_coles(prob_matrix, lambda_home, lambda_away, rho)
 
     matrix_sum = prob_matrix.sum()
     if matrix_sum <= 0:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -7,12 +8,46 @@ from unittest.mock import patch
 import joblib
 import pandas as pd
 
-from alttez.inference.router import build_active_predictor
+from alttez.features.klement import MODEL_FEATURE_COLUMNS
+from alttez.inference.router import XGBOOST_FEATURE_COLUMNS, _is_prediction_supported, build_active_predictor
+from alttez.training.challenger_cycle import FEATURE_COLUMNS as CHALLENGER_FEATURE_COLUMNS
+
+
+class TestFeatureColumnContract(unittest.TestCase):
+    def test_single_source_of_feature_columns(self) -> None:
+        # Trainer and router must share the exact same object so they cannot drift.
+        self.assertIs(CHALLENGER_FEATURE_COLUMNS, MODEL_FEATURE_COLUMNS)
+        self.assertIs(XGBOOST_FEATURE_COLUMNS, MODEL_FEATURE_COLUMNS)
+
+
+class TestPredictionGating(unittest.TestCase):
+    def test_requires_both_teams_to_clear_support_threshold(self) -> None:
+        strong = {"matches": 10.0, "effective_matches": 8.0}
+        weak = {"matches": 2.0, "effective_matches": 1.0}
+        with patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "5"}):
+            # One weak team is no longer carried by the strong one.
+            self.assertFalse(_is_prediction_supported(strong, weak)[0])
+            self.assertFalse(_is_prediction_supported(weak, strong)[0])
+            self.assertTrue(_is_prediction_supported(strong, strong)[0])
+
+    def test_zero_effective_support_is_rejected(self) -> None:
+        no_recent = {"matches": 20.0, "effective_matches": 0.0}
+        ok = {"matches": 20.0, "effective_matches": 5.0}
+        with patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "5"}):
+            self.assertFalse(_is_prediction_supported(ok, no_recent)[0])
 
 
 class DummyProbabilityModel:
     def predict_proba(self, frame: pd.DataFrame):
         return [[0.58, 0.19, 0.23] for _ in range(len(frame))]
+
+
+class DummyGoalModel:
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def predict(self, frame: pd.DataFrame):
+        return [self.value for _ in range(len(frame))]
 
 
 def _historical_df() -> pd.DataFrame:
@@ -54,13 +89,17 @@ class TestInferenceRouter(unittest.TestCase):
             places=3,
         )
 
-    def test_build_active_predictor_loads_xgboost_artifact_when_available(self) -> None:
+    def test_build_active_predictor_loads_schema_v2_xgboost_artifact_when_available(self) -> None:
         artifact_dir = Path("artifacts/test-router")
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_path = artifact_dir / "xgboost-active.joblib"
         joblib.dump(
             {
-                "model": DummyProbabilityModel(),
+                "artifact_schema_version": 2,
+                "models": {
+                    "home_goals": DummyGoalModel(1.8),
+                    "away_goals": DummyGoalModel(0.9),
+                },
                 "feature_columns": [
                     "elo_difference",
                     "elo_home_before",
@@ -70,13 +109,11 @@ class TestInferenceRouter(unittest.TestCase):
                     "away_recent_points",
                     "home_recent_goal_diff",
                     "away_recent_goal_diff",
-                    "gdp_per_capita_diff",
                     "home_continent_advantage",
                     "away_continent_advantage",
                     "continent_advantage_diff",
                     "is_knockout",
                 ],
-                "label_order": ["H", "D", "A"],
                 "model_version": "xgboost-active-v1",
                 "model_family": "xgboost",
             },
@@ -96,8 +133,14 @@ class TestInferenceRouter(unittest.TestCase):
         self.assertEqual(predictor.model_family, "xgboost")
         self.assertFalse(predictor.used_fallback)
         self.assertEqual(prediction["model_version"], "xgboost-active-v1")
-        self.assertAlmostEqual(float(prediction["prob_home"]), 0.58, places=2)
-        self.assertEqual(prediction["best_market"], "Victoria Mexico")
+        self.assertEqual(prediction["artifact_schema_version"], 2)
+        self.assertGreater(float(prediction["lambda_h"]), float(prediction["lambda_a"]))
+        self.assertAlmostEqual(
+            float(prediction["prob_home"] or 0.0) + float(prediction["prob_draw"] or 0.0) + float(prediction["prob_away"] or 0.0),
+            1.0,
+            places=6,
+        )
+        self.assertEqual(prediction["prob_matrix"].shape, (8, 8))
 
     def test_xgboost_feature_payload_includes_klement_context(self) -> None:
         artifact_dir = Path("artifacts/test-router")
@@ -105,15 +148,17 @@ class TestInferenceRouter(unittest.TestCase):
         artifact_path = artifact_dir / "xgboost-klement.joblib"
         joblib.dump(
             {
-                "model": DummyProbabilityModel(),
+                "artifact_schema_version": 2,
+                "models": {
+                    "home_goals": DummyGoalModel(1.4),
+                    "away_goals": DummyGoalModel(0.6),
+                },
                 "feature_columns": [
-                    "gdp_per_capita_diff",
                     "home_continent_advantage",
                     "away_continent_advantage",
                     "continent_advantage_diff",
                     "is_knockout",
                 ],
-                "label_order": ["H", "D", "A"],
                 "model_version": "xgboost-klement-v1",
                 "model_family": "xgboost",
             },
@@ -133,6 +178,7 @@ class TestInferenceRouter(unittest.TestCase):
         with (
             patch("alttez.inference.router._load_active_model_record_safe", return_value=active_record),
             patch("alttez.features.klement.load_team_macro_context", return_value=macro_context),
+            patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}),
         ):
             predictor = build_active_predictor(_historical_df(), "2026-05-27")
             prediction = predictor.predict_match(
@@ -148,7 +194,7 @@ class TestInferenceRouter(unittest.TestCase):
         self.assertEqual(payload["home_continent_advantage"], 1.0)
         self.assertEqual(payload["away_continent_advantage"], 0.0)
         self.assertEqual(payload["continent_advantage_diff"], 1.0)
-        self.assertEqual(payload["gdp_per_capita_diff"], -38000.0)
+        self.assertNotIn("gdp_per_capita_diff", payload)
 
 
 if __name__ == "__main__":

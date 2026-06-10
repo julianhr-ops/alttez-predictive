@@ -55,6 +55,7 @@ class ClassificationModel(ABC):
         self._classifier = None
 
         self._precision = 3
+        self._calibration_threshold = 2000
 
     @property
     def league_id(self) -> str:
@@ -151,7 +152,8 @@ class ClassificationModel(ABC):
         clf = self.build_classifier(input_size=x.shape[1], num_classes=np.unique(y).shape[0])
 
         if self._calibrate_probabilities:
-            clf = CalibratedClassifierCV(estimator=clf, method='isotonic', n_jobs=-1)
+            calibration_method = 'isotonic' if x.shape[0] >= self._calibration_threshold else 'sigmoid'
+            clf = CalibratedClassifierCV(estimator=clf, method=calibration_method, n_jobs=-1)
 
         self._classifier = clf
         self._classifier.fit(x, y)
@@ -211,13 +213,16 @@ class ClassificationModel(ABC):
 
     def _evaluate_classifier(self, train_df: pd.DataFrame, eval_df: pd.DataFrame) -> pd.DataFrame:
         """ Evaluate classifier on train/eval sets."""
+        if eval_df is not None:
+            eval_metrics_df = self.evaluate(df=eval_df)
+            eval_metrics_df['data'] = 'eval'
+        else:
+            eval_metrics_df = pd.DataFrame()
 
         metrics_df = self.evaluate(df=train_df)
         metrics_df['data'] = 'train'
 
-        if eval_df is not None:
-            eval_metrics_df = self.evaluate(df=eval_df)
-            eval_metrics_df['data'] = 'eval'
-            metrics_df = pd.concat([metrics_df, eval_metrics_df], ignore_index=True, axis=0)
+        if not eval_metrics_df.empty:
+            metrics_df = pd.concat([eval_metrics_df, metrics_df], ignore_index=True, axis=0)
 
         return metrics_df

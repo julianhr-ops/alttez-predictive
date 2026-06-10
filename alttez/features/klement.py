@@ -14,8 +14,58 @@ from alttez.ingestion.seed_historical import normalize_name
 
 
 WORLD_CUP_2026_NAME = "FIFA World Cup 2026"
-WORLD_CUP_2026_CONFEDERATIONS = {"concacaf", "conmebol"}
 KNOCKOUT_COMPETITION_CLASSES = {"world_cup", "continental"}
+# Single source of truth for the model feature contract. Both the challenger
+# trainer and the inference router import this so the two cannot drift apart.
+MODEL_FEATURE_COLUMNS = [
+    "elo_difference",
+    "elo_home_before",
+    "elo_away_before",
+    "is_neutral",
+    "home_recent_points",
+    "away_recent_points",
+    "home_recent_goal_diff",
+    "away_recent_goal_diff",
+    "home_elo_delta_30",
+    "away_elo_delta_30",
+    "elo_delta_diff_30",
+    "home_historical_knockout_weight",
+    "away_historical_knockout_weight",
+    "knockout_weight_diff",
+    "home_continent_advantage",
+    "away_continent_advantage",
+    "continent_advantage_diff",
+    "is_knockout",
+]
+TOURNAMENT_HOST_CONFEDERATIONS = {
+    normalize_name("FIFA World Cup"): {
+        "1962": {"conmebol"},
+        "1970": {"concacaf"},
+        "1978": {"conmebol"},
+        "1986": {"concacaf"},
+        "1994": {"concacaf"},
+        "2026": {"concacaf"},
+    },
+    normalize_name(WORLD_CUP_2026_NAME): {
+        "2026": {"concacaf"},
+        "*": {"concacaf"},
+    },
+    normalize_name("Copa America"): {
+        "*": {"conmebol"},
+    },
+    normalize_name("UEFA Euro"): {
+        "*": {"uefa"},
+    },
+    normalize_name("Concacaf Gold Cup"): {
+        "*": {"concacaf"},
+    },
+    normalize_name("AFC Asian Cup"): {
+        "*": {"afc"},
+    },
+    normalize_name("Africa Cup of Nations"): {
+        "*": {"caf"},
+    },
+}
 
 
 @dataclass(slots=True)
@@ -106,16 +156,34 @@ def _resolve_tournament_name(context: dict[str, Any] | None, fallback_tournament
     return str(context.get("tournament") or fallback_tournament or "")
 
 
-def is_world_cup_2026_context(
+def _resolve_tournament_edition(
+    context: dict[str, Any] | None = None,
+    fallback_edition: str | None = None,
+) -> str:
+    if context:
+        edition = context.get("edition")
+        if edition is not None and str(edition).strip():
+            return str(edition).strip()
+    return str(fallback_edition or "").strip()
+
+
+def _host_confederations_for_context(
     tournament_context: dict[str, Any] | None = None,
     fallback_tournament: str | None = None,
-) -> bool:
+    fallback_edition: str | None = None,
+) -> set[str]:
     tournament_name = _resolve_tournament_name(tournament_context, fallback_tournament)
-    normalized = normalize_name(tournament_name) if tournament_name else ""
-    edition = tournament_context.get("edition") if tournament_context else None
-    if normalized == normalize_name(WORLD_CUP_2026_NAME):
-        return True
-    return "world cup 2026" in normalized and str(edition or "").strip() in {"", "2026"}
+    normalized_tournament = normalize_name(tournament_name) if tournament_name else ""
+    edition = _resolve_tournament_edition(tournament_context, fallback_edition)
+    host_mapping = TOURNAMENT_HOST_CONFEDERATIONS.get(normalized_tournament)
+    if not host_mapping:
+        return set()
+
+    if edition and edition in host_mapping:
+        return set(host_mapping[edition])
+    if "*" in host_mapping:
+        return set(host_mapping["*"])
+    return set()
 
 
 def compute_continent_advantage_flags(
@@ -124,12 +192,18 @@ def compute_continent_advantage_flags(
     *,
     tournament_context: dict[str, Any] | None = None,
     fallback_tournament: str | None = None,
+    fallback_edition: str | None = None,
 ) -> tuple[float, float, float]:
-    if not is_world_cup_2026_context(tournament_context=tournament_context, fallback_tournament=fallback_tournament):
+    host_confederations = _host_confederations_for_context(
+        tournament_context=tournament_context,
+        fallback_tournament=fallback_tournament,
+        fallback_edition=fallback_edition,
+    )
+    if not host_confederations:
         return 0.0, 0.0, 0.0
 
-    home_flag = 1.0 if str(home_confederation or "").strip().lower() in WORLD_CUP_2026_CONFEDERATIONS else 0.0
-    away_flag = 1.0 if str(away_confederation or "").strip().lower() in WORLD_CUP_2026_CONFEDERATIONS else 0.0
+    home_flag = 1.0 if str(home_confederation or "").strip().lower() in host_confederations else 0.0
+    away_flag = 1.0 if str(away_confederation or "").strip().lower() in host_confederations else 0.0
     return home_flag, away_flag, home_flag - away_flag
 
 
@@ -211,6 +285,7 @@ def build_klement_feature_state(
     historical_df: pd.DataFrame,
     *,
     database_url: str | None = None,
+    macro_context: dict[str, dict[str, Any]] | None = None,
     elo_window_days: int = 30,
     knockout_window_years: int = 20,
 ) -> tuple[pd.DataFrame, KlementFeatureState]:
@@ -239,7 +314,8 @@ def build_klement_feature_state(
     if "season_label" not in working_df.columns:
         working_df["season_label"] = working_df["date"].dt.year.astype(str)
 
-    macro_context = load_team_macro_context(database_url=database_url)
+    if macro_context is None:
+        macro_context = load_team_macro_context(database_url=database_url)
     elo_engine = EloEngine()
     ratings: dict[str, float] = {}
     post_match_history: dict[str, list[tuple[pd.Timestamp, float]]] = defaultdict(list)
@@ -253,8 +329,6 @@ def build_klement_feature_state(
     away_elo_delta_30: list[float] = []
     home_knockout_weight: list[float] = []
     away_knockout_weight: list[float] = []
-    home_gdp_values: list[float] = []
-    away_gdp_values: list[float] = []
     home_confederations: list[str] = []
     away_confederations: list[str] = []
     is_knockout_values: list[int] = []
@@ -287,8 +361,6 @@ def build_klement_feature_state(
 
         home_macro = macro_context.get(normalize_name(home_team), {})
         away_macro = macro_context.get(normalize_name(away_team), {})
-        home_gdp_values.append(float(home_macro.get("gdp_per_capita", 0.0) or 0.0))
-        away_gdp_values.append(float(away_macro.get("gdp_per_capita", 0.0) or 0.0))
         home_confederations.append(str(home_macro.get("confederation_code") or "").strip().upper())
         away_confederations.append(str(away_macro.get("confederation_code") or "").strip().upper())
 
@@ -330,9 +402,6 @@ def build_klement_feature_state(
     working_df["knockout_weight_diff"] = (
         working_df["home_historical_knockout_weight"] - working_df["away_historical_knockout_weight"]
     )
-    working_df["gdp_per_capita_home"] = home_gdp_values
-    working_df["gdp_per_capita_away"] = away_gdp_values
-    working_df["gdp_per_capita_diff"] = working_df["gdp_per_capita_home"] - working_df["gdp_per_capita_away"]
     working_df["home_confederation_code"] = home_confederations
     working_df["away_confederation_code"] = away_confederations
     working_df["is_knockout"] = is_knockout_values
@@ -344,7 +413,12 @@ def build_klement_feature_state(
         home_value, away_value, diff_value = compute_continent_advantage_flags(
             getattr(row, "home_confederation_code", None),
             getattr(row, "away_confederation_code", None),
+            tournament_context={
+                "tournament": getattr(row, "tournament", None),
+                "edition": getattr(row, "season_label", None),
+            },
             fallback_tournament=getattr(row, "tournament", None),
+            fallback_edition=getattr(row, "season_label", None),
         )
         continent_home_values.append(home_value)
         continent_away_values.append(away_value)
@@ -413,10 +487,6 @@ def build_match_feature_payload(
         "away_recent_points": float(away_form.get("recent_points_per_match", 0.0)),
         "home_recent_goal_diff": float(home_form.get("recent_goal_diff_per_match", 0.0)),
         "away_recent_goal_diff": float(away_form.get("recent_goal_diff_per_match", 0.0)),
-        "gdp_per_capita_home": float(home_macro.get("gdp_per_capita", 0.0) or 0.0),
-        "gdp_per_capita_away": float(away_macro.get("gdp_per_capita", 0.0) or 0.0),
-        "gdp_per_capita_diff": float(home_macro.get("gdp_per_capita", 0.0) or 0.0)
-        - float(away_macro.get("gdp_per_capita", 0.0) or 0.0),
         "home_elo_delta_30": home_elo - home_anchor_rating if home_anchor_rating is not None else 0.0,
         "away_elo_delta_30": away_elo - away_anchor_rating if away_anchor_rating is not None else 0.0,
         "elo_delta_diff_30": (home_elo - home_anchor_rating if home_anchor_rating is not None else 0.0)

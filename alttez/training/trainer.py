@@ -1,15 +1,21 @@
-import math
 import pandas as pd
 from typing import Optional, Tuple
 from sklearn.model_selection import StratifiedKFold
 from tqdm import tqdm
-from alttez.features.selection import train_test_split
+from alttez.features.selection import snap_split_index
 from alttez.features.target import construct_targets
 from alttez.models.model import ClassificationModel
 
 
 class Trainer:
     """ Classification Model trainer class. """
+
+    @staticmethod
+    def _resolve_date_column(df: pd.DataFrame) -> str:
+        for candidate in ("date", "Date"):
+            if candidate in df.columns:
+                return candidate
+        raise ValueError('Expected dataframe to contain a "date" or "Date" column for temporal validation.')
 
     def train(
             self,
@@ -21,7 +27,8 @@ class Trainer:
         """ Fits the model in the provided dataset. """
 
         # Clean Dataframe.
-        if check_nan and (train_df.isna().any().any() or eval_df.isna().any().any()):
+        eval_has_nan = eval_df.isna().any().any() if eval_df is not None else False
+        if check_nan and (train_df.isna().any().any() or eval_has_nan):
             raise ValueError('Cannot apply cross validation with nan rows. Drop nans first.')
 
         metrics_df = model.fit(train_df=train_df, eval_df=eval_df)
@@ -60,24 +67,63 @@ class Trainer:
             test_ratio: float,
             k_folds: int = 5
     ) -> pd.DataFrame:
-        """ Evaluates the model using the Sliding k-fold cross validation method. """
+        """ Backwards-compatible alias for temporal expanding-window cross validation. """
 
-        # Rectify the k-folds if case samples are too few.
+        return self.temporal_cross_validation(model=model, df=df, test_ratio=test_ratio, k_folds=k_folds)
+
+    def temporal_cross_validation(
+            self,
+            model: ClassificationModel,
+            df: pd.DataFrame,
+            test_ratio: float = 0.2,
+            k_folds: int = 5
+    ) -> pd.DataFrame:
+        """ Evaluates the model using expanding-window temporal cross validation. """
+
         if df.isna().any().any():
             raise ValueError('Cannot apply cross validation with nan rows. Drop nans first.')
 
-        samples_per_fold = int(math.floor(df.shape[0]/k_folds))
+        date_column = self._resolve_date_column(df)
+        ordered_df = df.sort_values(date_column, ascending=True).reset_index(drop=True)
+        total_samples = ordered_df.shape[0]
+        if total_samples < 3:
+            raise ValueError('Temporal cross validation requires at least 3 samples.')
 
-        # Initialize sliding k-fold procedure.
+        if k_folds < 1:
+            raise ValueError('k_folds must be greater than zero.')
+
+        estimated_eval_size = max(1, int(round(total_samples * float(test_ratio))))
+        max_possible_folds = max(1, (total_samples - 1) // estimated_eval_size)
+        folds = min(k_folds, max_possible_folds)
+        eval_size = max(1, min(estimated_eval_size, (total_samples - 1) // folds))
+        initial_train_size = total_samples - (folds * eval_size)
+        if initial_train_size <= 0:
+            initial_train_size = 1
+            eval_size = max(1, (total_samples - initial_train_size) // folds)
+
         metrics_df_per_fold = []
-        for i in tqdm(iterable=range(k_folds), desc='Evaluating Sliding K-Fold', total=k_folds):
-            fold_df = df.iloc[-(i+1)*samples_per_fold:]
-            train_df, eval_df = train_test_split(df=fold_df, test_size=test_ratio)
+        for fold_index in tqdm(iterable=range(folds), desc='Evaluating Temporal K-Fold', total=folds):
+            raw_train_end = initial_train_size + (fold_index * eval_size)
+            raw_eval_end = min(raw_train_end + eval_size, total_samples)
+
+            # Snap to date boundaries so a single date never straddles the split.
+            train_end = snap_split_index(ordered_df, raw_train_end, date_column)
+            eval_start = train_end
+            eval_end = snap_split_index(ordered_df, raw_eval_end, date_column)
+            if train_end <= 0 or eval_start >= total_samples or eval_end <= eval_start:
+                continue
+
+            train_df = ordered_df.iloc[:train_end].reset_index(drop=True)
+            eval_df = ordered_df.iloc[eval_start:eval_end].reset_index(drop=True)
             model, metrics_df = self.train(model=model, train_df=train_df, eval_df=eval_df, check_nan=False)
-            metrics_df['Fold'] = i + 1
-            metrics_df['Start Date'] = [train_df.iloc[-1]['Date'], eval_df.iloc[-1]['Date']]
-            metrics_df['End Date'] = [train_df.iloc[0]['Date'], eval_df.iloc[0]['Date']]
+            metrics_df['Fold'] = fold_index + 1
+            metrics_df['Start Date'] = [train_df.iloc[0][date_column], eval_df.iloc[0][date_column]]
+            metrics_df['End Date'] = [train_df.iloc[-1][date_column], eval_df.iloc[-1][date_column]]
             metrics_df['Samples'] = [train_df.shape[0], eval_df.shape[0]]
             metrics_df_per_fold.append(metrics_df)
+
+        if not metrics_df_per_fold:
+            raise ValueError('Temporal cross validation could not produce any folds.')
+
         cv_df = pd.concat(metrics_df_per_fold, ignore_index=True, axis=0)
         return cv_df

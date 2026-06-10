@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 from alttez.api.db import read_dataframe
 from alttez.api.settings import load_local_env
+from alttez.reports.brand import ISOTYPE_SVG
 from alttez.dashboard.analysis_helpers import (
     build_recommendation_summary,
     competition_class_label,
@@ -421,37 +422,39 @@ def _build_telegram_summary_text(payload: dict[str, Any]) -> str:
     provider_used = safe_text(batch.get("provider_used"), "N/D")
     model_family = safe_text(payload.get("model_family"), "poisson")
     model_version = safe_text(payload.get("model_version"), "ALTTEZ")
-    fallback_suffix = " | fallback" if payload.get("used_fallback") else ""
+    fallback_suffix = " · fallback" if payload.get("used_fallback") else ""
+    status_icon = "🟢" if certification_status == "CERTIFIED" else "🟠"
+    critical_alerts = summary.get("critical_alerts", 0)
+    risk_icon = "🚨" if critical_alerts else ("⚠️" if summary.get("warning_alerts", 0) else "✅")
     lines = [
-        f"<b>ALTTEZ | Agenda Ejecutiva</b> {payload['target_date']}",
+        f"🏟️ <b>ALTTEZ | Agenda Ejecutiva</b> · {payload['target_date']}",
         "",
-        f"<b>Lote</b> {html.escape(certification_status)} | Cobertura {html.escape(_fmt_float(summary.get('coverage_pct')))}% | Provider {html.escape(provider_used)}",
-        f"<b>Modelo</b> {html.escape(model_family)} / {html.escape(model_version)}{fallback_suffix}",
-        f"<b>Agenda</b> {summary.get('total_matches', 0)} partidos | {summary.get('analyzable_matches', 0)} analizables | {summary.get('high_priority_matches', 0)} alta prioridad",
-        f"<b>Riesgo</b> {summary.get('critical_alerts', 0)} criticas | {summary.get('warning_alerts', 0)} advertencias",
+        f"{status_icon} <b>Lote</b> {html.escape(certification_status)} · Cobertura {html.escape(_fmt_float(summary.get('coverage_pct')))}% · {html.escape(provider_used)}",
+        f"🤖 <b>Modelo</b> {html.escape(model_family)} / {html.escape(model_version)}{fallback_suffix}",
+        f"📅 <b>Agenda</b> {summary.get('total_matches', 0)} partidos · {summary.get('analyzable_matches', 0)} analizables · {summary.get('high_priority_matches', 0)} alta prioridad",
+        f"{risk_icon} <b>Riesgo</b> {critical_alerts} criticas · {summary.get('warning_alerts', 0)} advertencias",
     ]
     if batch.get("quarantine_reason"):
-        lines.extend(["", f"<b>Bloqueo lote</b> {html.escape(safe_text(batch.get('quarantine_reason')))}"])
+        lines.extend(["", f"🚫 <b>Bloqueo lote</b> {html.escape(safe_text(batch.get('quarantine_reason')))}"])
 
     if top_matches:
-        lines.extend(["", "<b>Top decisiones</b>"])
+        lines.extend(["", "🎯 <b>Top decisiones</b>"])
         for index, match in enumerate(top_matches, start=1):
             executive_decision = _executive_decision_label(match)
             lines.append(
                 (
                     f"{index}. <b>{html.escape(match['home_team'])} vs {html.escape(match['away_team'])}</b>\n"
-                    f"   {html.escape(executive_decision)} | "
-                    f"{html.escape(safe_text(match.get('best_market'), 'N/D'))} "
-                    f"{_fmt_pct(match.get('best_market_probability'))} | "
-                    f"Score {html.escape(safe_text(match.get('primary_score'), 'N/D'))} | "
-                    f"EV {_fmt_float(match.get('primary_ev'), digits=3)} | "
-                    f"{html.escape(safe_text(match.get('support_label'), 'N/D'))}"
+                    f"    🧭 {html.escape(executive_decision)} · {html.escape(safe_text(match.get('support_label'), 'N/D'))}\n"
+                    f"    💡 {html.escape(safe_text(match.get('best_market'), 'N/D'))} "
+                    f"{_fmt_pct(match.get('best_market_probability'))}\n"
+                    f"    🔢 Score {html.escape(safe_text(match.get('primary_score'), 'N/D'))} · "
+                    f"EV {_fmt_float(match.get('primary_ev'), digits=3)}"
                 )
             )
     else:
         lines.extend(["", "Sin partidos analizables para hoy."])
 
-    lines.extend(["", "<b>Adjuntos</b> brief HTML y payload JSON"])
+    lines.extend(["", "📎 <b>Adjuntos</b> brief HTML y payload JSON"])
     return "\n".join(lines)
 
 
@@ -668,7 +671,7 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
     :root {{
       --graphite: #111315;
       --ivory: #f5f7f8;
-      --copper: #c27442;
+      --copper: #c27a42;
       --blue: #3f6db5;
       --success: #22c55e;
       --warning: #f59e0b;
@@ -763,6 +766,10 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
 <body>
   <div class="page">
     <section class="hero">
+      <div class="brand-lockup" style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+        {ISOTYPE_SVG}
+        <span style="font-family:'Sora','Inter',sans-serif;font-weight:700;letter-spacing:0.14em;font-size:18px;">ALT<span style="color:var(--copper);">TEZ</span></span>
+      </div>
       <div class="eyebrow">ALTTEZ Daily Decision Brief</div>
       <h1>Agenda analitica del {html.escape(payload['target_date'])}</h1>
       <p class="subcopy">

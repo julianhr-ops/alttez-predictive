@@ -76,6 +76,30 @@ def _round_robin_group_fixtures(groups: dict[str, list[str]]) -> list[dict[str, 
     return fixtures
 
 
+def _decisive_knockout_score(prob_matrix: Any, prediction: dict[str, Any]) -> tuple[int, int]:
+    """Most-likely NON-draw scoreline for a deterministic knockout tie.
+
+    Avoids brackets where almost every tie collapses to 1-1 on penalties: picks the
+    stronger side by win-region mass and the most-likely decisive scoreline within it.
+    Falls back to 1X2 win probabilities (1-0 / 0-1) when no score matrix is available.
+    """
+
+    if isinstance(prob_matrix, np.ndarray) and prob_matrix.size:
+        size = prob_matrix.shape[0]
+        home_idx = [(h, a) for h in range(size) for a in range(prob_matrix.shape[1]) if h > a]
+        away_idx = [(h, a) for h in range(size) for a in range(prob_matrix.shape[1]) if a > h]
+        home_mass = float(sum(prob_matrix[h, a] for h, a in home_idx))
+        away_mass = float(sum(prob_matrix[h, a] for h, a in away_idx))
+        winning_cells = home_idx if home_mass >= away_mass else away_idx
+        if winning_cells:
+            best = max(winning_cells, key=lambda cell: float(prob_matrix[cell[0], cell[1]]))
+            return int(best[0]), int(best[1])
+
+    home_win = float(prediction.get("prob_home") or 0.0)
+    away_win = float(prediction.get("prob_away") or 0.0)
+    return (1, 0) if home_win >= away_win else (0, 1)
+
+
 def _sample_match(
     predictor: BaseMatchPredictor,
     home_team: str,
@@ -86,6 +110,7 @@ def _sample_match(
     is_knockout: bool,
     tournament_context: dict[str, Any] | None = None,
     prediction_cache: dict[tuple[str, str, bool, bool], dict[str, Any]] | None = None,
+    deterministic: bool = False,
 ) -> SimulatedMatch:
     cache_key = (home_team, away_team, is_neutral, is_knockout)
     if prediction_cache is not None and cache_key in prediction_cache:
@@ -100,15 +125,15 @@ def _sample_match(
         )
         if prediction_cache is not None:
             prediction_cache[cache_key] = prediction
-    model_family = str(prediction.get("model_family") or "").strip().lower()
     prob_matrix = prediction.get("prob_matrix")
-    # XGBoost currently calibrates 1X2 outcome probabilities and reuses the Poisson
-    # score matrix only as a UI baseline. Tournament simulation must sample from the
-    # challenger outcome probabilities instead of the inherited Poisson matrix.
-    if model_family != "xgboost" and isinstance(prob_matrix, np.ndarray) and prob_matrix.size:
+    if isinstance(prob_matrix, np.ndarray) and prob_matrix.size:
         probabilities = prob_matrix.astype(float).ravel()
         probabilities = probabilities / probabilities.sum()
-        flat_index = int(rng.choice(np.arange(len(probabilities)), p=probabilities))
+        if deterministic:
+            # Most-likely scoreline: argmax of the joint score matrix.
+            flat_index = int(probabilities.argmax())
+        else:
+            flat_index = int(rng.choice(np.arange(len(probabilities)), p=probabilities))
         home_score, away_score = divmod(flat_index, prob_matrix.shape[1])
     else:
         outcome_probs = np.array(
@@ -122,13 +147,21 @@ def _sample_match(
         if outcome_probs.sum() <= 0:
             outcome_probs = np.array([0.4, 0.2, 0.4], dtype=float)
         outcome_probs = outcome_probs / outcome_probs.sum()
-        outcome = rng.choice(["H", "D", "A"], p=outcome_probs)
+        if deterministic:
+            outcome = ["H", "D", "A"][int(outcome_probs.argmax())]
+        else:
+            outcome = rng.choice(["H", "D", "A"], p=outcome_probs)
         if outcome == "H":
             home_score, away_score = 1, 0
         elif outcome == "A":
             home_score, away_score = 0, 1
         else:
             home_score, away_score = 1, 1
+
+    # Deterministic knockouts must yield a credible decisive result instead of a
+    # draw resolved on penalties. Stochastic mode keeps real penalty shoot-outs.
+    if deterministic and is_knockout and home_score == away_score:
+        home_score, away_score = _decisive_knockout_score(prob_matrix, prediction)
 
     if home_score > away_score:
         return SimulatedMatch(home_team, away_team, home_score, away_score, home_team, "regular_time")
@@ -140,7 +173,13 @@ def _sample_match(
     home_win = float(prediction.get("prob_home") or 0.0)
     away_win = float(prediction.get("prob_away") or 0.0)
     if home_win + away_win <= 0:
-        winner = home_team if rng.random() < 0.5 else away_team
+        if deterministic:
+            winner = home_team
+        else:
+            winner = home_team if rng.random() < 0.5 else away_team
+    elif deterministic:
+        # Penalty shoot-out resolved toward the stronger side.
+        winner = home_team if home_win >= away_win else away_team
     else:
         winner = home_team if rng.random() < (home_win / (home_win + away_win)) else away_team
     return SimulatedMatch(home_team, away_team, home_score, away_score, winner, "penalties")
@@ -168,6 +207,7 @@ def _simulate_group_stage(
     rng: np.random.Generator,
     tournament_context: dict[str, Any] | None = None,
     prediction_cache: dict[tuple[str, str, bool, bool], dict[str, Any]],
+    deterministic: bool = False,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     standings: dict[str, list[dict[str, Any]]] = {}
     top_two: list[dict[str, Any]] = []
@@ -200,6 +240,7 @@ def _simulate_group_stage(
                 is_knockout=False,
                 tournament_context=tournament_context,
                 prediction_cache=prediction_cache,
+                deterministic=deterministic,
             )
             home_row = table_rows[match.home_team]
             away_row = table_rows[match.away_team]
@@ -341,6 +382,7 @@ def _play_knockout_round(
     third_pool_rows: list[dict[str, Any]] | None = None,
     tournament_context: dict[str, Any] | None = None,
     prediction_cache: dict[tuple[str, str, bool, bool], dict[str, Any]] | None = None,
+    deterministic: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     winners: list[dict[str, Any]] = []
     played_matches: list[dict[str, Any]] = []
@@ -367,6 +409,7 @@ def _play_knockout_round(
             is_knockout=True,
             tournament_context=tournament_context,
             prediction_cache=prediction_cache,
+            deterministic=deterministic,
         )
         winner_team = match.winner or match.home_team
         winner_row = {"team": winner_team}
@@ -501,6 +544,94 @@ def simulate_world_cup_2026(
         "groups": groups,
         "standings_snapshot": latest_standings,
         "team_probabilities": summary_df.to_dict(orient="records"),
+    }
+
+
+def predict_world_cup_2026_bracket(
+    predictor: BaseMatchPredictor,
+    *,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Deterministic single-bracket prediction across every phase.
+
+    Unlike ``simulate_world_cup_2026`` (Monte-Carlo probabilities), this resolves a
+    single most-likely path: group tables, qualifiers, every knockout tie with its
+    predicted scoreline/winner, the final and the champion. Reuses the same fixture,
+    standings and slot-resolution machinery in deterministic mode, so it is fully
+    reproducible (no RNG influence on outcomes).
+    """
+
+    groups = config.get("groups") or {}
+    knockout_fixtures = config.get("knockout_fixtures") or []
+    if not groups:
+        raise ValueError("La configuracion del Mundial 2026 no tiene grupos cargados.")
+    if not knockout_fixtures:
+        raise ValueError("La configuracion del Mundial 2026 no declara `knockout_fixtures`.")
+
+    tournament_context = {
+        "tournament": str(config.get("tournament") or "FIFA World Cup 2026"),
+        "edition": int(config.get("edition") or 2026),
+    }
+    rng = np.random.default_rng(0)  # unused for outcomes in deterministic mode.
+    prediction_cache: dict[tuple[str, str, bool, bool], dict[str, Any]] = {}
+
+    standings, qualified_rows, group_matches = _simulate_group_stage(
+        groups,
+        predictor,
+        rng=rng,
+        tournament_context=tournament_context,
+        prediction_cache=prediction_cache,
+        deterministic=True,
+    )
+    lookup = _qualified_lookup(qualified_rows)
+    qualified_thirds = [
+        row for row in qualified_rows
+        if row.get("position") == 3 and row.get("third_rank") is not None and int(row["third_rank"]) <= 8
+    ]
+
+    next_stage = {
+        "round_of_32": "round_of_16",
+        "round_of_16": "quarter_final",
+        "quarter_final": "semi_final",
+        "semi_final": "final",
+    }
+    knockout: dict[str, list[dict[str, Any]]] = {}
+    for stage_name in ("round_of_32", "round_of_16", "quarter_final", "semi_final", "final"):
+        stage_fixtures = [fixture for fixture in knockout_fixtures if fixture["stage"] == stage_name]
+        third_pool = qualified_thirds if stage_name == "round_of_32" else None
+        _, played_matches = _play_knockout_round(
+            stage_fixtures,
+            lookup,
+            predictor,
+            rng=rng,
+            third_pool_rows=third_pool,
+            tournament_context=tournament_context,
+            prediction_cache=prediction_cache,
+            deterministic=True,
+        )
+        knockout[stage_name] = played_matches
+
+    final_matches = knockout.get("final") or []
+    final_match = final_matches[0] if final_matches else None
+    champion = final_match["winner"] if final_match else None
+    runner_up = None
+    if final_match:
+        runner_up = (
+            final_match["away_team"] if champion == final_match["home_team"] else final_match["home_team"]
+        )
+
+    return {
+        "generated_at": pd.Timestamp.now("UTC").isoformat(),
+        "model_version": predictor.model_version,
+        "model_family": predictor.model_family,
+        "used_fallback": predictor.used_fallback,
+        "fallback_reason": predictor.fallback_reason,
+        "groups": standings,
+        "group_matches": group_matches,
+        "knockout": knockout,
+        "final": final_match,
+        "champion": champion,
+        "runner_up": runner_up,
     }
 
 

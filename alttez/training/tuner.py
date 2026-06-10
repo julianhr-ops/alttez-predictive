@@ -43,7 +43,7 @@ class Tuner:
         trial_params = self._tune_params(trial=trial)
         model_config = {**self._fixed_params, **trial_params}
         model = self._model_cls(**model_config)
-        metrics_df = self._trainer.cross_validation(model=model, df=self._df)
+        metrics_df = self._trainer.temporal_cross_validation(model=model, df=self._df)
         metric_score = metrics_df.loc[metrics_df['data'] == 'eval', self._metric].mean()
         return metric_score
 

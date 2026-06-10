@@ -1,3 +1,8 @@
+"""Experimental baseline script kept for reference only.
+
+This script is not part of the production challenger/inference pipeline.
+"""
+
 import pandas as pd
 import xgboost as xgb
 from sklearn.metrics import accuracy_score, log_loss
@@ -8,6 +13,8 @@ from alttez.ingestion.international import InternationalLoader
 
 
 def main() -> None:
+    print("ADVERTENCIA: `train_world_cup.py` es experimental y no representa la ruta productiva actual.")
+
     # 1. Cargar y preparar datos.
     loader = InternationalLoader()
     df = loader.fetch_data()
