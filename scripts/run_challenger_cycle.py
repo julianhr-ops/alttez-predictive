@@ -36,6 +36,10 @@ def main() -> int:
         print(f"challenger_model_artifact_path={result['model_artifact_path']}")
     print(f"champion_brier={result['champion']['brier_score']:.6f}")
     print(f"challenger_brier={result['challenger']['brier_score']:.6f}")
+    ensemble = result.get("ensemble") or {}
+    if ensemble:
+        print(f"ensemble_brier={ensemble.get('brier_score', float('nan')):.6f}")
+        print(f"ensemble_blend_weight={ensemble.get('blend_weight')}")
     print(f"promotion_decision={result['promotion_decision']}")
     print(f"promotion_reason={result['promotion_reason']}")
     print(f"production_status={result['production_status']}")

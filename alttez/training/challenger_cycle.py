@@ -189,15 +189,21 @@ def _append_history_row(history_df: pd.DataFrame, row: Any) -> pd.DataFrame:
     return pd.concat([history_df, next_row], ignore_index=True)
 
 
-def _evaluate_poisson_champion(
+def _champion_lambda_stream(
     train_df: pd.DataFrame,
     holdout_df: pd.DataFrame,
     *,
     champion_refit_interval: int = DEFAULT_CHAMPION_REFIT_INTERVAL,
-) -> dict[str, Any]:
+) -> tuple[list[tuple[float, float]], int]:
+    """Per-row Poisson champion (lambda_home, lambda_away) with block refits.
+
+    Returns the lambda stream (ordered by date) and the number of refits, so champion
+    evaluation and the ensemble blend share one causal source of champion lambdas.
+    """
+
     history_df = train_df.sort_values("date").reset_index(drop=True).copy()
     ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
-    rows = []
+    lambdas: list[tuple[float, float]] = []
     refit_count = 0
     engine: PoissonEngine | None = None
 
@@ -215,6 +221,35 @@ def _evaluate_poisson_champion(
             refit_count += 1
 
         lambda_home, lambda_away = engine.predict_xg(row.home_team, row.away_team, is_neutral=bool(row.neutral))
+        lambdas.append((float(lambda_home), float(lambda_away)))
+        history_df = _append_history_row(history_df, row)
+
+    return lambdas, refit_count
+
+
+def _xgb_lambda_stream(artifact_bundle: dict[str, Any], holdout_df: pd.DataFrame) -> list[tuple[float, float]]:
+    """Per-row XGBoost challenger (lambda_home, lambda_away) from the dual goal models."""
+
+    ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
+    feature_columns = list(artifact_bundle.get("feature_columns") or FEATURE_COLUMNS)
+    x_holdout = ordered_holdout[feature_columns].fillna(0.0)
+    models = artifact_bundle["models"]
+    lambdas_home = np.maximum(np.asarray(models["home_goals"].predict(x_holdout), dtype=float), 0.05)
+    lambdas_away = np.maximum(np.asarray(models["away_goals"].predict(x_holdout), dtype=float), 0.05)
+    return [(float(h), float(a)) for h, a in zip(lambdas_home, lambdas_away)]
+
+
+def _score_lambda_stream(
+    lambdas: list[tuple[float, float]],
+    holdout_df: pd.DataFrame,
+    *,
+    model_version: str,
+    model_family: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
+    rows = []
+    for (lambda_home, lambda_away), row in zip(lambdas, ordered_holdout.itertuples(index=False)):
         prob_matrix = build_probability_matrix(
             lambda_home, lambda_away, max_goals=DEFAULT_MAX_GOALS, rho=DEFAULT_DIXON_COLES_RHO
         )
@@ -225,14 +260,60 @@ def _evaluate_poisson_champion(
                 actual_away_score=int(row.away_score),
             )
         )
-        history_df = _append_history_row(history_df, row)
+    return _summarize_probability_rows(rows, model_version=model_version, model_family=model_family, extra=extra)
 
-    return _summarize_probability_rows(
-        rows,
+
+def _evaluate_poisson_champion(
+    train_df: pd.DataFrame,
+    holdout_df: pd.DataFrame,
+    *,
+    champion_refit_interval: int = DEFAULT_CHAMPION_REFIT_INTERVAL,
+) -> dict[str, Any]:
+    lambdas, refit_count = _champion_lambda_stream(
+        train_df, holdout_df, champion_refit_interval=champion_refit_interval
+    )
+    return _score_lambda_stream(
+        lambdas,
+        holdout_df,
         model_version=get_active_model_version(),
         model_family=get_active_model_family(),
         extra={"refit_count": refit_count, "champion_refit_interval": champion_refit_interval},
     )
+
+
+def evaluate_lambda_blend(
+    champion_lambdas: list[tuple[float, float]],
+    challenger_lambdas: list[tuple[float, float]],
+    holdout_df: pd.DataFrame,
+    *,
+    weight_grid: list[float] | None = None,
+) -> dict[str, Any]:
+    """Grid-search the blend weight w for lambda = w*challenger + (1-w)*champion.
+
+    Picks the weight minimising Brier on the holdout and returns its metrics. This
+    measures whether *combining* the goal models beats either alone (the core of the
+    ALTTEZ ensemble) before any production wiring.
+    """
+
+    if weight_grid is None:
+        weight_grid = [round(0.1 * i, 1) for i in range(11)]  # 0.0 .. 1.0
+
+    best: dict[str, Any] | None = None
+    for weight in weight_grid:
+        blended = [
+            (weight * ch_h + (1.0 - weight) * cp_h, weight * ch_a + (1.0 - weight) * cp_a)
+            for (cp_h, cp_a), (ch_h, ch_a) in zip(champion_lambdas, challenger_lambdas)
+        ]
+        summary = _score_lambda_stream(
+            blended,
+            holdout_df,
+            model_version="alttez-ensemble-v1",
+            model_family="ensemble",
+            extra={"blend_weight": weight},
+        )
+        if best is None or summary["brier_score"] < best["brier_score"]:
+            best = summary
+    return best or {}
 
 
 DEFAULT_MIN_EARLY_STOPPING_SAMPLES = 50
@@ -450,6 +531,14 @@ def run_challenger_cycle(
     )
     challenger_artifact = _train_challenger(train_df)
     challenger_metrics = _evaluate_challenger(challenger_artifact, holdout_df)
+
+    # Ensemble probe: does blending champion + challenger lambdas beat either alone?
+    champion_lambdas, _ = _champion_lambda_stream(
+        train_df, holdout_df, champion_refit_interval=champion_refit_interval
+    )
+    challenger_lambdas = _xgb_lambda_stream(challenger_artifact, holdout_df)
+    ensemble_metrics = evaluate_lambda_blend(champion_lambdas, challenger_lambdas, holdout_df)
+
     promote, promotion_reason = _promotion_decision(champion_metrics, challenger_metrics)
     production_status, activation_mode, governance_reason = _governance_decision(
         promote=promote,
@@ -464,6 +553,7 @@ def run_challenger_cycle(
         "evaluation_matches": int(len(holdout_df)),
         "champion": champion_metrics,
         "challenger": challenger_metrics,
+        "ensemble": ensemble_metrics,
         "promotion_decision": promote,
         "promotion_reason": promotion_reason,
         "production_status": production_status,

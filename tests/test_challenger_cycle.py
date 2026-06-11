@@ -219,6 +219,24 @@ class TestChallengerCycle(unittest.TestCase):
 
         self.assertAlmostEqual(batch_metrics["brier_score"], sum(reference_brier) / len(reference_brier), places=9)
 
+    def test_lambda_blend_is_no_worse_than_either_endpoint(self) -> None:
+        from alttez.training.challenger_cycle import _score_lambda_stream, evaluate_lambda_blend
+
+        holdout = _feature_df(40)
+        n = len(holdout)
+        champion = [(1.2, 1.0)] * n
+        challenger = [(1.8, 0.6)] * n
+
+        blend = evaluate_lambda_blend(champion, challenger, holdout)
+        champion_only = _score_lambda_stream(champion, holdout, model_version="p", model_family="poisson")
+        challenger_only = _score_lambda_stream(challenger, holdout, model_version="x", model_family="xgboost")
+
+        self.assertEqual(blend["model_family"], "ensemble")
+        self.assertIn(blend["blend_weight"], [round(0.1 * i, 1) for i in range(11)])
+        # Grid includes w=0 (champion) and w=1 (challenger); best blend cannot be worse.
+        self.assertLessEqual(blend["brier_score"], champion_only["brier_score"] + 1e-9)
+        self.assertLessEqual(blend["brier_score"], challenger_only["brier_score"] + 1e-9)
+
     def test_split_small_dataset_returns_no_validation(self) -> None:
         small = _feature_df(20)
         core_train, validation_df = _split_training_and_validation(small)
