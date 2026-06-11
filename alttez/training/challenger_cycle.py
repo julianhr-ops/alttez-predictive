@@ -392,6 +392,18 @@ def _fit_goal_models(train_df: pd.DataFrame) -> dict[str, Any]:
         home_model.fit(x_train, train_core["home_score"], verbose=False)
         away_model.fit(x_train, train_core["away_score"], verbose=False)
 
+    # Average gain importance across both goal models, ranked, for auditability.
+    home_imp = np.asarray(getattr(home_model, "feature_importances_", np.zeros(len(FEATURE_COLUMNS))), dtype=float)
+    away_imp = np.asarray(getattr(away_model, "feature_importances_", np.zeros(len(FEATURE_COLUMNS))), dtype=float)
+    mean_imp = (home_imp + away_imp) / 2.0
+    feature_importance = dict(
+        sorted(
+            ((col, float(val)) for col, val in zip(FEATURE_COLUMNS, mean_imp)),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+    )
+
     return {
         "home_goals": home_model,
         "away_goals": away_model,
@@ -401,6 +413,7 @@ def _fit_goal_models(train_df: pd.DataFrame) -> dict[str, Any]:
         },
         "validation_samples": int(len(validation_df)) if validation_df is not None else 0,
         "train_samples": int(len(train_core)),
+        "feature_importance": feature_importance,
     }
 
 
@@ -419,6 +432,7 @@ def _train_challenger(train_df: pd.DataFrame) -> dict[str, Any]:
         "best_iteration": fitted_models["best_iteration"],
         "train_samples": fitted_models["train_samples"],
         "validation_samples": fitted_models["validation_samples"],
+        "feature_importance": fitted_models.get("feature_importance", {}),
     }
     return artifact_bundle
 
@@ -531,6 +545,7 @@ def run_challenger_cycle(
     )
     challenger_artifact = _train_challenger(train_df)
     challenger_metrics = _evaluate_challenger(challenger_artifact, holdout_df)
+    challenger_metrics["feature_importance"] = challenger_artifact.get("feature_importance")
 
     # Ensemble probe: does blending champion + challenger lambdas beat either alone?
     champion_lambdas, _ = _champion_lambda_stream(
