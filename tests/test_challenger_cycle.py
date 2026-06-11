@@ -89,8 +89,10 @@ class TestChallengerCycle(unittest.TestCase):
         self.assertFalse(promote)
         self.assertIn("Log Loss", reason)
 
-    def test_feature_columns_exclude_gdp_macros(self) -> None:
-        self.assertTrue(all(not column.startswith("gdp_per_capita") for column in FEATURE_COLUMNS))
+    def test_feature_columns_include_gdp_with_coverage_flag(self) -> None:
+        # GDP restored as a static macro prior, paired with a coverage flag.
+        self.assertIn("gdp_per_capita_diff", FEATURE_COLUMNS)
+        self.assertIn("gdp_coverage", FEATURE_COLUMNS)
 
     def test_goal_regressor_enables_early_stopping(self) -> None:
         model = _build_goal_regressor()

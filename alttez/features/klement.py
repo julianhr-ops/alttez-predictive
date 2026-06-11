@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
@@ -36,6 +36,26 @@ MODEL_FEATURE_COLUMNS = [
     "away_continent_advantage",
     "continent_advantage_diff",
     "is_knockout",
+    # Tier-1 derived variables (scores + dates), all causal.
+    "home_rest_days",
+    "away_rest_days",
+    "rest_days_diff",
+    "home_matches_last90",
+    "away_matches_last90",
+    "home_goals_for_rate",
+    "home_goals_against_rate",
+    "away_goals_for_rate",
+    "away_goals_against_rate",
+    "goals_for_rate_diff",
+    "home_win_streak",
+    "away_win_streak",
+    "h2h_goal_diff",
+    "h2h_matches",
+    # Tier-2 macro (static prior from public.teams; sparse → coverage flag).
+    "gdp_per_capita_home",
+    "gdp_per_capita_away",
+    "gdp_per_capita_diff",
+    "gdp_coverage",
 ]
 TOURNAMENT_HOST_CONFEDERATIONS = {
     normalize_name("FIFA World Cup"): {
@@ -74,6 +94,10 @@ class KlementFeatureState:
     post_match_history: dict[str, list[tuple[pd.Timestamp, float]]]
     knockout_event_history: dict[str, list[tuple[pd.Timestamp, str]]]
     team_macro: dict[str, dict[str, Any]]
+    # Tier-1 causal state for rest/congestion/form/H2H features.
+    team_match_dates: dict[str, list[pd.Timestamp]] = field(default_factory=dict)
+    team_goals_history: dict[str, list[tuple[pd.Timestamp, int, int]]] = field(default_factory=dict)
+    h2h_history: dict[tuple[str, str], list[tuple[pd.Timestamp, str, int]]] = field(default_factory=dict)
 
 
 def _classify_competition(tournament_name: str | None, stage: str | None) -> str:
@@ -281,6 +305,57 @@ def load_enriched_historical_matches(*, database_url: str | None = None) -> pd.D
     return df
 
 
+DEFAULT_REST_DAYS = 30.0
+REST_CAP_DAYS = 180.0
+ROLLING_GOALS_WINDOW = 10
+H2H_WINDOW = 5
+CONGESTION_WINDOW_DAYS = 90
+
+
+def _h2h_key(team_a: str, team_b: str) -> tuple[str, str]:
+    return tuple(sorted((team_a, team_b)))  # type: ignore[return-value]
+
+
+def _rest_days(dates: list[pd.Timestamp], ref: pd.Timestamp) -> float:
+    past = [d for d in dates if d < ref]
+    if not past:
+        return DEFAULT_REST_DAYS
+    return min(float((ref - max(past)).days), REST_CAP_DAYS)
+
+
+def _congestion(dates: list[pd.Timestamp], ref: pd.Timestamp, window: int = CONGESTION_WINDOW_DAYS) -> float:
+    start = ref - pd.Timedelta(days=window)
+    return float(sum(1 for d in dates if start <= d < ref))
+
+
+def _goal_rates(goals: list[tuple[pd.Timestamp, int, int]], ref: pd.Timestamp, n: int = ROLLING_GOALS_WINDOW) -> tuple[float, float]:
+    past = [(gf, ga) for (d, gf, ga) in goals if d < ref][-n:]
+    if not past:
+        return 0.0, 0.0
+    gf = sum(item[0] for item in past) / len(past)
+    ga = sum(item[1] for item in past) / len(past)
+    return float(gf), float(ga)
+
+
+def _win_streak(goals: list[tuple[pd.Timestamp, int, int]], ref: pd.Timestamp) -> float:
+    streak = 0
+    for d, gf, ga in sorted((g for g in goals if g[0] < ref), key=lambda g: g[0], reverse=True):
+        if gf > ga:
+            streak += 1
+        else:
+            break
+    return float(streak)
+
+
+def _h2h_goal_diff(h2h_list: list[tuple[pd.Timestamp, str, int]], ref: pd.Timestamp, home_team: str, k: int = H2H_WINDOW) -> tuple[float, float]:
+    past = [(match_home, gd) for (d, match_home, gd) in h2h_list if d < ref][-k:]
+    if not past:
+        return 0.0, 0.0
+    # Goal difference from the CURRENT home team's perspective.
+    values = [gd if match_home == home_team else -gd for (match_home, gd) in past]
+    return float(sum(values) / len(values)), float(len(past))
+
+
 def build_klement_feature_state(
     historical_df: pd.DataFrame,
     *,
@@ -321,6 +396,9 @@ def build_klement_feature_state(
     post_match_history: dict[str, list[tuple[pd.Timestamp, float]]] = defaultdict(list)
     knockout_events: dict[str, list[tuple[pd.Timestamp, str]]] = defaultdict(list)
     seen_knockout_events: set[tuple[str, str]] = set()
+    team_match_dates: dict[str, list[pd.Timestamp]] = defaultdict(list)
+    team_goals_history: dict[str, list[tuple[pd.Timestamp, int, int]]] = defaultdict(list)
+    h2h_history: dict[tuple[str, str], list[tuple[pd.Timestamp, str, int]]] = defaultdict(list)
 
     elo_home_before: list[float] = []
     elo_away_before: list[float] = []
@@ -332,6 +410,21 @@ def build_klement_feature_state(
     home_confederations: list[str] = []
     away_confederations: list[str] = []
     is_knockout_values: list[int] = []
+    home_rest: list[float] = []
+    away_rest: list[float] = []
+    home_cong: list[float] = []
+    away_cong: list[float] = []
+    home_gf_rate: list[float] = []
+    home_ga_rate: list[float] = []
+    away_gf_rate: list[float] = []
+    away_ga_rate: list[float] = []
+    home_streak: list[float] = []
+    away_streak: list[float] = []
+    h2h_gd: list[float] = []
+    h2h_n: list[float] = []
+    home_gdp_values: list[float] = []
+    away_gdp_values: list[float] = []
+    gdp_cov_values: list[float] = []
 
     for row in working_df.itertuples(index=False):
         match_date = pd.Timestamp(row.date)
@@ -359,10 +452,32 @@ def build_klement_feature_state(
         home_knockout_weight.append(_count_knockout_events(home_team))
         away_knockout_weight.append(_count_knockout_events(away_team))
 
+        # Tier-1 causal features (computed from state holding only earlier matches).
+        home_rest.append(_rest_days(team_match_dates.get(home_team, []), match_date))
+        away_rest.append(_rest_days(team_match_dates.get(away_team, []), match_date))
+        home_cong.append(_congestion(team_match_dates.get(home_team, []), match_date))
+        away_cong.append(_congestion(team_match_dates.get(away_team, []), match_date))
+        h_gf, h_ga = _goal_rates(team_goals_history.get(home_team, []), match_date)
+        a_gf, a_ga = _goal_rates(team_goals_history.get(away_team, []), match_date)
+        home_gf_rate.append(h_gf)
+        home_ga_rate.append(h_ga)
+        away_gf_rate.append(a_gf)
+        away_ga_rate.append(a_ga)
+        home_streak.append(_win_streak(team_goals_history.get(home_team, []), match_date))
+        away_streak.append(_win_streak(team_goals_history.get(away_team, []), match_date))
+        gd_value, n_value = _h2h_goal_diff(h2h_history.get(_h2h_key(home_team, away_team), []), match_date, home_team)
+        h2h_gd.append(gd_value)
+        h2h_n.append(n_value)
+
         home_macro = macro_context.get(normalize_name(home_team), {})
         away_macro = macro_context.get(normalize_name(away_team), {})
         home_confederations.append(str(home_macro.get("confederation_code") or "").strip().upper())
         away_confederations.append(str(away_macro.get("confederation_code") or "").strip().upper())
+        home_gdp = float(home_macro.get("gdp_per_capita", 0.0) or 0.0)
+        away_gdp = float(away_macro.get("gdp_per_capita", 0.0) or 0.0)
+        home_gdp_values.append(home_gdp)
+        away_gdp_values.append(away_gdp)
+        gdp_cov_values.append(1.0 if home_gdp > 0.0 and away_gdp > 0.0 else 0.0)
 
         is_knockout = int(_is_knockout_stage(getattr(row, "stage", None)))
         is_knockout_values.append(is_knockout)
@@ -377,6 +492,15 @@ def build_klement_feature_state(
         ratings[away_team] = new_away_elo
         post_match_history[home_team].append((match_date, new_home_elo))
         post_match_history[away_team].append((match_date, new_away_elo))
+
+        # Update Tier-1 state AFTER computing this row's features (preserves causality).
+        home_goals = int(row.home_score)
+        away_goals = int(row.away_score)
+        team_match_dates[home_team].append(match_date)
+        team_match_dates[away_team].append(match_date)
+        team_goals_history[home_team].append((match_date, home_goals, away_goals))
+        team_goals_history[away_team].append((match_date, away_goals, home_goals))
+        h2h_history[_h2h_key(home_team, away_team)].append((match_date, home_team, home_goals - away_goals))
 
         competition_class = str(getattr(row, "competition_class", "") or "").strip().lower()
         stage = getattr(row, "stage", None)
@@ -405,6 +529,24 @@ def build_klement_feature_state(
     working_df["home_confederation_code"] = home_confederations
     working_df["away_confederation_code"] = away_confederations
     working_df["is_knockout"] = is_knockout_values
+    working_df["home_rest_days"] = home_rest
+    working_df["away_rest_days"] = away_rest
+    working_df["rest_days_diff"] = working_df["home_rest_days"] - working_df["away_rest_days"]
+    working_df["home_matches_last90"] = home_cong
+    working_df["away_matches_last90"] = away_cong
+    working_df["home_goals_for_rate"] = home_gf_rate
+    working_df["home_goals_against_rate"] = home_ga_rate
+    working_df["away_goals_for_rate"] = away_gf_rate
+    working_df["away_goals_against_rate"] = away_ga_rate
+    working_df["goals_for_rate_diff"] = working_df["home_goals_for_rate"] - working_df["away_goals_for_rate"]
+    working_df["home_win_streak"] = home_streak
+    working_df["away_win_streak"] = away_streak
+    working_df["h2h_goal_diff"] = h2h_gd
+    working_df["h2h_matches"] = h2h_n
+    working_df["gdp_per_capita_home"] = home_gdp_values
+    working_df["gdp_per_capita_away"] = away_gdp_values
+    working_df["gdp_per_capita_diff"] = working_df["gdp_per_capita_home"] - working_df["gdp_per_capita_away"]
+    working_df["gdp_coverage"] = gdp_cov_values
 
     continent_home_values: list[float] = []
     continent_away_values: list[float] = []
@@ -433,6 +575,9 @@ def build_klement_feature_state(
         post_match_history={team_name: list(history) for team_name, history in post_match_history.items()},
         knockout_event_history={team_name: list(history) for team_name, history in knockout_events.items()},
         team_macro=macro_context,
+        team_match_dates={team_name: list(dates) for team_name, dates in team_match_dates.items()},
+        team_goals_history={team_name: list(goals) for team_name, goals in team_goals_history.items()},
+        h2h_history={key: list(history) for key, history in h2h_history.items()},
     )
     return working_df, state
 
@@ -478,6 +623,17 @@ def build_match_feature_payload(
     home_knockout_weight = float(math.log1p(home_knockout_events))
     away_knockout_weight = float(math.log1p(away_knockout_events))
 
+    ref = pd.Timestamp(reference_date)
+    home_rest = _rest_days(klement_state.team_match_dates.get(home_team, []), ref)
+    away_rest = _rest_days(klement_state.team_match_dates.get(away_team, []), ref)
+    home_cong = _congestion(klement_state.team_match_dates.get(home_team, []), ref)
+    away_cong = _congestion(klement_state.team_match_dates.get(away_team, []), ref)
+    home_gf, home_ga = _goal_rates(klement_state.team_goals_history.get(home_team, []), ref)
+    away_gf, away_ga = _goal_rates(klement_state.team_goals_history.get(away_team, []), ref)
+    home_streak = _win_streak(klement_state.team_goals_history.get(home_team, []), ref)
+    away_streak = _win_streak(klement_state.team_goals_history.get(away_team, []), ref)
+    h2h_gd, h2h_n = _h2h_goal_diff(klement_state.h2h_history.get(_h2h_key(home_team, away_team), []), ref, home_team)
+
     return {
         "elo_difference": home_elo - away_elo,
         "elo_home_before": home_elo,
@@ -498,4 +654,26 @@ def build_match_feature_payload(
         "away_continent_advantage": away_continent_advantage,
         "continent_advantage_diff": continent_advantage_diff,
         "is_knockout": int(is_knockout),
+        "home_rest_days": home_rest,
+        "away_rest_days": away_rest,
+        "rest_days_diff": home_rest - away_rest,
+        "home_matches_last90": home_cong,
+        "away_matches_last90": away_cong,
+        "home_goals_for_rate": home_gf,
+        "home_goals_against_rate": home_ga,
+        "away_goals_for_rate": away_gf,
+        "away_goals_against_rate": away_ga,
+        "goals_for_rate_diff": home_gf - away_gf,
+        "home_win_streak": home_streak,
+        "away_win_streak": away_streak,
+        "h2h_goal_diff": h2h_gd,
+        "h2h_matches": h2h_n,
+        "gdp_per_capita_home": float(home_macro.get("gdp_per_capita", 0.0) or 0.0),
+        "gdp_per_capita_away": float(away_macro.get("gdp_per_capita", 0.0) or 0.0),
+        "gdp_per_capita_diff": float(home_macro.get("gdp_per_capita", 0.0) or 0.0)
+        - float(away_macro.get("gdp_per_capita", 0.0) or 0.0),
+        "gdp_coverage": 1.0
+        if float(home_macro.get("gdp_per_capita", 0.0) or 0.0) > 0.0
+        and float(away_macro.get("gdp_per_capita", 0.0) or 0.0) > 0.0
+        else 0.0,
     }

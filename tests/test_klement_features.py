@@ -7,7 +7,12 @@ from unittest.mock import patch
 import pandas as pd
 
 from alttez.api.migrations import MIGRATION_PROBES
-from alttez.features.klement import build_klement_feature_state, compute_continent_advantage_flags
+from alttez.features.klement import (
+    DEFAULT_REST_DAYS,
+    build_klement_feature_state,
+    build_match_feature_payload,
+    compute_continent_advantage_flags,
+)
 from scripts.seed_macro_klement import build_seed_summary, load_macro_dataframe
 
 
@@ -71,10 +76,11 @@ class TestKlementFeatures(unittest.TestCase):
         with patch("alttez.features.klement.load_team_macro_context", return_value=macro_context):
             feature_df, state = build_klement_feature_state(historical_df)
 
-        # GDP dropped from the model feature engineering (dead look-ahead macro).
-        self.assertNotIn("gdp_per_capita_diff", feature_df.columns)
-        self.assertNotIn("gdp_per_capita_home", feature_df.columns)
-        self.assertNotIn("gdp_per_capita_away", feature_df.columns)
+        # GDP restored as a static macro prior with a coverage flag.
+        self.assertIn("gdp_per_capita_diff", feature_df.columns)
+        self.assertIn("gdp_coverage", feature_df.columns)
+        # Both teams have macro GDP in this fixture -> coverage flagged.
+        self.assertEqual(feature_df.iloc[1]["gdp_coverage"], 1.0)
         self.assertIn("elo_delta_diff_30", feature_df.columns)
         self.assertIn("knockout_weight_diff", feature_df.columns)
         self.assertIn("continent_advantage_diff", feature_df.columns)
@@ -87,6 +93,47 @@ class TestKlementFeatures(unittest.TestCase):
 
         self.assertFalse(hasattr(klement, "is_world_cup_2026_context"))
         self.assertFalse(hasattr(klement, "WORLD_CUP_2026_CONFEDERATIONS"))
+
+    def test_tier1_features_are_causal_and_have_train_serve_parity(self) -> None:
+        # Argentina wins three in a row vs different rivals.
+        rows = [
+            ("2025-01-01", "Argentina", "Chile", 2, 0, True),
+            ("2025-01-11", "Argentina", "Peru", 1, 0, True),
+            ("2025-01-21", "Argentina", "Bolivia", 3, 1, True),
+        ]
+        df = pd.DataFrame(rows, columns=["date", "home_team", "away_team", "home_score", "away_score", "neutral"])
+        df["date"] = pd.to_datetime(df["date"])
+
+        with patch("alttez.features.klement.load_team_macro_context", return_value={}):
+            feature_df, state = build_klement_feature_state(df)
+
+        # Causality: first match has no prior history.
+        first = feature_df.iloc[0]
+        self.assertEqual(first["home_rest_days"], DEFAULT_REST_DAYS)
+        self.assertEqual(first["home_win_streak"], 0.0)
+        self.assertEqual(first["home_goals_for_rate"], 0.0)
+        self.assertEqual(first["h2h_matches"], 0.0)
+
+        # Third match: Argentina enters on a 2-win streak; rest = 10 days since match 2.
+        third = feature_df.iloc[2]
+        self.assertEqual(third["home_win_streak"], 2.0)
+        self.assertEqual(third["home_rest_days"], 10.0)
+        self.assertAlmostEqual(third["home_goals_for_rate"], 1.5)  # (2 + 1) / 2
+
+        # Train/serve parity: a future Argentina match must see a 3-win streak post-history.
+        with patch("alttez.features.klement.load_team_macro_context", return_value={}):
+            payload = build_match_feature_payload(
+                home_team="Argentina",
+                away_team="Chile",
+                is_neutral=True,
+                is_knockout=False,
+                recent_state={},
+                klement_state=state,
+                reference_date=pd.Timestamp("2025-02-01"),
+            )
+        self.assertEqual(payload["home_win_streak"], 3.0)
+        self.assertAlmostEqual(payload["home_goals_for_rate"], 2.0)  # (2 + 1 + 3) / 3
+        self.assertEqual(payload["home_rest_days"], 11.0)  # 2025-02-01 minus 2025-01-21
 
     def test_continent_advantage_uses_same_host_mapping_for_inference_context(self) -> None:
         home_flag, away_flag, diff = compute_continent_advantage_flags(
