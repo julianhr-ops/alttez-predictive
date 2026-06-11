@@ -89,6 +89,20 @@ class TestChallengerCycle(unittest.TestCase):
         self.assertFalse(promote)
         self.assertIn("Log Loss", reason)
 
+    def test_promotion_blocked_when_not_beating_active_model(self) -> None:
+        champion = {"brier_score": 0.6500, "log_loss": 1.0000}
+        challenger = {"brier_score": 0.6000, "log_loss": 0.9500}  # beats Poisson champion
+        # Active model is already better (0.55) -> must not regress production.
+        promote, reason = _promotion_decision(champion, challenger, incumbent_brier=0.5500)
+        self.assertFalse(promote)
+        self.assertIn("activo", reason)
+
+    def test_promotion_allowed_when_beating_active_model(self) -> None:
+        champion = {"brier_score": 0.6500, "log_loss": 1.0000}
+        challenger = {"brier_score": 0.5000, "log_loss": 0.9000}
+        promote, reason = _promotion_decision(champion, challenger, incumbent_brier=0.5500)
+        self.assertTrue(promote)
+
     def test_feature_columns_include_gdp_with_coverage_flag(self) -> None:
         # GDP restored as a static macro prior, paired with a coverage flag.
         self.assertIn("gdp_per_capita_diff", FEATURE_COLUMNS)

@@ -27,6 +27,7 @@ from alttez.operations.prediction_memory import (
     brier_score_1x2,
     get_active_model_family,
     get_active_model_version,
+    load_active_model_record,
     production_supported_model_families,
     reflect_prediction_tables,
     set_active_model_version_record,
@@ -477,12 +478,34 @@ def _evaluate_challenger(
     )
 
 
-def _promotion_decision(champion_metrics: dict[str, Any], challenger_metrics: dict[str, Any]) -> tuple[bool, str]:
+def _incumbent_brier(active_record: dict[str, Any] | None) -> float | None:
+    """Brier of the currently-active production model, if recoverable."""
+
+    if not active_record:
+        return None
+    payload = active_record.get("metrics_payload")
+    if isinstance(payload, dict) and payload.get("brier_score") is not None:
+        try:
+            return float(payload["brier_score"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _promotion_decision(
+    champion_metrics: dict[str, Any],
+    challenger_metrics: dict[str, Any],
+    *,
+    incumbent_brier: float | None = None,
+) -> tuple[bool, str]:
     if float(challenger_metrics["brier_score"]) >= float(champion_metrics["brier_score"]):
         return False, "Challenger no mejora Brier Score frente al champion actual."
     if float(challenger_metrics["log_loss"]) > float(champion_metrics["log_loss"]) + DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE:
         return False, "Challenger mejora Brier pero deteriora Log Loss materialmente."
-    return True, "Challenger elegible por Brier; promotion controlado pendiente de activacion productiva."
+    # Incumbent protection: never auto-replace the active model with a worse one.
+    if incumbent_brier is not None and float(challenger_metrics["brier_score"]) >= incumbent_brier - DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE:
+        return False, "Challenger no supera al modelo activo (sin regresion permitida)."
+    return True, "Challenger elegible por Brier; supera champion e incumbente."
 
 
 def _governance_decision(
@@ -554,7 +577,11 @@ def run_challenger_cycle(
     challenger_lambdas = _xgb_lambda_stream(challenger_artifact, holdout_df)
     ensemble_metrics = evaluate_lambda_blend(champion_lambdas, challenger_lambdas, holdout_df)
 
-    promote, promotion_reason = _promotion_decision(champion_metrics, challenger_metrics)
+    active_record = load_active_model_record(database_url=database_url)
+    incumbent_brier = _incumbent_brier(active_record)
+    promote, promotion_reason = _promotion_decision(
+        champion_metrics, challenger_metrics, incumbent_brier=incumbent_brier
+    )
     production_status, activation_mode, governance_reason = _governance_decision(
         promote=promote,
         challenger_family=challenger_metrics["model_family"],
