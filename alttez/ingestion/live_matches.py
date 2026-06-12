@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 from sqlalchemy import MetaData, Table, inspect as sqlalchemy_inspect, select, text
@@ -28,6 +29,7 @@ from alttez.ingestion.raw_matches_api import RawMatchRecord, upsert_raw_matches
 
 
 DEFAULT_SCHEMA = "public"
+DEFAULT_MATCH_LOCAL_TIMEZONE = "America/Bogota"
 DEFAULT_LIVE_PROVIDER_ORDER = (
     "api_football",
     "football_data_org",
@@ -124,6 +126,34 @@ def normalize_name(value: str) -> str:
 
 def normalize_competition_name(value: str | None) -> str:
     return normalize_name(value or "unknown tournament")
+
+
+def match_local_timezone() -> ZoneInfo | None:
+    timezone_name = os.getenv("ALTTEZ_MATCH_LOCAL_TIMEZONE", "").strip() or DEFAULT_MATCH_LOCAL_TIMEZONE
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        logging.warning(
+            "Timezone '%s' is not available. Falling back to kickoff UTC date for match_date.",
+            timezone_name,
+        )
+        return None
+
+
+def match_day_from_kickoff(kickoff_at: str | None, target_date: date) -> date:
+    if not kickoff_at:
+        return target_date
+
+    kickoff_ts = pd.to_datetime(kickoff_at, errors="coerce")
+    if pd.isna(kickoff_ts):
+        return target_date
+
+    if getattr(kickoff_ts, "tzinfo", None) is not None:
+        local_timezone = match_local_timezone()
+        if local_timezone is not None:
+            return kickoff_ts.tz_convert(local_timezone).date()
+
+    return kickoff_ts.date()
 
 
 def infer_group_label(stage: str | None, payload: dict[str, Any] | None = None) -> str | None:
@@ -335,7 +365,7 @@ def parse_api_football_records(
 
         external_id = str(fixture.get("id"))
         kickoff_at = fixture.get("date")
-        match_day = pd.to_datetime(kickoff_at).date() if kickoff_at else target_date
+        match_day = match_day_from_kickoff(kickoff_at, target_date)
         stage = league.get("round")
         group_label = infer_group_label(stage, league)
         tournament_name = league.get("name") or "Unknown Tournament"
@@ -403,7 +433,7 @@ def parse_football_data_records(
             continue
 
         kickoff_at = record.get("utcDate")
-        match_day = pd.to_datetime(kickoff_at).date() if kickoff_at else target_date
+        match_day = match_day_from_kickoff(kickoff_at, target_date)
         home_team = (record.get("homeTeam") or {}).get("name")
         away_team = (record.get("awayTeam") or {}).get("name")
         competition = record.get("competition") or {}
@@ -485,7 +515,7 @@ def parse_local_json_records(
             continue
 
         kickoff_at = record.get("kickoff_at") or record.get("utcDate")
-        match_day = pd.to_datetime(kickoff_at).date() if kickoff_at else target_date
+        match_day = match_day_from_kickoff(kickoff_at, target_date)
         tournament_name = record.get("tournament") or "Unknown Tournament"
         stage = record.get("stage")
         group_label = infer_group_label(record.get("group_label") or stage, record)
