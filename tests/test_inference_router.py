@@ -9,7 +9,7 @@ import joblib
 import pandas as pd
 
 from alttez.features.klement import MODEL_FEATURE_COLUMNS
-from alttez.inference.router import XGBOOST_FEATURE_COLUMNS, _is_prediction_supported, build_active_predictor
+from alttez.inference.router import XGBOOST_FEATURE_COLUMNS, _is_prediction_supported, build_active_predictor, most_likely_score_from_matrix
 from alttez.training.challenger_cycle import FEATURE_COLUMNS as CHALLENGER_FEATURE_COLUMNS
 
 
@@ -141,6 +141,10 @@ class TestInferenceRouter(unittest.TestCase):
             places=6,
         )
         self.assertEqual(prediction["prob_matrix"].shape, (8, 8))
+        expected_score, expected_probability = most_likely_score_from_matrix(prediction["prob_matrix"])
+        self.assertEqual(prediction["primary_score"], expected_score)
+        self.assertAlmostEqual(prediction["primary_score_probability"], expected_probability)
+        self.assertEqual(prediction["ev_optimal_score"], prediction["recommendations"].iloc[0]["Pronostico"])
 
     def test_xgboost_feature_payload_includes_klement_context(self) -> None:
         artifact_dir = Path("artifacts/test-router")

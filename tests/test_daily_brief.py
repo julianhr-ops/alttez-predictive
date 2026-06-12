@@ -90,7 +90,14 @@ class TestDailyBrief(unittest.TestCase):
                     "best_market": "Victoria Nigeria",
                     "best_market_probability": 0.53,
                     "primary_score": "1 - 0",
+                    "primary_score_probability": 0.142,
                     "primary_ev": 5.337,
+                    "ev_optimal_score": "1 - 0",
+                    "ev_optimal_value": 5.337,
+                    "score_probability_chart": [
+                        {"score": "1 - 0", "probability": 0.142},
+                        {"score": "2 - 0", "probability": 0.104},
+                    ],
                     "confidence_local": 0.7,
                     "confidence_visitante": 0.58,
                     "matches_local": 20,
@@ -113,6 +120,10 @@ class TestDailyBrief(unittest.TestCase):
         self.assertIn("Agenda priorizada", html)
         self.assertIn("Nigeria", html)
         self.assertIn("Provider degraded", html)
+        self.assertIn("https://cdn.jsdelivr.net/npm/chart.js", html)
+        self.assertIn("score-chart-0", html)
+        self.assertIn("Prob. score", html)
+        self.assertIn("Score optimo EV", html)
 
     def test_build_telegram_summary_text_is_executive_and_compact(self) -> None:
         payload = {

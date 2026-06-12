@@ -84,6 +84,9 @@ class TestKlementFeatures(unittest.TestCase):
         self.assertIn("elo_delta_diff_30", feature_df.columns)
         self.assertIn("knockout_weight_diff", feature_df.columns)
         self.assertIn("continent_advantage_diff", feature_df.columns)
+        self.assertIn("h2h_win_balance", feature_df.columns)
+        self.assertIn("h2h_sample_size", feature_df.columns)
+        self.assertNotIn("weather_temperature_c", feature_df.columns)
         self.assertEqual(feature_df.iloc[1]["home_continent_advantage"], 1.0)
         self.assertEqual(feature_df.iloc[1]["away_continent_advantage"], 0.0)
         self.assertGreaterEqual(state.final_ratings["Mexico"], 0.0)
@@ -134,6 +137,38 @@ class TestKlementFeatures(unittest.TestCase):
         self.assertEqual(payload["home_win_streak"], 3.0)
         self.assertAlmostEqual(payload["home_goals_for_rate"], 2.0)  # (2 + 1 + 3) / 3
         self.assertEqual(payload["home_rest_days"], 11.0)  # 2025-02-01 minus 2025-01-21
+
+    def test_h2h_result_features_are_causal_and_sparse(self) -> None:
+        rows = [
+            ("2025-01-01", "Mexico", "Brazil", 1, 0, True),
+            ("2025-06-01", "Brazil", "Mexico", 2, 2, True),
+            ("2025-12-01", "Brazil", "Mexico", 3, 1, True),
+        ]
+        df = pd.DataFrame(rows, columns=["date", "home_team", "away_team", "home_score", "away_score", "neutral"])
+        df["date"] = pd.to_datetime(df["date"])
+
+        with patch("alttez.features.klement.load_team_macro_context", return_value={}):
+            feature_df, state = build_klement_feature_state(df)
+
+        self.assertEqual(feature_df.iloc[0]["h2h_sample_size"], 0.0)
+        self.assertEqual(feature_df.iloc[1]["h2h_away_wins"], 1.0)
+        self.assertEqual(feature_df.iloc[1]["h2h_win_balance"], -1.0)
+
+        payload = build_match_feature_payload(
+            home_team="Mexico",
+            away_team="Brazil",
+            is_neutral=True,
+            is_knockout=False,
+            recent_state={},
+            klement_state=state,
+            reference_date=pd.Timestamp("2026-01-01"),
+        )
+
+        self.assertEqual(payload["h2h_sample_size"], 3.0)
+        self.assertEqual(payload["h2h_home_wins"], 1.0)
+        self.assertEqual(payload["h2h_away_wins"], 1.0)
+        self.assertEqual(payload["h2h_draws"], 1.0)
+        self.assertEqual(payload["h2h_win_balance"], 0.0)
 
     def test_continent_advantage_uses_same_host_mapping_for_inference_context(self) -> None:
         home_flag, away_flag, diff = compute_continent_advantage_flags(

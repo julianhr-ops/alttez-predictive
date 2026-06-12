@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import json
+import logging
 from datetime import date, datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -16,6 +17,7 @@ from alttez.api.db import get_engine, read_dataframe
 from alttez.api.settings import load_local_env
 
 
+LOGGER = logging.getLogger(__name__)
 DEFAULT_SCHEMA = "public"
 DEFAULT_POISSON_MODEL_VERSION = "poisson-champion-v2"
 DEFAULT_POISSON_MODEL_FAMILY = "poisson"
@@ -134,6 +136,15 @@ def _filter_match_prediction_row(match_payload: dict[str, Any], run_row_id: Any,
             "city": match_payload.get("city"),
             "status": match_payload.get("status"),
             "support_message": match_payload.get("support_message"),
+            "primary_score_probability": match_payload.get("primary_score_probability"),
+            "ev_optimal_score": match_payload.get("ev_optimal_score"),
+            "ev_optimal_value": match_payload.get("ev_optimal_value"),
+            "score_selection_policy": match_payload.get("score_selection_policy"),
+            "committee_consensus_used": match_payload.get("committee_consensus_used"),
+            "committee_members": match_payload.get("committee_members"),
+            "committee_weights": match_payload.get("committee_weights"),
+            "discordance_warning": match_payload.get("discordance_warning"),
+            "member_primary_scores": match_payload.get("member_primary_scores"),
         },
     }
 
@@ -370,6 +381,35 @@ def close_finished_prediction_evaluations(
                 set_=update_map,
             )
             connection.execute(stmt)
+        audit_filter = "where mp.match_date = :target_date" if target_date is not None else ""
+        audit_params = {"target_date": target_date.isoformat()} if target_date is not None else {}
+        audit_row = connection.execute(
+            text(
+                f"""
+                select
+                    count(*) as evaluated_predictions,
+                    avg(pe.brier_1x2) as brier_score,
+                    avg(pe.log_loss_1x2) as log_loss,
+                    avg(case when pe.hit_1x2 then 1.0 else 0.0 end) as accuracy_1x2,
+                    avg(case when pe.hit_exact_score then 1.0 else 0.0 end) as exact_score_hit_rate
+                from public.prediction_evaluations as pe
+                join public.match_predictions as mp
+                    on mp.id = pe.prediction_id
+                {audit_filter}
+                """
+            ),
+            audit_params,
+        ).mappings().first()
+
+    if audit_row and int(audit_row["evaluated_predictions"] or 0) > 0:
+        LOGGER.info(
+            "prediction_learning_audit evaluated=%s brier=%.4f log_loss=%.4f accuracy_1x2=%.3f exact_score_hit=%.3f",
+            int(audit_row["evaluated_predictions"] or 0),
+            float(audit_row["brier_score"] or 0.0),
+            float(audit_row["log_loss"] or 0.0),
+            float(audit_row["accuracy_1x2"] or 0.0),
+            float(audit_row["exact_score_hit_rate"] or 0.0),
+        )
 
     return {
         "prediction_evaluations_closed": len(evaluation_rows if 'evaluation_rows' in locals() else []),
@@ -419,6 +459,71 @@ def load_prediction_overview(*, database_url: str | None = None, lookback_days: 
         "log_loss": float(df["log_loss_1x2"].mean()),
         "accuracy_1x2": float(df["hit_1x2"].mean()),
         "exact_score_hit_rate": float(df["hit_exact_score"].mean()),
+    }
+
+
+def load_prediction_learning_audit(*, database_url: str | None = None, lookback_days: int = 180) -> dict[str, Any]:
+    params = {"lookback_start": (datetime.now(timezone.utc).date() - pd.Timedelta(days=lookback_days)).isoformat()}
+    try:
+        df = read_dataframe(
+            """
+            select
+                mp.model_version,
+                pe.brier_1x2,
+                pe.log_loss_1x2,
+                pe.hit_1x2,
+                pe.hit_exact_score
+            from public.prediction_evaluations as pe
+            join public.match_predictions as mp
+                on mp.id = pe.prediction_id
+            where mp.match_date >= :lookback_start
+            """,
+            params=params,
+            database_url=database_url,
+        )
+    except Exception as exc:
+        return {
+            "evaluated_predictions": 0,
+            "brier_score": 0.0,
+            "log_loss": 0.0,
+            "accuracy_1x2": 0.0,
+            "exact_score_hit_rate": 0.0,
+            "models": [],
+            "error": str(exc),
+        }
+
+    if df.empty:
+        return {
+            "evaluated_predictions": 0,
+            "brier_score": 0.0,
+            "log_loss": 0.0,
+            "accuracy_1x2": 0.0,
+            "exact_score_hit_rate": 0.0,
+            "models": [],
+            "error": None,
+        }
+
+    models = []
+    for model_version, group in df.groupby("model_version", dropna=False):
+        models.append(
+            {
+                "model_version": str(model_version),
+                "evaluated_predictions": int(len(group)),
+                "brier_score": float(group["brier_1x2"].mean()),
+                "log_loss": float(group["log_loss_1x2"].mean()),
+                "accuracy_1x2": float(group["hit_1x2"].mean()),
+                "exact_score_hit_rate": float(group["hit_exact_score"].mean()),
+            }
+        )
+
+    return {
+        "evaluated_predictions": int(len(df)),
+        "brier_score": float(df["brier_1x2"].mean()),
+        "log_loss": float(df["log_loss_1x2"].mean()),
+        "accuracy_1x2": float(df["hit_1x2"].mean()),
+        "exact_score_hit_rate": float(df["hit_exact_score"].mean()),
+        "models": sorted(models, key=lambda row: row["evaluated_predictions"], reverse=True),
+        "error": None,
     }
 
 

@@ -51,6 +51,11 @@ MODEL_FEATURE_COLUMNS = [
     "away_win_streak",
     "h2h_goal_diff",
     "h2h_matches",
+    "h2h_home_wins",
+    "h2h_away_wins",
+    "h2h_draws",
+    "h2h_win_balance",
+    "h2h_sample_size",
     # Tier-2 macro (static prior from public.teams; sparse → coverage flag).
     "gdp_per_capita_home",
     "gdp_per_capita_away",
@@ -97,7 +102,7 @@ class KlementFeatureState:
     # Tier-1 causal state for rest/congestion/form/H2H features.
     team_match_dates: dict[str, list[pd.Timestamp]] = field(default_factory=dict)
     team_goals_history: dict[str, list[tuple[pd.Timestamp, int, int]]] = field(default_factory=dict)
-    h2h_history: dict[tuple[str, str], list[tuple[pd.Timestamp, str, int]]] = field(default_factory=dict)
+    h2h_history: dict[tuple[str, str], list[tuple[pd.Timestamp, str, int, int]]] = field(default_factory=dict)
 
 
 def _classify_competition(tournament_name: str | None, stage: str | None) -> str:
@@ -347,13 +352,39 @@ def _win_streak(goals: list[tuple[pd.Timestamp, int, int]], ref: pd.Timestamp) -
     return float(streak)
 
 
-def _h2h_goal_diff(h2h_list: list[tuple[pd.Timestamp, str, int]], ref: pd.Timestamp, home_team: str, k: int = H2H_WINDOW) -> tuple[float, float]:
-    past = [(match_home, gd) for (d, match_home, gd) in h2h_list if d < ref][-k:]
+def _h2h_goal_diff(h2h_list: list[tuple[pd.Timestamp, str, int, int]], ref: pd.Timestamp, home_team: str, k: int = H2H_WINDOW) -> tuple[float, float]:
+    past = [(match_home, home_goals - away_goals) for (d, match_home, home_goals, away_goals) in h2h_list if d < ref][-k:]
     if not past:
         return 0.0, 0.0
     # Goal difference from the CURRENT home team's perspective.
     values = [gd if match_home == home_team else -gd for (match_home, gd) in past]
     return float(sum(values) / len(values)), float(len(past))
+
+
+def _h2h_result_summary(
+    h2h_list: list[tuple[pd.Timestamp, str, int, int]],
+    ref: pd.Timestamp,
+    home_team: str,
+    k: int = H2H_WINDOW,
+) -> tuple[float, float, float, float, float]:
+    past = [(match_home, home_goals, away_goals) for (d, match_home, home_goals, away_goals) in h2h_list if d < ref][-k:]
+    if not past:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+    home_wins = 0.0
+    away_wins = 0.0
+    draws = 0.0
+    for match_home, match_home_goals, match_away_goals in past:
+        if match_home_goals == match_away_goals:
+            draws += 1.0
+            continue
+        historical_home_won = match_home_goals > match_away_goals
+        current_home_won = historical_home_won if match_home == home_team else not historical_home_won
+        if current_home_won:
+            home_wins += 1.0
+        else:
+            away_wins += 1.0
+    sample_size = float(len(past))
+    return home_wins, away_wins, draws, home_wins - away_wins, sample_size
 
 
 def build_klement_feature_state(
@@ -398,7 +429,7 @@ def build_klement_feature_state(
     seen_knockout_events: set[tuple[str, str]] = set()
     team_match_dates: dict[str, list[pd.Timestamp]] = defaultdict(list)
     team_goals_history: dict[str, list[tuple[pd.Timestamp, int, int]]] = defaultdict(list)
-    h2h_history: dict[tuple[str, str], list[tuple[pd.Timestamp, str, int]]] = defaultdict(list)
+    h2h_history: dict[tuple[str, str], list[tuple[pd.Timestamp, str, int, int]]] = defaultdict(list)
 
     elo_home_before: list[float] = []
     elo_away_before: list[float] = []
@@ -422,6 +453,11 @@ def build_klement_feature_state(
     away_streak: list[float] = []
     h2h_gd: list[float] = []
     h2h_n: list[float] = []
+    h2h_home_wins: list[float] = []
+    h2h_away_wins: list[float] = []
+    h2h_draws: list[float] = []
+    h2h_win_balance: list[float] = []
+    h2h_sample_size: list[float] = []
     home_gdp_values: list[float] = []
     away_gdp_values: list[float] = []
     gdp_cov_values: list[float] = []
@@ -468,6 +504,16 @@ def build_klement_feature_state(
         gd_value, n_value = _h2h_goal_diff(h2h_history.get(_h2h_key(home_team, away_team), []), match_date, home_team)
         h2h_gd.append(gd_value)
         h2h_n.append(n_value)
+        h_wins, a_wins, draws, win_balance, sample_size = _h2h_result_summary(
+            h2h_history.get(_h2h_key(home_team, away_team), []),
+            match_date,
+            home_team,
+        )
+        h2h_home_wins.append(h_wins)
+        h2h_away_wins.append(a_wins)
+        h2h_draws.append(draws)
+        h2h_win_balance.append(win_balance)
+        h2h_sample_size.append(sample_size)
 
         home_macro = macro_context.get(normalize_name(home_team), {})
         away_macro = macro_context.get(normalize_name(away_team), {})
@@ -500,7 +546,7 @@ def build_klement_feature_state(
         team_match_dates[away_team].append(match_date)
         team_goals_history[home_team].append((match_date, home_goals, away_goals))
         team_goals_history[away_team].append((match_date, away_goals, home_goals))
-        h2h_history[_h2h_key(home_team, away_team)].append((match_date, home_team, home_goals - away_goals))
+        h2h_history[_h2h_key(home_team, away_team)].append((match_date, home_team, home_goals, away_goals))
 
         competition_class = str(getattr(row, "competition_class", "") or "").strip().lower()
         stage = getattr(row, "stage", None)
@@ -543,6 +589,11 @@ def build_klement_feature_state(
     working_df["away_win_streak"] = away_streak
     working_df["h2h_goal_diff"] = h2h_gd
     working_df["h2h_matches"] = h2h_n
+    working_df["h2h_home_wins"] = h2h_home_wins
+    working_df["h2h_away_wins"] = h2h_away_wins
+    working_df["h2h_draws"] = h2h_draws
+    working_df["h2h_win_balance"] = h2h_win_balance
+    working_df["h2h_sample_size"] = h2h_sample_size
     working_df["gdp_per_capita_home"] = home_gdp_values
     working_df["gdp_per_capita_away"] = away_gdp_values
     working_df["gdp_per_capita_diff"] = working_df["gdp_per_capita_home"] - working_df["gdp_per_capita_away"]
@@ -633,6 +684,11 @@ def build_match_feature_payload(
     home_streak = _win_streak(klement_state.team_goals_history.get(home_team, []), ref)
     away_streak = _win_streak(klement_state.team_goals_history.get(away_team, []), ref)
     h2h_gd, h2h_n = _h2h_goal_diff(klement_state.h2h_history.get(_h2h_key(home_team, away_team), []), ref, home_team)
+    h2h_home_wins, h2h_away_wins, h2h_draws, h2h_win_balance, h2h_sample_size = _h2h_result_summary(
+        klement_state.h2h_history.get(_h2h_key(home_team, away_team), []),
+        ref,
+        home_team,
+    )
 
     return {
         "elo_difference": home_elo - away_elo,
@@ -668,6 +724,11 @@ def build_match_feature_payload(
         "away_win_streak": away_streak,
         "h2h_goal_diff": h2h_gd,
         "h2h_matches": h2h_n,
+        "h2h_home_wins": h2h_home_wins,
+        "h2h_away_wins": h2h_away_wins,
+        "h2h_draws": h2h_draws,
+        "h2h_win_balance": h2h_win_balance,
+        "h2h_sample_size": h2h_sample_size,
         "gdp_per_capita_home": float(home_macro.get("gdp_per_capita", 0.0) or 0.0),
         "gdp_per_capita_away": float(away_macro.get("gdp_per_capita", 0.0) or 0.0),
         "gdp_per_capita_diff": float(home_macro.get("gdp_per_capita", 0.0) or 0.0)

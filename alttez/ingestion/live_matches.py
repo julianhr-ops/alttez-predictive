@@ -6,7 +6,8 @@ import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -39,6 +40,29 @@ DEFAULT_FOOTBALL_DATA_COMPETITIONS = (
     "WC",
     "EC",
 )
+STRICT_WORLD_CUP_TOURNAMENT_NAME = "FIFA World Cup 2026"
+TEAM_NAME_ALIASES = {
+    "u.s.a.": "United States",
+    "usa": "United States",
+    "usmnt": "United States",
+    "united states": "United States",
+    "united states of america": "United States",
+    "bosnia-herzegovina": "Bosnia and Herzegovina",
+    "bosnia and herzegovina": "Bosnia and Herzegovina",
+    "bosnia & herzegovina": "Bosnia and Herzegovina",
+    "turkiye": "Turkey",
+    "türkiye": "Turkey",
+    "korea republic": "South Korea",
+    "south korea": "South Korea",
+    "republic of korea": "South Korea",
+    "ir iran": "Iran",
+    "iran": "Iran",
+    "cote d'ivoire": "Ivory Coast",
+    "côte d’ivoire": "Ivory Coast",
+    "côte d'ivoire": "Ivory Coast",
+    "ivory coast": "Ivory Coast",
+    "england": "England",
+}
 WORLD_CUP_KEYWORDS = (
     "fifa world cup",
     "world cup",
@@ -124,6 +148,47 @@ def normalize_name(value: str) -> str:
     return " ".join(value.strip().lower().split())
 
 
+def strict_world_cup_tournament_name() -> str:
+    return os.getenv("ALTTEZ_STRICT_WORLD_CUP_TOURNAMENT_NAME", "").strip() or STRICT_WORLD_CUP_TOURNAMENT_NAME
+
+
+def strict_world_cup_edition() -> str:
+    configured = os.getenv("ALTTEZ_STRICT_WORLD_CUP_EDITION", "").strip()
+    if configured:
+        return configured
+    match = re.search(r"\b(20\d{2}|19\d{2})\b", strict_world_cup_tournament_name())
+    return match.group(1) if match else "2026"
+
+
+def canonical_team_name(value: str | None, known_names: Iterable[str] | None = None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    normalized = normalize_name(raw)
+    alias = TEAM_NAME_ALIASES.get(normalized)
+    if alias:
+        return alias
+    if known_names:
+        known = [name for name in known_names if str(name).strip()]
+        normalized_lookup = {normalize_name(name): name for name in known}
+        if normalized in normalized_lookup:
+            return str(normalized_lookup[normalized])
+        matches = get_close_matches(normalized, list(normalized_lookup), n=1, cutoff=0.92)
+        if matches:
+            return str(normalized_lookup[matches[0]])
+    return raw
+
+
+def canonicalize_match_teams(
+    scheduled_matches: list[ScheduledMatch],
+    known_names: Iterable[str] | None = None,
+) -> list[ScheduledMatch]:
+    for match in scheduled_matches:
+        match.home_team = canonical_team_name(match.home_team, known_names)
+        match.away_team = canonical_team_name(match.away_team, known_names)
+    return scheduled_matches
+
+
 def normalize_competition_name(value: str | None) -> str:
     return normalize_name(value or "unknown tournament")
 
@@ -181,6 +246,18 @@ def infer_group_label(stage: str | None, payload: dict[str, Any] | None = None) 
         if match:
             return match.group(1).title()
 
+    return None
+
+
+def season_label_from_provider_season(season: dict[str, Any] | None) -> str | None:
+    season = season or {}
+    start_date = season.get("startDate") or season.get("start_date")
+    if start_date:
+        parsed = pd.to_datetime(start_date, errors="coerce")
+        if not pd.isna(parsed):
+            return str(parsed.year)
+    if season.get("id") is not None:
+        return str(season.get("id"))
     return None
 
 
@@ -265,7 +342,7 @@ def fetch_live_fixtures_from_stack(
 ) -> tuple[list[ScheduledMatch], list[RawMatchRecord], str | None, list[dict[str, Any]]]:
     load_local_env(override=True)
 
-    request = ProviderFetchRequest(date_from=target_date, date_to=target_date)
+    request = ProviderFetchRequest(date_from=target_date, date_to=target_date + timedelta(days=1))
     attempts: list[dict[str, Any]] = []
     configured_empty_provider: str | None = None
 
@@ -304,6 +381,11 @@ def fetch_live_fixtures_from_stack(
                     target_date,
                 )
             scheduled_matches, raw_records = filter_international_matches(scheduled_matches, raw_records)
+            scheduled_matches, raw_records = filter_matches_for_operational_date(
+                scheduled_matches,
+                raw_records,
+                target_date,
+            )
         except Exception as exc:  # noqa: BLE001 - provider isolation is intentional.
             attempts.append(
                 {
@@ -377,6 +459,8 @@ def parse_api_football_records(
 
         if not home_team or not away_team:
             continue
+        home_team = canonical_team_name(home_team)
+        away_team = canonical_team_name(away_team)
 
         status = map_api_football_status(status_info.get("short"), goals)
         scheduled_matches.append(
@@ -446,6 +530,8 @@ def parse_football_data_records(
 
         if not home_team or not away_team:
             continue
+        home_team = canonical_team_name(home_team)
+        away_team = canonical_team_name(away_team)
 
         scheduled_matches.append(
             ScheduledMatch(
@@ -453,11 +539,7 @@ def parse_football_data_records(
                 external_match_id=str(external_id),
                 kickoff_at=kickoff_at,
                 match_date=match_day,
-                season_label=(
-                    str((record.get("season") or {}).get("id"))
-                    if (record.get("season") or {}).get("id") is not None
-                    else None
-                ),
+                season_label=season_label_from_provider_season(record.get("season")),
                 stage=stage,
                 group_label=group_label,
                 tournament_name=tournament_name,
@@ -513,6 +595,8 @@ def parse_local_json_records(
         away_team = record.get("away_team")
         if external_id is None or not home_team or not away_team:
             continue
+        home_team = canonical_team_name(home_team)
+        away_team = canonical_team_name(away_team)
 
         kickoff_at = record.get("kickoff_at") or record.get("utcDate")
         match_day = match_day_from_kickoff(kickoff_at, target_date)
@@ -760,6 +844,54 @@ def filter_international_matches(
     return filtered_matches, filtered_raw
 
 
+def filter_matches_for_operational_date(
+    scheduled_matches: list[ScheduledMatch],
+    raw_records: list[RawMatchRecord],
+    target_date: date,
+) -> tuple[list[ScheduledMatch], list[RawMatchRecord]]:
+    match_ids = {
+        match.external_match_id
+        for match in scheduled_matches
+        if match.match_date == target_date
+    }
+    return (
+        [match for match in scheduled_matches if match.external_match_id in match_ids],
+        [record for record in raw_records if record.external_match_id in match_ids],
+    )
+
+
+def is_strict_world_cup_match(match: ScheduledMatch, tournament_name: str | None = None) -> bool:
+    expected = normalize_name(tournament_name or strict_world_cup_tournament_name())
+    actual = normalize_name(match.tournament_name or "")
+    if actual == expected:
+        return True
+
+    expected_base = normalize_name(re.sub(r"\b(20\d{2}|19\d{2})\b", "", tournament_name or strict_world_cup_tournament_name()))
+    expected_edition = strict_world_cup_edition()
+    if actual != expected_base:
+        return False
+    if str(match.season_label or "").strip() == expected_edition:
+        return True
+    payload_season = match.payload.get("season") if isinstance(match.payload, dict) else None
+    return season_label_from_provider_season(payload_season) == expected_edition
+
+
+def filter_strict_world_cup_matches(
+    scheduled_matches: list[ScheduledMatch],
+    raw_records: list[RawMatchRecord],
+    tournament_name: str | None = None,
+) -> tuple[list[ScheduledMatch], list[RawMatchRecord]]:
+    match_ids = {
+        match.external_match_id
+        for match in scheduled_matches
+        if is_strict_world_cup_match(match, tournament_name)
+    }
+    return (
+        [match for match in scheduled_matches if match.external_match_id in match_ids],
+        [record for record in raw_records if record.external_match_id in match_ids],
+    )
+
+
 def is_international_match(match: ScheduledMatch) -> bool:
     if match.provider in {"football_data_org", "local_json"}:
         return True
@@ -779,7 +911,7 @@ def _fetch_football_data_daily(provider, target_date: date) -> tuple[list[Schedu
         result = provider.fetch_matches(
             ProviderFetchRequest(
                 date_from=target_date,
-                date_to=target_date,
+                date_to=target_date + timedelta(days=1),
                 competition=competition,
             )
         )
@@ -808,6 +940,14 @@ def _fetch_football_data_daily(provider, target_date: date) -> tuple[list[Schedu
 
 def _optional_match_columns(matches_table: Table) -> set[str]:
     return set(matches_table.c.keys())
+
+
+def _load_known_team_names(engine: Engine, teams_table: Table | None) -> list[str]:
+    if teams_table is None:
+        return []
+    with engine.connect() as connection:
+        rows = connection.execute(select(teams_table.c.name)).all()
+    return [str(row.name) for row in rows if row.name]
 
 
 def upsert_catalogs(
@@ -1039,6 +1179,7 @@ def ingest_live_matches_for_date(
     load_local_env(override=True)
 
     scheduled_matches, raw_records, provider_used, attempts = fetch_live_fixtures_from_stack(target_date)
+    scheduled_matches, raw_records = filter_strict_world_cup_matches(scheduled_matches, raw_records)
 
     if not scheduled_matches:
         any_provider_ok = any(item["status"] == "ok" for item in attempts)
@@ -1089,6 +1230,8 @@ def ingest_live_matches_for_date(
     try:
         engine = get_engine(database_url)
         tables = reflect_tables(engine, schema)
+        known_team_names = _load_known_team_names(engine, tables.get("teams"))
+        canonicalize_match_teams(scheduled_matches, known_team_names)
         teams_map, tournaments_map = upsert_catalogs(engine, tables["teams"], tables["tournaments"], scheduled_matches)
 
         inserted_raw = 0
@@ -1201,6 +1344,11 @@ def list_matches_for_date(
     placeholders = ", ".join(f":status_{index}" for index, _ in enumerate(include_statuses))
     params = {f"status_{index}": status for index, status in enumerate(include_statuses)}
     params["target_date"] = target_date.isoformat()
+    params["world_cup_name"] = normalize_name(strict_world_cup_tournament_name())
+    params["world_cup_base_name"] = normalize_name(
+        re.sub(r"\b(20\d{2}|19\d{2})\b", "", strict_world_cup_tournament_name())
+    )
+    params["world_cup_edition"] = strict_world_cup_edition()
 
     select_fields = [
         "m.id",
@@ -1257,6 +1405,10 @@ def list_matches_for_date(
         {join_group_sql}
         where m.match_date = :target_date
           and m.status in ({placeholders})
+          and (
+              lower(tr.name) = :world_cup_name
+              or (lower(tr.name) = :world_cup_base_name and coalesce(m.season_label, '') = :world_cup_edition)
+          )
         order by m.kickoff_at nulls last, ht.name, at.name
     """
     with engine.connect() as connection:

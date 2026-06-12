@@ -26,7 +26,7 @@ from alttez.dashboard.analysis_helpers import (
     filter_noise_matches,
     safe_text,
 )
-from alttez.inference import BaseMatchPredictor, build_active_predictor
+from alttez.inference import BaseMatchPredictor, build_prediction_committee
 from alttez.ingestion.international import InternationalLoader
 from alttez.ingestion.live_matches import list_matches_for_date
 from alttez.operations.prediction_memory import (
@@ -61,6 +61,22 @@ def _build_result_summary(prob_matrix, team_a: str, team_b: str) -> pd.DataFrame
             "Probabilidad": [home_win, draw, away_win],
         }
     )
+
+
+def _top_score_probabilities(prob_matrix, limit: int = 8) -> list[dict[str, Any]]:
+    if prob_matrix is None:
+        return []
+    rows = []
+    max_goals = prob_matrix.shape[0] - 1
+    for home_goals in range(max_goals + 1):
+        for away_goals in range(max_goals + 1):
+            rows.append(
+                {
+                    "score": f"{home_goals} - {away_goals}",
+                    "probability": float(prob_matrix[home_goals, away_goals]),
+                }
+            )
+    return sorted(rows, key=lambda item: item["probability"], reverse=True)[:limit]
 
 
 def _is_prediction_supported(profile_local: dict[str, float], profile_visitante: dict[str, float]) -> tuple[bool, str | None]:
@@ -220,6 +236,13 @@ def _build_match_brief(row_dict: dict[str, Any], predictor: BaseMatchPredictor, 
         is_neutral=bool(row_dict.get("is_neutral", False)),
         is_knockout=_is_knockout_stage(safe_text(row_dict.get("stage"), "Fase por confirmar")),
         max_goals=max_goals,
+        tournament_context={
+            "tournament": safe_text(row_dict.get("tournament")),
+            "edition": safe_text(row_dict.get("season_label")),
+            "city": safe_text(row_dict.get("city")),
+            "venue_name": safe_text(row_dict.get("venue_name")),
+            "weather": row_dict.get("weather") or None,
+        },
     )
     profile_local = prediction["profile_local"]
     profile_visitante = prediction["profile_visitante"]
@@ -259,6 +282,11 @@ def _build_match_brief(row_dict: dict[str, Any], predictor: BaseMatchPredictor, 
         "model_family": prediction["model_family"],
         "used_fallback": bool(prediction.get("used_fallback", False)),
         "fallback_reason": prediction.get("fallback_reason"),
+        "committee_consensus_used": bool(prediction.get("committee_consensus_used", False)),
+        "committee_members": prediction.get("committee_members", []),
+        "committee_weights": prediction.get("committee_weights", {}),
+        "discordance_warning": bool(prediction.get("discordance_warning", False)),
+        "member_primary_scores": prediction.get("member_primary_scores", []),
     }
 
     if not prediction_supported:
@@ -268,7 +296,11 @@ def _build_match_brief(row_dict: dict[str, Any], predictor: BaseMatchPredictor, 
                 "lambda_a": None,
                 "xg_total": None,
                 "primary_score": "N/D",
+                "primary_score_probability": None,
                 "primary_ev": None,
+                "ev_optimal_score": "N/D",
+                "ev_optimal_value": None,
+                "score_probability_chart": [],
                 "best_market": "Sin soporte",
                 "best_market_probability": 0.0,
                 "prob_home": None,
@@ -289,7 +321,11 @@ def _build_match_brief(row_dict: dict[str, Any], predictor: BaseMatchPredictor, 
             "lambda_a": prediction.get("lambda_a"),
             "xg_total": round(float(prediction["lambda_h"]) + float(prediction["lambda_a"]), 2),
             "primary_score": prediction.get("primary_score", "N/D"),
+            "primary_score_probability": prediction.get("primary_score_probability"),
             "primary_ev": prediction.get("primary_ev"),
+            "ev_optimal_score": prediction.get("ev_optimal_score"),
+            "ev_optimal_value": prediction.get("ev_optimal_value"),
+            "score_probability_chart": _top_score_probabilities(prediction.get("prob_matrix")),
             "best_market": safe_text(prediction.get("best_market"), "Por definir"),
             "best_market_probability": best_market_probability,
             "prob_home": prediction.get("prob_home"),
@@ -342,7 +378,7 @@ def build_daily_brief_payload(
     agenda_df = list_matches_for_date(target_date, include_statuses=include_statuses, database_url=database_url)
     historical_loader = InternationalLoader()
     historical_df = historical_loader.fetch_data()
-    predictor = build_active_predictor(historical_df, target_date, database_url=database_url)
+    predictor = build_prediction_committee(historical_df, target_date, database_url=database_url)
     filtered_agenda = filter_noise_matches(
         agenda_df,
         lambda row_dict: _support_lookup_from_predictor(predictor, row_dict),
@@ -576,13 +612,21 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
             )
         )
 
+    chart_payload: dict[str, list[dict[str, Any]]] = {}
     detail_cards = []
-    for match in matches:
+    for match_index, match in enumerate(matches):
+        chart_id = f"score-chart-{match_index}"
+        chart_payload[chart_id] = match.get("score_probability_chart", [])
         alt_text = " | ".join(
             f"{item['Pronostico']} (EV {_fmt_float(item['EV'], digits=3)})"
             for item in match.get("alternatives", [])
         ) or "Sin escenarios alternativos"
         risk_note = match.get("support_message") or "Cobertura aceptable para analisis diario."
+        committee_note = (
+            "Discordancia alta entre modelos: " + ", ".join(match.get("member_primary_scores", []))
+            if match.get("discordance_warning")
+            else "Consenso de comité activo."
+        )
         detail_cards.append(
             """
             <article class="match-card">
@@ -599,15 +643,22 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 <div class="metric"><span>1X2 principal</span><strong>{market}</strong></div>
                 <div class="metric"><span>Probabilidad</span><strong>{market_prob}</strong></div>
                 <div class="metric"><span>Pronostico ALTTEZ</span><strong>{prediction}</strong></div>
+                <div class="metric"><span>Prob. score</span><strong>{score_prob}</strong></div>
+                <div class="metric"><span>Score optimo EV</span><strong>{ev_score}</strong></div>
                 <div class="metric"><span>EV esperado</span><strong>{ev}</strong></div>
                 <div class="metric"><span>Confianza media</span><strong>{avg_confidence}</strong></div>
                 <div class="metric"><span>Historial util</span><strong>{history}</strong></div>
               </div>
+              <div class="score-chart-wrap">
+                <canvas id="{chart_id}" height="160" aria-label="Distribucion de probabilidad de marcadores"></canvas>
+              </div>
               <p><strong>Forma reciente:</strong> {home} {home_form} pts/j, GD {home_gd} | {away} {away_form} pts/j, GD {away_gd}</p>
               <p><strong>Escenarios cercanos:</strong> {alternatives}</p>
+              <p><strong>Comite predictivo:</strong> {committee}</p>
               <p><strong>Riesgo operativo:</strong> {risk}</p>
             </article>
             """.format(
+                chart_id=chart_id,
                 competition=html.escape(match["competition_label"]),
                 tournament=html.escape(match["tournament"]),
                 stage=html.escape(match["stage"]),
@@ -624,6 +675,8 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 market=html.escape(match.get("best_market") or "N/D"),
                 market_prob=html.escape(_fmt_pct(match.get("best_market_probability"))),
                 prediction=html.escape(match.get("primary_score") or "N/D"),
+                score_prob=html.escape(_fmt_pct(match.get("primary_score_probability"))),
+                ev_score=html.escape(safe_text(match.get("ev_optimal_score"), "N/D")),
                 ev=html.escape(_fmt_float(match.get("primary_ev"), digits=3)),
                 avg_confidence=html.escape(
                     _fmt_pct(((match["confidence_local"] + match["confidence_visitante"]) / 2))
@@ -637,6 +690,7 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 away_form=html.escape(_fmt_float(match["recent_points_visitante"], digits=2)),
                 away_gd=html.escape(_fmt_float(match["recent_goal_diff_visitante"], digits=2)),
                 alternatives=html.escape(alt_text),
+                committee=html.escape(committee_note),
                 risk=html.escape(risk_note),
             )
         )
@@ -661,12 +715,15 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
             )
         )
 
+    chart_json = json.dumps(chart_payload, ensure_ascii=False)
+
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ALTTEZ Daily Decision Brief | {html.escape(payload['target_date'])}</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     :root {{
       --graphite: #111315;
@@ -751,6 +808,14 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
     }}
     .metric span {{ display: block; color: var(--muted); font-size: 12px; }}
     .metric strong {{ display: block; margin-top: 4px; font-size: 18px; }}
+    .score-chart-wrap {{
+      min-height: 190px;
+      margin: 16px 0;
+      padding: 12px;
+      border: 1px solid rgba(17, 19, 21, 0.08);
+      border-radius: 14px;
+      background: rgba(255,255,255,0.64);
+    }}
     .footer {{ margin-top: 24px; color: var(--muted); font-size: 13px; }}
     @media (max-width: 1080px) {{
       .stats, .grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
@@ -847,6 +912,38 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
       Generado en {html.escape(payload['generated_at'])} | Fuente de agenda: Supabase canonical matches | Motor: {html.escape(safe_text(payload.get('model_family'), 'poisson'))} / {html.escape(safe_text(payload.get('model_version'), 'ALTTEZ'))}
     </div>
   </div>
+<script>
+  const scoreCharts = {chart_json};
+  Object.entries(scoreCharts).forEach(([id, rows]) => {{
+    const canvas = document.getElementById(id);
+    if (!canvas || !rows || !rows.length || typeof Chart === "undefined") return;
+    new Chart(canvas, {{
+      type: "bar",
+      data: {{
+        labels: rows.map((row) => row.score),
+        datasets: [{{
+          label: "Probabilidad de marcador",
+          data: rows.map((row) => Math.round(row.probability * 1000) / 10),
+          backgroundColor: "rgba(63, 109, 181, 0.72)",
+          borderColor: "rgba(18, 53, 93, 0.9)",
+          borderWidth: 1
+        }}]
+      }},
+      options: {{
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {{
+          legend: {{ display: false }},
+          tooltip: {{ callbacks: {{ label: (ctx) => `${{ctx.parsed.y.toFixed(1)}}%` }} }}
+        }},
+        scales: {{
+          y: {{ beginAtZero: true, ticks: {{ callback: (value) => `${{value}}%` }} }},
+          x: {{ grid: {{ display: false }} }}
+        }}
+      }}
+    }});
+  }});
+</script>
 </body>
 </html>
 """

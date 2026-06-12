@@ -22,6 +22,7 @@ from alttez.features.klement import (
     build_klement_feature_state,
     build_match_feature_payload,
 )
+from alttez.ingestion.live_matches import canonical_team_name
 from alttez.features.poisson import PoissonEngine
 
 
@@ -111,6 +112,12 @@ def _numeric_result_summary(prob_matrix: np.ndarray, team_a: str, team_b: str) -
             "Probabilidad": [home_win, draw, away_win],
         }
     )
+
+
+def most_likely_score_from_matrix(prob_matrix: np.ndarray) -> tuple[str, float]:
+    flat_index = int(np.argmax(prob_matrix))
+    home_goals, away_goals = np.unravel_index(flat_index, prob_matrix.shape)
+    return f"{int(home_goals)} - {int(away_goals)}", float(prob_matrix[home_goals, away_goals])
 
 
 def _support_threshold() -> int:
@@ -205,7 +212,7 @@ class PoissonMatchPredictor(BaseMatchPredictor):
         self.engine.fit(historical_df, target_date=target_date)
 
     def get_team_profile(self, team: str) -> dict[str, float]:
-        return self.engine.get_team_profile(team)
+        return self.engine.get_team_profile(canonical_team_name(team))
 
     def predict_match(
         self,
@@ -217,6 +224,8 @@ class PoissonMatchPredictor(BaseMatchPredictor):
         max_goals: int = DEFAULT_MAX_GOALS,
         tournament_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        home_team = canonical_team_name(home_team)
+        away_team = canonical_team_name(away_team)
         profile_local = self.get_team_profile(home_team)
         profile_visitante = self.get_team_profile(away_team)
         prediction_supported, support_message = _is_prediction_supported(profile_local, profile_visitante)
@@ -244,7 +253,11 @@ class PoissonMatchPredictor(BaseMatchPredictor):
                 "result_summary": pd.DataFrame(),
                 "recommendations": pd.DataFrame(),
                 "primary_score": "N/D",
+                "primary_score_probability": None,
                 "primary_ev": None,
+                "ev_optimal_score": "N/D",
+                "ev_optimal_value": None,
+                "score_selection_policy": "most_likely_score",
                 "best_market": "Sin soporte",
                 "best_market_probability": 0.0,
             }
@@ -253,6 +266,8 @@ class PoissonMatchPredictor(BaseMatchPredictor):
         prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=DEFAULT_DIXON_COLES_RHO)
         recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
+        primary_score, primary_score_probability = most_likely_score_from_matrix(prob_matrix)
+        ev_row = recommendations.iloc[0].to_dict() if not recommendations.empty else {"Pronostico": "N/D", "EV": None}
         result_summary = _numeric_result_summary(prob_matrix, home_team, away_team)
         result_probabilities = {
             row["Mercado"]: float(row["Probabilidad"])
@@ -262,7 +277,6 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             result_summary.to_dict(orient="records"),
             key=lambda row: float(row["Probabilidad"]),
         )
-        primary_row = recommendations.iloc[0].to_dict() if not recommendations.empty else {"Pronostico": "N/D", "EV": None}
 
         return {
             "model_version": self.model_version,
@@ -284,8 +298,12 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             "prob_away": result_probabilities.get(f"Victoria {away_team}"),
             "result_summary": result_summary,
             "recommendations": recommendations,
-            "primary_score": str(primary_row.get("Pronostico") or "N/D"),
-            "primary_ev": primary_row.get("EV"),
+            "primary_score": primary_score,
+            "primary_score_probability": primary_score_probability,
+            "primary_ev": ev_row.get("EV"),
+            "ev_optimal_score": str(ev_row.get("Pronostico") or "N/D"),
+            "ev_optimal_value": ev_row.get("EV"),
+            "score_selection_policy": "most_likely_score",
             "best_market": str(best_market.get("Mercado") or "Por definir"),
             "best_market_probability": float(best_market.get("Probabilidad") or 0.0),
         }
@@ -342,6 +360,8 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         is_knockout: bool,
         tournament_context: dict[str, Any] | None,
     ) -> pd.DataFrame:
+        home_team = canonical_team_name(home_team)
+        away_team = canonical_team_name(away_team)
         feature_row = build_match_feature_payload(
             home_team=home_team,
             away_team=away_team,
@@ -355,7 +375,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         return pd.DataFrame([{column: feature_row.get(column, 0.0) for column in self.feature_columns}])
 
     def get_team_profile(self, team: str) -> dict[str, float]:
-        return self.poisson_baseline.get_team_profile(team)
+        return self.poisson_baseline.get_team_profile(canonical_team_name(team))
 
     def predict_match(
         self,
@@ -367,6 +387,8 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         max_goals: int = DEFAULT_MAX_GOALS,
         tournament_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        home_team = canonical_team_name(home_team)
+        away_team = canonical_team_name(away_team)
         baseline = self.poisson_baseline.predict_match(
             home_team,
             away_team,
@@ -391,13 +413,14 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=DEFAULT_DIXON_COLES_RHO)
             recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
             recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
+            primary_score, primary_score_probability = most_likely_score_from_matrix(prob_matrix)
             result_summary = _numeric_result_summary(prob_matrix, home_team, away_team)
             result_probabilities = {
                 row["Mercado"]: float(row["Probabilidad"])
                 for row in result_summary.to_dict(orient="records")
             }
             market_rows = result_summary.to_dict(orient="records")
-            primary_row = recommendations.iloc[0].to_dict() if not recommendations.empty else {"Pronostico": "N/D", "EV": None}
+            ev_row = recommendations.iloc[0].to_dict() if not recommendations.empty else {"Pronostico": "N/D", "EV": None}
             baseline["lambda_h"] = float(lambda_h)
             baseline["lambda_a"] = float(lambda_a)
             baseline["prob_matrix"] = prob_matrix
@@ -406,8 +429,12 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             baseline["prob_away"] = result_probabilities.get(f"Victoria {away_team}")
             baseline["result_summary"] = result_summary
             baseline["recommendations"] = recommendations
-            baseline["primary_score"] = str(primary_row.get("Pronostico") or "N/D")
-            baseline["primary_ev"] = primary_row.get("EV")
+            baseline["primary_score"] = primary_score
+            baseline["primary_score_probability"] = primary_score_probability
+            baseline["primary_ev"] = ev_row.get("EV")
+            baseline["ev_optimal_score"] = str(ev_row.get("Pronostico") or "N/D")
+            baseline["ev_optimal_value"] = ev_row.get("EV")
+            baseline["score_selection_policy"] = "most_likely_score"
         else:
             probabilities = self.model.predict_proba(feature_df)[0]
             probability_map = {label: float(probabilities[idx]) for idx, label in enumerate(self.label_order)}

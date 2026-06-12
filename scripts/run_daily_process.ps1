@@ -1,7 +1,6 @@
 param(
     [string]$Date = ([DateTime]::UtcNow.ToString("yyyy-MM-dd")),
     [switch]$ApplyMigrations,
-    [switch]$WriteSmoke,
     [string]$DatabaseUrl = $null,
     [string]$ProviderOrder = $null,
     [string]$Schema = "public"
@@ -18,8 +17,43 @@ $smoke = Join-Path $root "scripts\smoke_live_pipeline.py"
 $brief = Join-Path $root "scripts\generate_daily_brief.py"
 $challenger = Join-Path $root "scripts\run_challenger_cycle.py"
 $pipelineAlert = Join-Path $root "scripts\send_pipeline_alert.py"
+$envPath = Join-Path $root ".env"
+
+function Get-AlttezEnvValue {
+    param([string]$Name)
+
+    $processValue = [Environment]::GetEnvironmentVariable($Name)
+    if ($processValue) {
+        return $processValue.Trim()
+    }
+
+    if (-not (Test-Path $envPath)) {
+        return $null
+    }
+
+    $line = Get-Content -Path $envPath | Where-Object {
+        $_ -match "^\s*$([regex]::Escape($Name))\s*="
+    } | Select-Object -First 1
+
+    if (-not $line) {
+        return $null
+    }
+
+    return (($line -split "=", 2)[1]).Trim().Trim('"').Trim("'")
+}
+
+function Clear-LoopbackProxyTrap {
+    foreach ($Name in @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")) {
+        $value = [Environment]::GetEnvironmentVariable($Name, "Process")
+        if ($value -and $value -match "^https?://(127\.0\.0\.1|localhost):9/?$") {
+            [Environment]::SetEnvironmentVariable($Name, $null, "Process")
+            Write-Output "PROCESS: cleared invalid local proxy $Name"
+        }
+    }
+}
 
 Set-Location $root
+Clear-LoopbackProxyTrap
 
 try {
     $CurrentStage = "shadow readiness"
@@ -41,12 +75,9 @@ try {
         }
     }
 
-    $CurrentStage = "smoke live pipeline"
-    Write-Output "PROCESS: smoke live pipeline"
-    $smokeArgs = @($smoke, "--date", $Date)
-    if ($WriteSmoke) {
-        $smokeArgs += "--write"
-    }
+    $CurrentStage = "forced live ingestion and evaluation closure"
+    Write-Output "PROCESS: forced live ingestion and evaluation closure"
+    $smokeArgs = @($smoke, "--date", $Date, "--write")
     if ($ProviderOrder) {
         $smokeArgs += @("--provider-order", $ProviderOrder)
     }
@@ -59,16 +90,19 @@ try {
 
     & $python @smokeArgs
     if ($LASTEXITCODE -ne 0) {
-        throw "Smoke pipeline failed."
+        throw "Forced live ingestion failed."
     }
 
-    $CurrentStage = "daily decision brief"
-    Write-Output "PROCESS: daily decision brief"
+    Write-Output "PROCESS: prediction evaluations closed during ingestion finalize"
+
+    $CurrentStage = "committee daily decision brief"
+    Write-Output "PROCESS: committee daily decision brief"
     $briefArgs = @($brief, "--date", $Date)
     if ($DatabaseUrl) {
         $briefArgs += @("--database-url", $DatabaseUrl)
     }
-    if ($env:ALTTEZ_DAILY_BRIEF_DELIVER -eq "true") {
+    $deliverBrief = (Get-AlttezEnvValue "ALTTEZ_DAILY_BRIEF_DELIVER")
+    if ($deliverBrief -and $deliverBrief.ToLowerInvariant() -in @("1", "true", "yes", "on")) {
         $briefArgs += "--deliver"
     }
     & $python @briefArgs
