@@ -7,11 +7,19 @@ from alttez.reports.daily_brief import (
     _decision_tier,
     _executive_decision_label,
     exit_code_for_brief_result,
+    localize_prediction_text,
     render_daily_brief_html,
+    team_display_name,
 )
 
 
 class TestDailyBrief(unittest.TestCase):
+    def test_team_and_market_names_are_localized_for_spanish_reports(self) -> None:
+        self.assertEqual(team_display_name("Germany"), "Alemania")
+        self.assertEqual(team_display_name("Netherlands"), "Países Bajos")
+        self.assertEqual(localize_prediction_text("Victoria Germany"), "Victoria Alemania")
+        self.assertEqual(localize_prediction_text("Victoria Ivory Coast"), "Victoria Costa de Marfil")
+
     def test_decision_tier_prioritizes_supported_confident_matches(self) -> None:
         self.assertEqual(_decision_tier("Analizable", 0.72, 0.49), "Alta prioridad")
         self.assertEqual(_decision_tier("Soporte parcial", 0.42, 0.37), "Seguimiento")
@@ -123,7 +131,8 @@ class TestDailyBrief(unittest.TestCase):
         self.assertIn("https://cdn.jsdelivr.net/npm/chart.js", html)
         self.assertIn("score-chart-0", html)
         self.assertIn("Prob. score", html)
-        self.assertIn("Score optimo EV", html)
+        self.assertIn("Score estrategia EV", html)
+        self.assertIn("Pronosticos alternativos", html)
 
     def test_build_telegram_summary_text_is_executive_and_compact(self) -> None:
         payload = {
@@ -168,6 +177,70 @@ class TestDailyBrief(unittest.TestCase):
         self.assertIn("Decision principal", message)
         self.assertIn("xgboost / xgboost-challenger-v1", message)
         self.assertIn("Adjuntos", message)
+
+    def test_build_telegram_summary_text_includes_full_ranked_agenda(self) -> None:
+        payload = {
+            "target_date": "2026-06-13",
+            "model_family": "committee",
+            "model_version": "committee-consensus-v1",
+            "used_fallback": False,
+            "summary": {
+                "total_matches": 4,
+                "analyzable_matches": 4,
+                "high_priority_matches": 0,
+                "critical_alerts": 0,
+                "warning_alerts": 0,
+                "coverage_pct": 0.0,
+                "ranked_matches": [
+                    {
+                        "home_team": "Qatar",
+                        "away_team": "Switzerland",
+                        "best_market": "Victoria Switzerland",
+                        "best_market_probability": 0.53,
+                        "primary_score": "1 - 1",
+                        "primary_ev": 2.921,
+                        "support_label": "Analizable",
+                    },
+                    {
+                        "home_team": "Brazil",
+                        "away_team": "Morocco",
+                        "best_market": "Victoria Brazil",
+                        "best_market_probability": 0.52,
+                        "primary_score": "1 - 1",
+                        "primary_ev": 3.04,
+                        "support_label": "Analizable",
+                    },
+                    {
+                        "home_team": "Haiti",
+                        "away_team": "Scotland",
+                        "best_market": "Victoria Haiti",
+                        "best_market_probability": 0.40,
+                        "primary_score": "1 - 1",
+                        "primary_ev": 3.143,
+                        "support_label": "Analizable",
+                    },
+                    {
+                        "home_team": "Australia",
+                        "away_team": "Turkey",
+                        "best_market": "Victoria Australia",
+                        "best_market_probability": 0.38,
+                        "primary_score": "1 - 1",
+                        "primary_ev": 3.163,
+                        "support_label": "Analizable",
+                    },
+                ],
+            },
+            "batch_summary": {
+                "provider_used": "football_data_org",
+                "certification_status": "skipped",
+                "quarantine_reason": None,
+            },
+        }
+
+        message = _build_telegram_summary_text(payload)
+
+        self.assertIn("Australia", message)
+        self.assertIn("Turkey", message)
 
     def test_executive_decision_label_maps_match_priority(self) -> None:
         self.assertEqual(

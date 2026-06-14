@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Any
 
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -18,7 +20,7 @@ from alttez.inference.router import (
     _numeric_result_summary,
     _selection_from_record,
     build_active_predictor,
-    most_likely_score_from_matrix,
+    exact_scoreline_decision,
 )
 from alttez.ingestion.live_matches import canonical_team_name
 
@@ -62,7 +64,7 @@ def load_latest_challenger_record(*, database_url: str | None = None) -> dict[st
               and status = 'challenger'
               and artifact_path is not null
             order by trained_at desc
-            limit 1
+            limit 20
             """,
             database_url=database_url,
         )
@@ -71,7 +73,41 @@ def load_latest_challenger_record(*, database_url: str | None = None) -> dict[st
 
     if df.empty:
         return None
-    return df.iloc[0].to_dict()
+    for record in df.to_dict(orient="records"):
+        artifact_path = str(record.get("artifact_path") or "").strip()
+        artifact = Path(artifact_path)
+        if not artifact_path or not artifact.exists():
+            LOGGER.debug(
+                "challenger_record_skipped_missing_artifact version_key=%s artifact_path=%s",
+                record.get("version_key"),
+                artifact_path or "N/D",
+            )
+            continue
+        if artifact.suffix.lower() != ".joblib":
+            LOGGER.debug(
+                "challenger_record_skipped_non_model_artifact version_key=%s artifact_path=%s",
+                record.get("version_key"),
+                artifact_path,
+            )
+            continue
+        try:
+            payload = joblib.load(artifact)
+        except Exception as exc:  # noqa: BLE001 - invalid challenger should not break committee construction.
+            LOGGER.debug(
+                "challenger_record_skipped_unloadable_artifact version_key=%s artifact_path=%s detail=%s",
+                record.get("version_key"),
+                artifact_path,
+                exc,
+            )
+            continue
+        if isinstance(payload, dict) and (payload.get("model") is not None or payload.get("models")):
+            return record
+        LOGGER.debug(
+            "challenger_record_skipped_invalid_model_artifact version_key=%s artifact_path=%s",
+            record.get("version_key"),
+            artifact_path,
+        )
+    return None
 
 
 def _score_to_tuple(score: str | None) -> tuple[int, int] | None:
@@ -210,8 +246,7 @@ class PredictionCommittee(BaseMatchPredictor):
         consensus_matrix = consensus_matrix / consensus_matrix.sum()
         recommendations = optimize_prediction(consensus_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
-        primary_score, primary_score_probability = most_likely_score_from_matrix(consensus_matrix)
-        ev_row = recommendations.iloc[0].to_dict() if not recommendations.empty else {"Pronostico": "N/D", "EV": None}
+        score_decision = exact_scoreline_decision(consensus_matrix, recommendations, is_knockout=is_knockout)
         result_summary = _numeric_result_summary(consensus_matrix, home_team, away_team)
         result_probabilities = {
             row["Mercado"]: float(row["Probabilidad"])
@@ -250,12 +285,18 @@ class PredictionCommittee(BaseMatchPredictor):
             "prob_away": result_probabilities.get(f"Victoria {away_team}"),
             "result_summary": result_summary,
             "recommendations": recommendations,
-            "primary_score": primary_score,
-            "primary_score_probability": primary_score_probability,
-            "primary_ev": ev_row.get("EV"),
-            "ev_optimal_score": str(ev_row.get("Pronostico") or "N/D"),
-            "ev_optimal_value": ev_row.get("EV"),
-            "score_selection_policy": "committee_consensus_matrix",
+            "primary_score": score_decision["primary_score"],
+            "primary_score_probability": score_decision["primary_score_probability"],
+            "primary_outcome": score_decision["primary_outcome"],
+            "most_likely_score": score_decision["most_likely_score"],
+            "most_likely_score_probability": score_decision["most_likely_score_probability"],
+            "primary_ev": score_decision["primary_ev"],
+            "ev_optimal_score": score_decision["ev_optimal_score"],
+            "ev_optimal_probability": score_decision["ev_optimal_probability"],
+            "ev_optimal_value": score_decision["ev_optimal_value"],
+            "primary_score_scenarios": score_decision["primary_score_scenarios"],
+            "scoreline_candidates": score_decision["scoreline_candidates"],
+            "score_selection_policy": "committee_most_likely_outcome_exact_score",
             "best_market": str(best_market.get("Mercado") or "Por definir"),
             "best_market_probability": float(best_market.get("Probabilidad") or 0.0),
             "committee_members": member_predictions,

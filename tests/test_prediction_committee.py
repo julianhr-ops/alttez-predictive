@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
-from alttez.inference.prediction_committee import CommitteeMember, PredictionCommittee
+from alttez.inference.prediction_committee import CommitteeMember, PredictionCommittee, load_latest_challenger_record
 from alttez.inference.router import ActiveModelSelection, BaseMatchPredictor, most_likely_score_from_matrix
 
 
@@ -73,6 +75,46 @@ class DummyPredictor(BaseMatchPredictor):
 
 
 class TestPredictionCommittee(unittest.TestCase):
+    def test_latest_challenger_record_skips_missing_local_artifact(self) -> None:
+        registry_df = pd.DataFrame(
+            [
+                {
+                    "version_key": "xgboost-newer",
+                    "model_version": "xgboost-challenger-v2",
+                    "model_family": "xgboost",
+                    "status": "challenger",
+                    "artifact_path": "artifacts/model-artifacts/missing.joblib",
+                },
+                {
+                    "version_key": "xgboost-json",
+                    "model_version": "xgboost-challenger-v2",
+                    "model_family": "xgboost",
+                    "status": "challenger",
+                    "artifact_path": "artifacts/model-evals/report.json",
+                },
+                {
+                    "version_key": "xgboost-valid",
+                    "model_version": "xgboost-challenger-v2",
+                    "model_family": "xgboost",
+                    "status": "challenger",
+                    "artifact_path": "artifacts/model-artifacts/xgboost-valid.joblib",
+                },
+            ]
+        )
+
+        def exists_side_effect(path: Path) -> bool:
+            return path.name in {"report.json", "xgboost-valid.joblib"}
+
+        with (
+            patch("alttez.inference.prediction_committee.read_dataframe", return_value=registry_df),
+            patch("alttez.inference.prediction_committee.Path.exists", exists_side_effect),
+            patch("alttez.inference.prediction_committee.joblib.load", return_value={"model": object()}),
+        ):
+            record = load_latest_challenger_record()
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record["version_key"], "xgboost-valid")
+
     def test_committee_builds_weighted_consensus_matrix(self) -> None:
         committee = PredictionCommittee(
             [
@@ -87,7 +129,8 @@ class TestPredictionCommittee(unittest.TestCase):
         self.assertTrue(prediction["committee_consensus_used"])
         self.assertEqual(prediction["primary_score"], "1 - 0")
         self.assertFalse(prediction["discordance_warning"])
-        self.assertEqual(prediction["score_selection_policy"], "committee_consensus_matrix")
+        self.assertEqual(prediction["score_selection_policy"], "committee_most_likely_outcome_exact_score")
+        self.assertTrue(prediction["primary_score_scenarios"])
         self.assertEqual(len(prediction["committee_members"]), 3)
 
     def test_committee_flags_radical_score_discordance(self) -> None:

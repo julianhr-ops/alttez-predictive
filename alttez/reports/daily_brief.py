@@ -227,9 +227,71 @@ def _format_probability(value: float) -> str:
     return f"{value:.1%}"
 
 
+TEAM_DISPLAY_NAMES_ES = {
+    "Algeria": "Argelia",
+    "Argentina": "Argentina",
+    "Australia": "Australia",
+    "Austria": "Austria",
+    "Belgium": "B\u00e9lgica",
+    "Bosnia and Herzegovina": "Bosnia y Herzegovina",
+    "Brazil": "Brasil",
+    "Canada": "Canad\u00e1",
+    "Cape Verde": "Cabo Verde",
+    "Colombia": "Colombia",
+    "Congo DR": "Republica Democratica del Congo",
+    "Curaçao": "Curazao",
+    "Czechia": "Chequia",
+    "Ecuador": "Ecuador",
+    "Egypt": "Egipto",
+    "France": "Francia",
+    "Germany": "Alemania",
+    "Haiti": "Hait\u00ed",
+    "Iran": "Ir\u00e1n",
+    "Ivory Coast": "Costa de Marfil",
+    "Japan": "Jap\u00f3n",
+    "Jordan": "Jordania",
+    "Mexico": "M\u00e9xico",
+    "Morocco": "Marruecos",
+    "Netherlands": "Pa\u00edses Bajos",
+    "New Zealand": "Nueva Zelanda",
+    "Paraguay": "Paraguay",
+    "Portugal": "Portugal",
+    "Qatar": "Catar",
+    "Saudi Arabia": "Arabia Saudita",
+    "Scotland": "Escocia",
+    "Senegal": "Senegal",
+    "South Africa": "Sud\u00e1frica",
+    "South Korea": "Corea del Sur",
+    "Spain": "Espa\u00f1a",
+    "Sweden": "Suecia",
+    "Switzerland": "Suiza",
+    "Tunisia": "T\u00fanez",
+    "Turkey": "Turqu\u00eda",
+    "United States": "Estados Unidos",
+    "Uruguay": "Uruguay",
+    "Uzbekistan": "Uzbekist\u00e1n",
+}
+
+
+def team_display_name(team: str | None) -> str:
+    team_name = safe_text(team)
+    return TEAM_DISPLAY_NAMES_ES.get(team_name, team_name)
+
+
+def localize_prediction_text(value: str | None) -> str:
+    text = safe_text(value)
+    if not text:
+        return text
+    for canonical_name in sorted(TEAM_DISPLAY_NAMES_ES, key=len, reverse=True):
+        text = text.replace(canonical_name, TEAM_DISPLAY_NAMES_ES[canonical_name])
+    return text
+
+
 def _build_match_brief(row_dict: dict[str, Any], predictor: BaseMatchPredictor, max_goals: int = DEFAULT_MAX_GOALS) -> dict[str, Any]:
     home_team = row_dict["home_team"]
     away_team = row_dict["away_team"]
+    home_team_display = team_display_name(home_team)
+    away_team_display = team_display_name(away_team)
     prediction = predictor.predict_match(
         home_team,
         away_team,
@@ -260,8 +322,10 @@ def _build_match_brief(row_dict: dict[str, Any], predictor: BaseMatchPredictor, 
         "stage": safe_text(row_dict.get("stage"), "Fase por confirmar"),
         "group_label": safe_text(row_dict.get("group_label")),
         "status": safe_text(row_dict.get("status"), "scheduled"),
-        "home_team": home_team,
-        "away_team": away_team,
+        "home_team": home_team_display,
+        "away_team": away_team_display,
+        "home_team_canonical": home_team,
+        "away_team_canonical": away_team,
         "city": safe_text(row_dict.get("city"), "Ciudad pendiente"),
         "venue_name": safe_text(row_dict.get("venue_name")),
         "is_neutral": bool(row_dict.get("is_neutral", False)),
@@ -297,9 +361,15 @@ def _build_match_brief(row_dict: dict[str, Any], predictor: BaseMatchPredictor, 
                 "xg_total": None,
                 "primary_score": "N/D",
                 "primary_score_probability": None,
+                "primary_outcome": None,
+                "most_likely_score": "N/D",
+                "most_likely_score_probability": None,
                 "primary_ev": None,
                 "ev_optimal_score": "N/D",
+                "ev_optimal_probability": None,
                 "ev_optimal_value": None,
+                "primary_score_scenarios": [],
+                "scoreline_candidates": [],
                 "score_probability_chart": [],
                 "best_market": "Sin soporte",
                 "best_market_probability": 0.0,
@@ -322,11 +392,17 @@ def _build_match_brief(row_dict: dict[str, Any], predictor: BaseMatchPredictor, 
             "xg_total": round(float(prediction["lambda_h"]) + float(prediction["lambda_a"]), 2),
             "primary_score": prediction.get("primary_score", "N/D"),
             "primary_score_probability": prediction.get("primary_score_probability"),
+            "primary_outcome": prediction.get("primary_outcome"),
+            "most_likely_score": prediction.get("most_likely_score"),
+            "most_likely_score_probability": prediction.get("most_likely_score_probability"),
             "primary_ev": prediction.get("primary_ev"),
             "ev_optimal_score": prediction.get("ev_optimal_score"),
+            "ev_optimal_probability": prediction.get("ev_optimal_probability"),
             "ev_optimal_value": prediction.get("ev_optimal_value"),
+            "primary_score_scenarios": prediction.get("primary_score_scenarios", []),
+            "scoreline_candidates": prediction.get("scoreline_candidates", []),
             "score_probability_chart": _top_score_probabilities(prediction.get("prob_matrix")),
-            "best_market": safe_text(prediction.get("best_market"), "Por definir"),
+            "best_market": localize_prediction_text(prediction.get("best_market") or "Por definir"),
             "best_market_probability": best_market_probability,
             "prob_home": prediction.get("prob_home"),
             "prob_draw": prediction.get("prob_draw"),
@@ -415,6 +491,19 @@ def _fmt_pct(value: Any, default: str = "N/D") -> str:
     return _format_probability(float(value))
 
 
+def _fmt_points_profile(points_probability: dict[Any, Any] | None) -> str:
+    if not isinstance(points_probability, dict) or not points_probability:
+        return "sin perfil"
+    parts = []
+    for points, probability in points_probability.items():
+        try:
+            point_label = int(points)
+        except (TypeError, ValueError):
+            point_label = points
+        parts.append(f"{point_label} pts {_fmt_pct(probability)}")
+    return ", ".join(parts[:4])
+
+
 def _delivery_timeout_seconds() -> int:
     timeout_raw = os.getenv("ALTTEZ_DAILY_BRIEF_DELIVERY_TIMEOUT_SECONDS", "").strip()
     if not timeout_raw:
@@ -453,7 +542,7 @@ def _executive_decision_label(match: dict[str, Any]) -> str:
 def _build_telegram_summary_text(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     batch = payload["batch_summary"]
-    top_matches = summary.get("ranked_matches", [])[:3]
+    ranked_matches = summary.get("ranked_matches", [])
     certification_status = safe_text(batch.get("certification_status"), "unknown").upper()
     provider_used = safe_text(batch.get("provider_used"), "N/D")
     model_family = safe_text(payload.get("model_family"), "poisson")
@@ -473,9 +562,9 @@ def _build_telegram_summary_text(payload: dict[str, Any]) -> str:
     if batch.get("quarantine_reason"):
         lines.extend(["", f"🚫 <b>Bloqueo lote</b> {html.escape(safe_text(batch.get('quarantine_reason')))}"])
 
-    if top_matches:
+    if ranked_matches:
         lines.extend(["", "🎯 <b>Top decisiones</b>"])
-        for index, match in enumerate(top_matches, start=1):
+        for index, match in enumerate(ranked_matches, start=1):
             executive_decision = _executive_decision_label(match)
             lines.append(
                 (
@@ -621,6 +710,12 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
             f"{item['Pronostico']} (EV {_fmt_float(item['EV'], digits=3)})"
             for item in match.get("alternatives", [])
         ) or "Sin escenarios alternativos"
+        candidate_text = " | ".join(
+            f"{item['score']} [10 pts {_fmt_pct(item.get('full_points_probability'))}, "
+            f"EV {_fmt_float(item.get('expected_points'), digits=3)}; "
+            f"{_fmt_points_profile(item.get('points_probability'))}]"
+            for item in match.get("scoreline_candidates", [])[:6]
+        ) or "Sin pronosticos alternativos"
         risk_note = match.get("support_message") or "Cobertura aceptable para analisis diario."
         committee_note = (
             "Discordancia alta entre modelos: " + ", ".join(match.get("member_primary_scores", []))
@@ -642,10 +737,11 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 <div class="metric"><span>xG visitante</span><strong>{xg_away}</strong></div>
                 <div class="metric"><span>1X2 principal</span><strong>{market}</strong></div>
                 <div class="metric"><span>Probabilidad</span><strong>{market_prob}</strong></div>
-                <div class="metric"><span>Pronostico ALTTEZ</span><strong>{prediction}</strong></div>
+                <div class="metric"><span>Marcador 10 pts</span><strong>{prediction}</strong></div>
                 <div class="metric"><span>Prob. score</span><strong>{score_prob}</strong></div>
-                <div class="metric"><span>Score optimo EV</span><strong>{ev_score}</strong></div>
-                <div class="metric"><span>EV esperado</span><strong>{ev}</strong></div>
+                <div class="metric"><span>Score exacto puro</span><strong>{raw_score}</strong></div>
+                <div class="metric"><span>Score estrategia EV</span><strong>{ev_score}</strong></div>
+                <div class="metric"><span>EV pick exacto</span><strong>{ev}</strong></div>
                 <div class="metric"><span>Confianza media</span><strong>{avg_confidence}</strong></div>
                 <div class="metric"><span>Historial util</span><strong>{history}</strong></div>
               </div>
@@ -653,7 +749,8 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 <canvas id="{chart_id}" height="160" aria-label="Distribucion de probabilidad de marcadores"></canvas>
               </div>
               <p><strong>Forma reciente:</strong> {home} {home_form} pts/j, GD {home_gd} | {away} {away_form} pts/j, GD {away_gd}</p>
-              <p><strong>Escenarios cercanos:</strong> {alternatives}</p>
+              <p><strong>Pronosticos alternativos:</strong> {candidates}</p>
+              <p><strong>Estrategias EV alternativas:</strong> {alternatives}</p>
               <p><strong>Comite predictivo:</strong> {committee}</p>
               <p><strong>Riesgo operativo:</strong> {risk}</p>
             </article>
@@ -676,6 +773,9 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 market_prob=html.escape(_fmt_pct(match.get("best_market_probability"))),
                 prediction=html.escape(match.get("primary_score") or "N/D"),
                 score_prob=html.escape(_fmt_pct(match.get("primary_score_probability"))),
+                raw_score=html.escape(
+                    f"{safe_text(match.get('most_likely_score'), 'N/D')} ({_fmt_pct(match.get('most_likely_score_probability'))})"
+                ),
                 ev_score=html.escape(safe_text(match.get("ev_optimal_score"), "N/D")),
                 ev=html.escape(_fmt_float(match.get("primary_ev"), digits=3)),
                 avg_confidence=html.escape(
@@ -690,6 +790,7 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 away_form=html.escape(_fmt_float(match["recent_points_visitante"], digits=2)),
                 away_gd=html.escape(_fmt_float(match["recent_goal_diff_visitante"], digits=2)),
                 alternatives=html.escape(alt_text),
+                candidates=html.escape(candidate_text),
                 committee=html.escape(committee_note),
                 risk=html.escape(risk_note),
             )
