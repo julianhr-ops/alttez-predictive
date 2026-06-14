@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from alttez.ingestion.live_matches import (
     filter_strict_world_cup_matches,
+    infer_effective_is_neutral,
     match_day_from_kickoff,
     parse_api_football_records,
     parse_football_data_records,
@@ -111,6 +112,30 @@ class TestLiveMatchesTimezoneHandling(unittest.TestCase):
 
         self.assertEqual(matches[0].home_team, "United States")
         self.assertEqual(matches[0].away_team, "Turkey")
+
+    def test_world_cup_without_venue_country_is_neutral_for_non_hosts(self) -> None:
+        self.assertTrue(
+            infer_effective_is_neutral(
+                tournament_name="FIFA World Cup",
+                competition_class="world_cup",
+                home_team="Australia",
+                away_team="Turkey",
+                venue_country_name=None,
+                provider_is_neutral=False,
+            )
+        )
+
+    def test_world_cup_without_venue_country_keeps_host_as_non_neutral(self) -> None:
+        self.assertFalse(
+            infer_effective_is_neutral(
+                tournament_name="FIFA World Cup",
+                competition_class="world_cup",
+                home_team="United States",
+                away_team="Paraguay",
+                venue_country_name=None,
+                provider_is_neutral=False,
+            )
+        )
 
     def test_strict_world_cup_filter_omits_friendlies_and_other_world_cups(self) -> None:
         records = [

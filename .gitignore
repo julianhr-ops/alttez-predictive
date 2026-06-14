@@ -21,3 +21,13 @@ storage/network/*.xlsx
 Thumbs.db
 
 .agents/
+.claude/
+downloaded_files/
+tmptvhsjedb/
+
+alttez_predictions_output.csv
+mundial_2026_fixtures.csv
+mundial_2026_team_stats.csv
+poisson_team_metrics.csv
+test_fbref_extraction.py
+transform_data_poisson.py

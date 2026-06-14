@@ -14,6 +14,12 @@ from sklearn.metrics import log_loss
 from xgboost import XGBRegressor
 
 from alttez.api.db import get_engine
+from alttez.evaluation.regulation_points import (
+    max_regulation_points,
+    points_optimal_prediction,
+    regulation_points,
+    summarize_regulation_points,
+)
 from alttez.experiments.tournament_oracle import DEFAULT_DIXON_COLES_RHO, build_probability_matrix
 from alttez.features.klement import (
     MODEL_FEATURE_COLUMNS,
@@ -42,6 +48,7 @@ DEFAULT_REPORT_DIR = Path("artifacts/model-evals")
 DEFAULT_CHALLENGER_VERSION = "xgboost-challenger-v2"
 DEFAULT_EVALUATION_MATCHES = 250
 DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE = 0.01
+DEFAULT_INCUMBENT_REGRESSION_EPSILON = 1e-9
 DEFAULT_CHAMPION_REFIT_INTERVAL = 25
 DEFAULT_MAX_GOALS = 7
 # Single source of truth lives in alttez.features.klement; aliased for compatibility.
@@ -112,6 +119,7 @@ def _score_prediction_row(
     prob_matrix: np.ndarray,
     actual_home_score: int,
     actual_away_score: int,
+    is_knockout: bool = False,
 ) -> dict[str, Any]:
     prob_home = float(np.tril(prob_matrix, -1).sum())
     prob_draw = float(prob_matrix.diagonal().sum())
@@ -122,6 +130,16 @@ def _score_prediction_row(
     )[0]
     actual_outcome = _outcome_label(actual_home_score, actual_away_score)
     max_score = divmod(int(prob_matrix.argmax()), prob_matrix.shape[1])
+    regulation_pick = points_optimal_prediction(prob_matrix, is_knockout=is_knockout)
+    regulation_home = int(regulation_pick["home_goals"])
+    regulation_away = int(regulation_pick["away_goals"])
+    earned_points = regulation_points(
+        regulation_home,
+        regulation_away,
+        actual_home_score,
+        actual_away_score,
+        is_knockout=is_knockout,
+    )
     return {
         "predicted_outcome": predicted_outcome,
         "actual_outcome": actual_outcome,
@@ -130,6 +148,11 @@ def _score_prediction_row(
         "prob_draw": prob_draw,
         "prob_away": prob_away,
         "exact_hit": int(max_score[0] == actual_home_score and max_score[1] == actual_away_score),
+        "regulation_scoreline": regulation_pick["scoreline"],
+        "regulation_expected_points": regulation_pick["ev"],
+        "regulation_exact_probability": regulation_pick["exact_probability"],
+        "regulation_points": earned_points,
+        "regulation_max_points": max_regulation_points(is_knockout=is_knockout),
     }
 
 
@@ -179,6 +202,7 @@ def _summarize_probability_rows(
         "accuracy_1x2": float((eval_df["predicted_outcome"] == eval_df["actual_outcome"]).mean()),
         "exact_score_hit_rate": float(eval_df["exact_hit"].mean()),
         "expected_calibration_error": expected_calibration_error(eval_df),
+        **summarize_regulation_points(rows),
     }
     if extra:
         summary.update(extra)
@@ -259,6 +283,7 @@ def _score_lambda_stream(
                 prob_matrix=prob_matrix,
                 actual_home_score=int(row.home_score),
                 actual_away_score=int(row.away_score),
+                is_knockout=bool(getattr(row, "is_knockout", False)),
             )
         )
     return _summarize_probability_rows(rows, model_version=model_version, model_family=model_family, extra=extra)
@@ -467,6 +492,7 @@ def _evaluate_challenger(
                 prob_matrix=prob_matrix,
                 actual_home_score=int(row.home_score),
                 actual_away_score=int(row.away_score),
+                is_knockout=bool(getattr(row, "is_knockout", False)),
             )
         )
 
@@ -503,8 +529,10 @@ def _promotion_decision(
     if float(challenger_metrics["log_loss"]) > float(champion_metrics["log_loss"]) + DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE:
         return False, "Challenger mejora Brier pero deteriora Log Loss materialmente."
     # Incumbent protection: never auto-replace the active model with a worse one.
-    if incumbent_brier is not None and float(challenger_metrics["brier_score"]) >= incumbent_brier - DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE:
-        return False, "Challenger no supera al modelo activo (sin regresion permitida)."
+    # Small wins are still wins; the tolerance above is only for material Log Loss
+    # decay, not for demanding an arbitrary Brier margin over the active model.
+    if incumbent_brier is not None and float(challenger_metrics["brier_score"]) > incumbent_brier + DEFAULT_INCUMBENT_REGRESSION_EPSILON:
+        return False, "Challenger empeora frente al modelo activo (sin regresion permitida)."
     return True, "Challenger elegible por Brier; supera champion e incumbente."
 
 

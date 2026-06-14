@@ -103,6 +103,13 @@ class TestChallengerCycle(unittest.TestCase):
         promote, reason = _promotion_decision(champion, challenger, incumbent_brier=0.5500)
         self.assertTrue(promote)
 
+    def test_promotion_allows_small_brier_win_over_active_model(self) -> None:
+        champion = {"brier_score": 0.6250, "log_loss": 1.0300}
+        challenger = {"brier_score": 0.5433, "log_loss": 0.9170}
+        promote, reason = _promotion_decision(champion, challenger, incumbent_brier=0.5446)
+        self.assertTrue(promote)
+        self.assertIn("incumbente", reason)
+
     def test_feature_columns_include_gdp_with_coverage_flag(self) -> None:
         # GDP restored as a static macro prior, paired with a coverage flag.
         self.assertIn("gdp_per_capita_diff", FEATURE_COLUMNS)
@@ -195,6 +202,11 @@ class TestChallengerCycle(unittest.TestCase):
         self.assertIn("expected_calibration_error", metrics)
         self.assertGreaterEqual(metrics["expected_calibration_error"], 0.0)
         self.assertLessEqual(metrics["expected_calibration_error"], 1.0)
+        self.assertIn("regulation_points_avg", metrics)
+        self.assertIn("regulation_points_total", metrics)
+        self.assertIn("regulation_points_distribution", metrics)
+        self.assertGreaterEqual(metrics["regulation_points_avg"], 0.0)
+        self.assertLessEqual(metrics["regulation_points_pct_of_max"], 1.0)
 
     def test_evaluate_challenger_matches_per_row_reference(self) -> None:
         holdout_df = _holdout_with_features()

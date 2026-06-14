@@ -2,8 +2,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import poisson
 
+from alttez.evaluation.regulation_points import rank_regulation_predictions, regulation_points
 from alttez.features.poisson import PoissonEngine
-from alttez.ingestion.international import InternationalLoader
 
 
 # Typical Dixon-Coles low-score dependence parameter. Negative rho lifts the
@@ -15,19 +15,7 @@ DEFAULT_DIXON_COLES_RHO = -0.13
 def calcular_puntos(pred_h: int, pred_a: int, real_h: int, real_a: int, is_knockout: bool = False) -> int:
     """Aplica el reglamento del torneo."""
 
-    mult = 2 if is_knockout else 1
-    pts = 0
-
-    if np.sign(pred_h - pred_a) == np.sign(real_h - real_a):
-        pts += 5 * mult
-    if pred_h == real_h:
-        pts += 2 * mult
-    if pred_a == real_a:
-        pts += 2 * mult
-    if (pred_h - pred_a) == (real_h - real_a):
-        pts += 1 * mult
-
-    return pts
+    return regulation_points(pred_h, pred_a, real_h, real_a, is_knockout=is_knockout)
 
 
 def _apply_dixon_coles(prob_matrix: np.ndarray, lambda_home: float, lambda_away: float, rho: float) -> None:
@@ -73,29 +61,40 @@ def build_probability_matrix(
 def optimize_prediction(prob_matrix: np.ndarray, is_knockout: bool = False) -> pd.DataFrame:
     """Evalua todos los pronosticos y devuelve su valor esperado."""
 
-    max_goals = prob_matrix.shape[0] - 1
-    resultados = []
+    return rank_regulation_predictions(prob_matrix, is_knockout=is_knockout)
 
-    for pred_h in range(max_goals + 1):
-        for pred_a in range(max_goals + 1):
-            expected_points = 0.0
-            for real_h in range(max_goals + 1):
-                for real_a in range(max_goals + 1):
-                    probability = prob_matrix[real_h, real_a]
-                    points = calcular_puntos(pred_h, pred_a, real_h, real_a, is_knockout=is_knockout)
-                    expected_points += probability * points
 
-            resultados.append(
-                {
-                    "Pronostico": f"{pred_h} - {pred_a}",
-                    "EV": expected_points,
-                }
-            )
+def validate_points_optimal_recommendations(
+    prob_matrix: np.ndarray,
+    recommendations: pd.DataFrame,
+    is_knockout: bool = False,
+    tolerance: float = 1e-9,
+) -> None:
+    """Valida que las recomendaciones maximicen puntos esperados del reglamento."""
 
-    return pd.DataFrame(resultados).sort_values(by="EV", ascending=False).reset_index(drop=True)
+    if recommendations.empty:
+        raise ValueError("No hay recomendaciones para validar.")
+
+    if "Pronostico" not in recommendations.columns or "EV" not in recommendations.columns:
+        raise ValueError("Las recomendaciones deben incluir columnas Pronostico y EV.")
+
+    full_ranking = optimize_prediction(prob_matrix, is_knockout=is_knockout)
+    expected_best = full_ranking.iloc[0]
+    actual_best = recommendations.iloc[0]
+    actual_ev = float(actual_best["EV"])
+    expected_ev = float(expected_best["EV"])
+
+    if str(actual_best["Pronostico"]) != str(expected_best["Pronostico"]) or abs(actual_ev - expected_ev) > tolerance:
+        raise ValueError(
+            "La recomendacion principal no maximiza puntos esperados: "
+            f"actual={actual_best['Pronostico']} EV={actual_ev:.6f}; "
+            f"esperada={expected_best['Pronostico']} EV={expected_ev:.6f}."
+        )
 
 
 def main() -> None:
+    from alttez.ingestion.international import InternationalLoader
+
     print("=== ORACULO ALTTEZ: PREDICTOR DE TORNEOS ===\n")
 
     target_date = "2026-05-24"

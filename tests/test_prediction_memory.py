@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from alttez.operations.prediction_memory import brier_score_1x2, load_prediction_learning_audit, log_loss_1x2
+from alttez.operations.prediction_memory import (
+    activate_model_version_by_key,
+    brier_score_1x2,
+    load_prediction_learning_audit,
+    log_loss_1x2,
+)
 
 
 class TestPredictionMemory(unittest.TestCase):
@@ -36,6 +41,21 @@ class TestPredictionMemory(unittest.TestCase):
         self.assertAlmostEqual(audit["accuracy_1x2"], 0.50)
         self.assertAlmostEqual(audit["exact_score_hit_rate"], 0.50)
         self.assertEqual(audit["models"][0]["model_version"], "xgb-v1")
+
+    def test_activation_rejects_missing_non_poisson_artifact(self) -> None:
+        record = {
+            "model_family": "xgboost",
+            "artifact_path": "artifacts/model-artifacts/missing-model.joblib",
+        }
+        with (
+            patch("alttez.operations.prediction_memory.get_engine"),
+            patch("alttez.operations.prediction_memory.reflect_prediction_tables", return_value={"model_versions": object()}),
+            patch("alttez.operations.prediction_memory.load_model_version_record", return_value=record),
+        ):
+            result = activate_model_version_by_key("xgb-missing")
+
+        self.assertFalse(result["activated"])
+        self.assertIn("artifact", result["error"].lower())
 
 
 if __name__ == "__main__":

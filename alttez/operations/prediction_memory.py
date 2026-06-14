@@ -5,6 +5,7 @@ import os
 import json
 import logging
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -813,6 +814,12 @@ def activate_model_version_by_key(
         return {
             "activated": False,
             "error": f"Model family `{target_family}` is not enabled for production inference.",
+        }
+    artifact_path = str(target_record.get("artifact_path") or "").strip()
+    if target_family != DEFAULT_POISSON_MODEL_FAMILY and (not artifact_path or not Path(artifact_path).exists()):
+        return {
+            "activated": False,
+            "error": f"Model artifact is not available locally: {artifact_path or 'missing artifact_path'}.",
         }
 
     set_active_model_version_record(

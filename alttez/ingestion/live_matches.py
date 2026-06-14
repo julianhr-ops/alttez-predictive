@@ -41,6 +41,7 @@ DEFAULT_FOOTBALL_DATA_COMPETITIONS = (
     "EC",
 )
 STRICT_WORLD_CUP_TOURNAMENT_NAME = "FIFA World Cup 2026"
+WORLD_CUP_2026_HOST_TEAMS = {"Canada", "Mexico", "United States"}
 TEAM_NAME_ALIASES = {
     "u.s.a.": "United States",
     "usa": "United States",
@@ -274,6 +275,36 @@ def classify_competition(tournament_name: str | None, stage: str | None) -> str:
     return "other_international"
 
 
+def infer_effective_is_neutral(
+    *,
+    tournament_name: str | None,
+    competition_class: str | None,
+    home_team: str | None,
+    away_team: str | None,
+    venue_country_name: str | None = None,
+    provider_is_neutral: bool | None = None,
+) -> bool:
+    """Infer neutral venue when providers omit World Cup venue metadata."""
+
+    home = canonical_team_name(home_team)
+    away = canonical_team_name(away_team)
+    venue_country = canonical_team_name(venue_country_name)
+    if venue_country and venue_country in {home, away}:
+        return False
+
+    if provider_is_neutral is True:
+        return True
+
+    haystack = f"{tournament_name or ''} {competition_class or ''}".casefold()
+    is_world_cup = "world_cup" in haystack or any(keyword in haystack for keyword in WORLD_CUP_KEYWORDS)
+    if is_world_cup:
+        if not venue_country:
+            return home not in WORLD_CUP_2026_HOST_TEAMS and away not in WORLD_CUP_2026_HOST_TEAMS
+        return True
+
+    return bool(provider_is_neutral)
+
+
 def classify_provider_error(exc: Exception) -> str:
     detail = str(exc).casefold()
     if "not configured" in detail or "requires a competition code" in detail:
@@ -482,7 +513,14 @@ def parse_api_football_records(
                 city=(fixture.get("venue") or {}).get("city"),
                 venue_country_name=tournament_region,
                 referee_name=fixture.get("referee"),
-                is_neutral=False,
+                is_neutral=infer_effective_is_neutral(
+                    tournament_name=tournament_name,
+                    competition_class=competition_class,
+                    home_team=home_team,
+                    away_team=away_team,
+                    venue_country_name=tournament_region,
+                    provider_is_neutral=False,
+                ),
                 status=status,
                 home_score=int(goals.get("home") or 0),
                 away_score=int(goals.get("away") or 0),
@@ -552,7 +590,14 @@ def parse_football_data_records(
                 city=None,
                 venue_country_name=area.get("name"),
                 referee_name=None,
-                is_neutral=False,
+                is_neutral=infer_effective_is_neutral(
+                    tournament_name=tournament_name,
+                    competition_class=classify_competition(tournament_name, stage),
+                    home_team=home_team,
+                    away_team=away_team,
+                    venue_country_name=area.get("name"),
+                    provider_is_neutral=False,
+                ),
                 status=map_football_data_status(record.get("status")),
                 home_score=int(full_time.get("home") or 0),
                 away_score=int(full_time.get("away") or 0),
@@ -602,6 +647,7 @@ def parse_local_json_records(
         match_day = match_day_from_kickoff(kickoff_at, target_date)
         tournament_name = record.get("tournament") or "Unknown Tournament"
         stage = record.get("stage")
+        competition_class = classify_competition(tournament_name, stage)
         group_label = infer_group_label(record.get("group_label") or stage, record)
         scheduled_matches.append(
             ScheduledMatch(
@@ -614,7 +660,7 @@ def parse_local_json_records(
                 group_label=group_label,
                 tournament_name=tournament_name,
                 competition_normalized_name=normalize_competition_name(tournament_name),
-                competition_class=classify_competition(tournament_name, stage),
+                competition_class=competition_class,
                 tournament_region=record.get("country"),
                 home_team=home_team,
                 away_team=away_team,
@@ -622,7 +668,14 @@ def parse_local_json_records(
                 city=record.get("city"),
                 venue_country_name=record.get("country"),
                 referee_name=record.get("referee_name"),
-                is_neutral=bool(record.get("is_neutral", False)),
+                is_neutral=infer_effective_is_neutral(
+                    tournament_name=tournament_name,
+                    competition_class=competition_class,
+                    home_team=home_team,
+                    away_team=away_team,
+                    venue_country_name=record.get("venue_country_name"),
+                    provider_is_neutral=bool(record.get("is_neutral", False)),
+                ),
                 status=record.get("status") or "scheduled",
                 home_score=int(record.get("home_score") or 0),
                 away_score=int(record.get("away_score") or 0),

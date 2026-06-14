@@ -12,10 +12,17 @@ import numpy as np
 import pandas as pd
 
 from alttez.dashboard.analysis_helpers import support_level
+from alttez.evaluation.regulation_points import (
+    expected_regulation_points,
+    parse_scoreline,
+    scoreline_candidate_profiles,
+    scoreline_scenarios_for_prediction,
+)
 from alttez.experiments.tournament_oracle import (
     DEFAULT_DIXON_COLES_RHO,
     build_probability_matrix,
     optimize_prediction,
+    validate_points_optimal_recommendations,
 )
 from alttez.features.klement import (
     MODEL_FEATURE_COLUMNS,
@@ -118,6 +125,99 @@ def most_likely_score_from_matrix(prob_matrix: np.ndarray) -> tuple[str, float]:
     flat_index = int(np.argmax(prob_matrix))
     home_goals, away_goals = np.unravel_index(flat_index, prob_matrix.shape)
     return f"{int(home_goals)} - {int(away_goals)}", float(prob_matrix[home_goals, away_goals])
+
+
+def outcome_aligned_score_from_matrix(prob_matrix: np.ndarray) -> tuple[str, float, str]:
+    home_win = float(np.tril(prob_matrix, -1).sum())
+    draw = float(prob_matrix.diagonal().sum())
+    away_win = float(np.triu(prob_matrix, 1).sum())
+    outcome = max((("H", home_win), ("D", draw), ("A", away_win)), key=lambda item: item[1])[0]
+
+    best_score = "N/D"
+    best_probability = -1.0
+    max_goals = prob_matrix.shape[0] - 1
+    for home_goals in range(max_goals + 1):
+        for away_goals in range(max_goals + 1):
+            if outcome == "H" and home_goals <= away_goals:
+                continue
+            if outcome == "D" and home_goals != away_goals:
+                continue
+            if outcome == "A" and home_goals >= away_goals:
+                continue
+            probability = float(prob_matrix[home_goals, away_goals])
+            if probability > best_probability:
+                best_probability = probability
+                best_score = f"{home_goals} - {away_goals}"
+
+    return best_score, best_probability, outcome
+
+
+def points_optimal_score_from_recommendations(
+    prob_matrix: np.ndarray,
+    recommendations: pd.DataFrame,
+    *,
+    is_knockout: bool = False,
+) -> tuple[str, float | None, float | None]:
+    validate_points_optimal_recommendations(
+        prob_matrix,
+        recommendations,
+        is_knockout=is_knockout,
+        tolerance=0.001,
+    )
+    if recommendations.empty:
+        return "N/D", None, None
+
+    row = recommendations.iloc[0].to_dict()
+    score = str(row.get("Pronostico") or "N/D")
+    try:
+        home_goals, away_goals = score.split("-", 1)
+        exact_probability = float(prob_matrix[int(home_goals.strip()), int(away_goals.strip())])
+    except Exception:
+        exact_probability = None
+    return score, exact_probability, float(row["EV"])
+
+
+def exact_scoreline_decision(
+    prob_matrix: np.ndarray,
+    recommendations: pd.DataFrame,
+    *,
+    is_knockout: bool = False,
+) -> dict[str, Any]:
+    most_likely_score, most_likely_probability = most_likely_score_from_matrix(prob_matrix)
+    primary_score, primary_score_probability, primary_outcome = outcome_aligned_score_from_matrix(prob_matrix)
+    primary_home, primary_away = parse_scoreline(primary_score)
+    primary_ev = expected_regulation_points(
+        prob_matrix,
+        primary_home,
+        primary_away,
+        is_knockout=is_knockout,
+    )
+    ev_score, ev_probability, ev_value = points_optimal_score_from_recommendations(
+        prob_matrix,
+        recommendations,
+        is_knockout=is_knockout,
+    )
+    return {
+        "primary_score": primary_score,
+        "primary_score_probability": primary_score_probability,
+        "primary_outcome": primary_outcome,
+        "primary_ev": primary_ev,
+        "most_likely_score": most_likely_score,
+        "most_likely_score_probability": most_likely_probability,
+        "ev_optimal_score": ev_score,
+        "ev_optimal_probability": ev_probability,
+        "ev_optimal_value": ev_value,
+        "primary_score_scenarios": scoreline_scenarios_for_prediction(
+            prob_matrix,
+            primary_home,
+            primary_away,
+            is_knockout=is_knockout,
+        ),
+        "scoreline_candidates": scoreline_candidate_profiles(
+            prob_matrix,
+            is_knockout=is_knockout,
+        ),
+    }
 
 
 def _support_threshold() -> int:
@@ -254,10 +354,16 @@ class PoissonMatchPredictor(BaseMatchPredictor):
                 "recommendations": pd.DataFrame(),
                 "primary_score": "N/D",
                 "primary_score_probability": None,
+                "primary_outcome": None,
+                "most_likely_score": "N/D",
+                "most_likely_score_probability": None,
                 "primary_ev": None,
                 "ev_optimal_score": "N/D",
+                "ev_optimal_probability": None,
                 "ev_optimal_value": None,
-                "score_selection_policy": "most_likely_score",
+                "primary_score_scenarios": [],
+                "scoreline_candidates": [],
+                "score_selection_policy": "most_likely_outcome_exact_score",
                 "best_market": "Sin soporte",
                 "best_market_probability": 0.0,
             }
@@ -266,8 +372,7 @@ class PoissonMatchPredictor(BaseMatchPredictor):
         prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=DEFAULT_DIXON_COLES_RHO)
         recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
-        primary_score, primary_score_probability = most_likely_score_from_matrix(prob_matrix)
-        ev_row = recommendations.iloc[0].to_dict() if not recommendations.empty else {"Pronostico": "N/D", "EV": None}
+        score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
         result_summary = _numeric_result_summary(prob_matrix, home_team, away_team)
         result_probabilities = {
             row["Mercado"]: float(row["Probabilidad"])
@@ -298,12 +403,18 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             "prob_away": result_probabilities.get(f"Victoria {away_team}"),
             "result_summary": result_summary,
             "recommendations": recommendations,
-            "primary_score": primary_score,
-            "primary_score_probability": primary_score_probability,
-            "primary_ev": ev_row.get("EV"),
-            "ev_optimal_score": str(ev_row.get("Pronostico") or "N/D"),
-            "ev_optimal_value": ev_row.get("EV"),
-            "score_selection_policy": "most_likely_score",
+            "primary_score": score_decision["primary_score"],
+            "primary_score_probability": score_decision["primary_score_probability"],
+            "primary_outcome": score_decision["primary_outcome"],
+            "most_likely_score": score_decision["most_likely_score"],
+            "most_likely_score_probability": score_decision["most_likely_score_probability"],
+            "primary_ev": score_decision["primary_ev"],
+            "ev_optimal_score": score_decision["ev_optimal_score"],
+            "ev_optimal_probability": score_decision["ev_optimal_probability"],
+            "ev_optimal_value": score_decision["ev_optimal_value"],
+            "primary_score_scenarios": score_decision["primary_score_scenarios"],
+            "scoreline_candidates": score_decision["scoreline_candidates"],
+            "score_selection_policy": "most_likely_outcome_exact_score",
             "best_market": str(best_market.get("Mercado") or "Por definir"),
             "best_market_probability": float(best_market.get("Probabilidad") or 0.0),
         }
@@ -413,14 +524,13 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=DEFAULT_DIXON_COLES_RHO)
             recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
             recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
-            primary_score, primary_score_probability = most_likely_score_from_matrix(prob_matrix)
+            score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
             result_summary = _numeric_result_summary(prob_matrix, home_team, away_team)
             result_probabilities = {
                 row["Mercado"]: float(row["Probabilidad"])
                 for row in result_summary.to_dict(orient="records")
             }
             market_rows = result_summary.to_dict(orient="records")
-            ev_row = recommendations.iloc[0].to_dict() if not recommendations.empty else {"Pronostico": "N/D", "EV": None}
             baseline["lambda_h"] = float(lambda_h)
             baseline["lambda_a"] = float(lambda_a)
             baseline["prob_matrix"] = prob_matrix
@@ -429,12 +539,18 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             baseline["prob_away"] = result_probabilities.get(f"Victoria {away_team}")
             baseline["result_summary"] = result_summary
             baseline["recommendations"] = recommendations
-            baseline["primary_score"] = primary_score
-            baseline["primary_score_probability"] = primary_score_probability
-            baseline["primary_ev"] = ev_row.get("EV")
-            baseline["ev_optimal_score"] = str(ev_row.get("Pronostico") or "N/D")
-            baseline["ev_optimal_value"] = ev_row.get("EV")
-            baseline["score_selection_policy"] = "most_likely_score"
+            baseline["primary_score"] = score_decision["primary_score"]
+            baseline["primary_score_probability"] = score_decision["primary_score_probability"]
+            baseline["primary_outcome"] = score_decision["primary_outcome"]
+            baseline["most_likely_score"] = score_decision["most_likely_score"]
+            baseline["most_likely_score_probability"] = score_decision["most_likely_score_probability"]
+            baseline["primary_ev"] = score_decision["primary_ev"]
+            baseline["ev_optimal_score"] = score_decision["ev_optimal_score"]
+            baseline["ev_optimal_probability"] = score_decision["ev_optimal_probability"]
+            baseline["ev_optimal_value"] = score_decision["ev_optimal_value"]
+            baseline["primary_score_scenarios"] = score_decision["primary_score_scenarios"]
+            baseline["scoreline_candidates"] = score_decision["scoreline_candidates"]
+            baseline["score_selection_policy"] = "most_likely_outcome_exact_score"
         else:
             probabilities = self.model.predict_proba(feature_df)[0]
             probability_map = {label: float(probabilities[idx]) for idx, label in enumerate(self.label_order)}

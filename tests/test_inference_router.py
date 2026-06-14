@@ -8,8 +8,16 @@ from unittest.mock import patch
 import joblib
 import pandas as pd
 
+from alttez.experiments.tournament_oracle import optimize_prediction
 from alttez.features.klement import MODEL_FEATURE_COLUMNS
-from alttez.inference.router import XGBOOST_FEATURE_COLUMNS, _is_prediction_supported, build_active_predictor, most_likely_score_from_matrix
+from alttez.inference.router import (
+    XGBOOST_FEATURE_COLUMNS,
+    _is_prediction_supported,
+    build_active_predictor,
+    exact_scoreline_decision,
+    most_likely_score_from_matrix,
+    outcome_aligned_score_from_matrix,
+)
 from alttez.training.challenger_cycle import FEATURE_COLUMNS as CHALLENGER_FEATURE_COLUMNS
 
 
@@ -75,8 +83,28 @@ def _historical_df() -> pd.DataFrame:
 
 
 class TestInferenceRouter(unittest.TestCase):
+    def test_exact_scoreline_decision_aligns_with_most_likely_outcome(self) -> None:
+        matrix = pd.DataFrame(
+            [
+                [0.10, 0.03, 0.01],
+                [0.18, 0.20, 0.02],
+                [0.17, 0.16, 0.13],
+            ]
+        ).to_numpy(dtype=float)
+        matrix = matrix / matrix.sum()
+        recommendations = optimize_prediction(matrix).head(5)
+
+        decision = exact_scoreline_decision(matrix, recommendations)
+
+        self.assertEqual(decision["most_likely_score"], "1 - 1")
+        self.assertEqual(decision["primary_outcome"], "H")
+        self.assertEqual(decision["primary_score"], "1 - 0")
+
     def test_build_active_predictor_defaults_to_poisson_when_no_registry_record(self) -> None:
-        with patch("alttez.inference.router._load_active_model_record_safe", return_value=None):
+        with (
+            patch("alttez.inference.router._load_active_model_record_safe", return_value=None),
+            patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}),
+        ):
             predictor = build_active_predictor(_historical_df(), "2026-05-27")
             prediction = predictor.predict_match("Mexico", "USA", is_neutral=True)
 
@@ -126,7 +154,10 @@ class TestInferenceRouter(unittest.TestCase):
             "artifact_path": str(artifact_path),
             "production_status": "active",
         }
-        with patch("alttez.inference.router._load_active_model_record_safe", return_value=active_record):
+        with (
+            patch("alttez.inference.router._load_active_model_record_safe", return_value=active_record),
+            patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}),
+        ):
             predictor = build_active_predictor(_historical_df(), "2026-05-27")
             prediction = predictor.predict_match("Mexico", "USA", is_neutral=True)
 
@@ -141,10 +172,15 @@ class TestInferenceRouter(unittest.TestCase):
             places=6,
         )
         self.assertEqual(prediction["prob_matrix"].shape, (8, 8))
-        expected_score, expected_probability = most_likely_score_from_matrix(prediction["prob_matrix"])
+        raw_score, raw_probability = most_likely_score_from_matrix(prediction["prob_matrix"])
+        expected_score, expected_probability, _ = outcome_aligned_score_from_matrix(prediction["prob_matrix"])
         self.assertEqual(prediction["primary_score"], expected_score)
         self.assertAlmostEqual(prediction["primary_score_probability"], expected_probability)
+        self.assertEqual(prediction["most_likely_score"], raw_score)
+        self.assertAlmostEqual(prediction["most_likely_score_probability"], raw_probability)
         self.assertEqual(prediction["ev_optimal_score"], prediction["recommendations"].iloc[0]["Pronostico"])
+        self.assertEqual(prediction["score_selection_policy"], "most_likely_outcome_exact_score")
+        self.assertTrue(prediction["primary_score_scenarios"])
 
     def test_xgboost_feature_payload_includes_klement_context(self) -> None:
         artifact_dir = Path("artifacts/test-router")
