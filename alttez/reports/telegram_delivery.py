@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib import error, parse, request
@@ -16,6 +17,43 @@ from urllib import error, parse, request
 
 DEFAULT_DELIVERY_TIMEOUT_SECONDS = 10
 TELEGRAM_MESSAGE_LIMIT = 4096
+DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_BACKOFF_BASE_SECONDS = 1.5
+
+
+def delivery_max_attempts() -> int:
+    raw = os.getenv("ALTTEZ_DAILY_BRIEF_DELIVERY_MAX_ATTEMPTS", "").strip()
+    try:
+        return max(1, int(raw)) if raw else DEFAULT_MAX_ATTEMPTS
+    except ValueError:
+        return DEFAULT_MAX_ATTEMPTS
+
+
+def _send_request(req: request.Request, *, method_label: str) -> tuple[bool, str | None]:
+    """Envía la petición con reintentos y backoff exponencial.
+
+    El timeout de lectura de urllib lanza ``TimeoutError`` (no ``URLError``), por
+    lo que debe capturarse explícitamente o la entrega muere con un traceback.
+    Reintenta ante timeouts, errores de red y HTTP 5xx/429 (transitorios); no
+    reintenta ante 4xx (excepto 429), que son fallos permanentes.
+    """
+    attempts = delivery_max_attempts()
+    timeout = delivery_timeout_seconds()
+    last_error: str | None = None
+    for attempt in range(attempts):
+        try:
+            with request.urlopen(req, timeout=timeout) as response:
+                status = int(getattr(response, "status", 200))
+                if 200 <= status < 300:
+                    return True, None
+                last_error = f"Telegram {method_label} returned HTTP {status}."
+                if status < 500 and status != 429:
+                    return False, last_error  # error permanente: no reintentar.
+        except (error.URLError, TimeoutError, OSError) as exc:
+            last_error = str(exc)
+        if attempt < attempts - 1:
+            time.sleep(DEFAULT_BACKOFF_BASE_SECONDS * (2 ** attempt))
+    return False, last_error
 
 
 def telegram_config() -> tuple[str | None, str | None]:
@@ -102,13 +140,7 @@ def send_message(bot_token: str, chat_id: str, text: str) -> tuple[bool, str | N
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    try:
-        with request.urlopen(req, timeout=delivery_timeout_seconds()) as response:
-            if 200 <= int(getattr(response, "status", 200)) < 300:
-                return True, None
-            return False, f"Telegram sendMessage returned HTTP {getattr(response, 'status', 'unknown')}."
-    except error.URLError as exc:
-        return False, str(exc)
+    return _send_request(req, method_label="sendMessage")
 
 
 def _build_multipart_payload(fields: dict[str, str], file_field: str, file_path: Path) -> tuple[bytes, str]:
@@ -150,10 +182,4 @@ def send_document(bot_token: str, chat_id: str, file_path: Path, caption: str | 
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
     )
-    try:
-        with request.urlopen(req, timeout=delivery_timeout_seconds()) as response:
-            if 200 <= int(getattr(response, "status", 200)) < 300:
-                return True, None
-            return False, f"Telegram sendDocument returned HTTP {getattr(response, 'status', 'unknown')}."
-    except error.URLError as exc:
-        return False, str(exc)
+    return _send_request(req, method_label="sendDocument")

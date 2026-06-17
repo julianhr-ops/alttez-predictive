@@ -1,8 +1,22 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import contextmanager
+from unittest import mock
 
-from alttez.reports.telegram_delivery import chunk_messages
+import alttez.reports.telegram_delivery as td
+from alttez.reports.telegram_delivery import chunk_messages, send_message
+
+
+class _FakeResponse:
+    def __init__(self, status: int = 200) -> None:
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
 class TestChunkMessages(unittest.TestCase):
@@ -27,6 +41,44 @@ class TestChunkMessages(unittest.TestCase):
         chunks = chunk_messages(text, limit=1000)
         self.assertTrue(all(len(chunk) <= 1000 for chunk in chunks))
         self.assertEqual("".join(chunks), text)
+
+
+class TestSendRetry(unittest.TestCase):
+    def setUp(self) -> None:
+        # No real backoff sleeps; keep tests instant.
+        sleep_patch = mock.patch.object(td.time, "sleep", lambda *_: None)
+        sleep_patch.start()
+        self.addCleanup(sleep_patch.stop)
+
+    def test_retries_on_timeout_then_succeeds(self) -> None:
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("read timed out")
+            return _FakeResponse(200)
+
+        with mock.patch.object(td.request, "urlopen", side_effect=fake_urlopen):
+            ok, error_message = send_message("token", "chat", "hola")
+
+        self.assertTrue(ok)
+        self.assertIsNone(error_message)
+        self.assertEqual(calls["n"], 2)  # one retry
+
+    def test_gives_up_after_max_attempts(self) -> None:
+        with mock.patch.object(td, "delivery_max_attempts", return_value=3):
+            with mock.patch.object(td.request, "urlopen", side_effect=TimeoutError("nope")) as opener:
+                ok, error_message = send_message("token", "chat", "hola")
+        self.assertFalse(ok)
+        self.assertIn("nope", error_message)
+        self.assertEqual(opener.call_count, 3)
+
+    def test_no_retry_on_permanent_4xx(self) -> None:
+        with mock.patch.object(td.request, "urlopen", return_value=_FakeResponse(400)) as opener:
+            ok, error_message = send_message("token", "chat", "hola")
+        self.assertFalse(ok)
+        self.assertEqual(opener.call_count, 1)  # 400 is permanent, no retry
 
 
 if __name__ == "__main__":
