@@ -1,6 +1,7 @@
 param(
     [string]$Date = ([DateTime]::UtcNow.ToString("yyyy-MM-dd")),
     [switch]$ApplyMigrations,
+    [switch]$WriteSmoke,
     [string]$DatabaseUrl = $null,
     [string]$ProviderOrder = $null,
     [string]$Schema = "public"
@@ -14,6 +15,7 @@ $python = if (Test-Path $venvPython) { $venvPython } else { "python" }
 $preflight = Join-Path $root "scripts\shadow_readiness_check.py"
 $migrations = Join-Path $root "scripts\apply_supabase_migrations.py"
 $smoke = Join-Path $root "scripts\smoke_live_pipeline.py"
+$backfill = Join-Path $root "scripts\backfill_match_results.py"
 $brief = Join-Path $root "scripts\generate_daily_brief.py"
 $challenger = Join-Path $root "scripts\run_challenger_cycle.py"
 $pipelineAlert = Join-Path $root "scripts\send_pipeline_alert.py"
@@ -77,7 +79,10 @@ try {
 
     $CurrentStage = "forced live ingestion and evaluation closure"
     Write-Output "PROCESS: forced live ingestion and evaluation closure"
-    $smokeArgs = @($smoke, "--date", $Date, "--write")
+    $smokeArgs = @($smoke, "--date", $Date)
+    if ($WriteSmoke) {
+        $smokeArgs += "--write"
+    }
     if ($ProviderOrder) {
         $smokeArgs += @("--provider-order", $ProviderOrder)
     }
@@ -94,6 +99,22 @@ try {
     }
 
     Write-Output "PROCESS: prediction evaluations closed during ingestion finalize"
+
+    # Recurring ESPN results backfill (keyless; covers friendlies + WC finals).
+    # Closes prediction labels so the challenger evaluates on fresh outcomes.
+    # Non-fatal: result enrichment must not abort the daily brief.
+    $CurrentStage = "espn results backfill"
+    Write-Output "PROCESS: espn results backfill"
+    $backfillFrom = ([DateTime]::Parse($Date)).AddDays(-3).ToString("yyyy-MM-dd")
+    $backfillArgs = @($backfill, "--source", "espn", "--date-from", $backfillFrom, "--date-to", $Date, "--apply")
+    if ($DatabaseUrl) {
+        $backfillArgs += @("--database-url", $DatabaseUrl)
+    }
+    & $python @backfillArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "PROCESS: espn results backfill degraded (non-fatal)"
+        & $python $pipelineAlert --stage $CurrentStage --date $Date --message "ESPN results backfill failed (non-fatal)." --level warning | Out-Null
+    }
 
     $CurrentStage = "committee daily decision brief"
     Write-Output "PROCESS: committee daily decision brief"
