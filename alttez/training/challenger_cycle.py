@@ -550,6 +550,23 @@ def _governance_decision(
     return "active", "auto", "Promovido automaticamente por mejorar Brier sin deterioro material de Log Loss."
 
 
+def champion_pointer_status(*, challenger_production_status: str, active_model_exists: bool) -> str:
+    """Production-pointer policy for the champion baseline row.
+
+    With auto-promotion OFF the challenger cycle must never move which model serves. The
+    champion baseline only claims the ``active`` slot to bootstrap an empty registry; if an
+    active model already exists (manual activation or a prior bootstrap) the freshly-trained
+    champion is recorded as ``shadow`` so it cannot silently clobber the active pointer on the
+    nightly run. When the challenger is auto-promoted, the old champion steps down to ``archived``.
+    """
+
+    if challenger_production_status == "active":
+        return "archived"
+    if not active_model_exists:
+        return "active"
+    return "shadow"
+
+
 def _write_report(report: dict[str, Any], report_dir: str | Path = DEFAULT_REPORT_DIR) -> Path:
     report_path = Path(report_dir)
     report_path.mkdir(parents=True, exist_ok=True)
@@ -646,6 +663,10 @@ def run_challenger_cycle(
         if model_versions_table is None:
             report["registry_error"] = "Prediction memory tables are not available."
         else:
+            champion_production_status = champion_pointer_status(
+                challenger_production_status=production_status,
+                active_model_exists=active_record is not None,
+            )
             champion_row = {
                 "version_key": f"{champion_metrics['model_version']}:{target_date.isoformat()}",
                 "model_version": champion_metrics["model_version"],
@@ -661,7 +682,7 @@ def run_challenger_cycle(
                 "status": "champion",
                 "promotion_reason": "Champion baseline productivo actual.",
                 "is_promotion_eligible": True,
-                "production_status": "active" if production_status != "active" else "archived",
+                "production_status": champion_production_status,
                 "activation_mode": "manual",
                 "artifact_path": str(report_path),
                 "metrics_payload": report["champion"],
@@ -689,6 +710,17 @@ def run_challenger_cycle(
             }
             upsert_model_version_record(engine, model_versions_table, champion_row)
             upsert_model_version_record(engine, model_versions_table, challenger_row)
+            # Persist the binary into the durable store so any environment can hydrate it.
+            # Without this the artifact only ever exists on the ephemeral training host and
+            # inference silently falls back to Poisson at brief time.
+            try:
+                from alttez.operations.artifact_store import upload_artifact
+
+                upload_artifact(challenger_row["version_key"], model_artifact_path, database_url=database_url)
+                report["artifact_uploaded"] = True
+            except Exception as exc:  # noqa: BLE001 - artifact upload must not break the registry write.
+                report["artifact_upload_error"] = str(exc)
+                logging.warning("artifact_upload_failed version_key=%s detail=%s", challenger_row["version_key"], exc)
             if production_status == "active":
                 set_active_model_version_record(
                     engine,

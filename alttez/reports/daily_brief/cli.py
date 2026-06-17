@@ -23,6 +23,23 @@ def generate_daily_brief(
     persist_predictions: bool = True,
 ) -> dict[str, Any]:
     payload = build_daily_brief_payload(target_date, database_url=database_url)
+    # Fallback is no longer expected to be silent: if the active model could not load and the
+    # brief is served by the Poisson safety net, raise a non-critical incident so ops sees it.
+    if payload.get("used_fallback"):
+        try:
+            from alttez.operations.alerts import send_pipeline_incident_telegram
+
+            send_pipeline_incident_telegram(
+                stage="daily brief model serving",
+                target_date=target_date.isoformat(),
+                message=(
+                    "El brief se generó con el modelo de respaldo (Poisson) porque el modelo "
+                    f"activo no pudo cargarse. Motivo: {payload.get('fallback_reason') or 'desconocido'}"
+                ),
+                level="warning",
+            )
+        except Exception:  # noqa: BLE001 - alerting must never block brief generation.
+            pass
     delivery = {
         "delivery_attempted": False,
         "delivery_status": "skipped",
@@ -97,6 +114,11 @@ def main() -> int:
     print(f"prediction_rows={result.get('prediction_rows', 0)}")
     print(f"daily_brief_delivery_status={result['delivery_status']}")
     print(f"daily_brief_delivery_channel={result['delivery_channel']}")
+    brief_payload = result.get("payload") or {}
+    print(f"daily_brief_model_version={brief_payload.get('model_version') or 'unknown'}")
+    print(f"daily_brief_used_fallback={bool(brief_payload.get('used_fallback'))}")
+    if brief_payload.get("used_fallback"):
+        print(f"daily_brief_fallback_reason={brief_payload.get('fallback_reason') or 'unknown'}")
     if result.get("prediction_error"):
         print(f"prediction_error={result['prediction_error']}")
     if result.get("delivery_error"):

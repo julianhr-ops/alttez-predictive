@@ -434,6 +434,17 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         if not selection.artifact_path:
             raise FileNotFoundError("El modelo activo XGBoost no declara artifact_path.")
         artifact_path = Path(selection.artifact_path)
+        if not artifact_path.exists() and selection.version_key:
+            # The binary may not be on this host (ephemeral runner / fresh checkout).
+            # Hydrate it from the durable store keyed by version_key before giving up.
+            try:
+                from alttez.operations.artifact_store import download_artifact
+
+                fetched = download_artifact(selection.version_key, artifact_path, database_url=database_url)
+                if fetched is not None:
+                    artifact_path = fetched
+            except Exception:  # noqa: BLE001 - fall through to the explicit not-found error below.
+                pass
         if not artifact_path.exists():
             raise FileNotFoundError(f"No existe el artefacto XGBoost activo: {artifact_path}")
 
