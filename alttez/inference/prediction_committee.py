@@ -12,6 +12,7 @@ import pandas as pd
 
 from alttez.api.db import read_dataframe
 from alttez.experiments.tournament_oracle import DEFAULT_DIXON_COLES_RHO, optimize_prediction
+from alttez.inference.calibration import load_active_calibration
 from alttez.inference.router import (
     ActiveModelSelection,
     BaseMatchPredictor,
@@ -152,6 +153,9 @@ class PredictionCommittee(BaseMatchPredictor):
         if not members:
             raise ValueError("PredictionCommittee requires at least one member.")
         self.members = _normalize_members(members)
+        # Calibracion post-hoc del consenso (temperature scaling ajustado offline
+        # sobre las predicciones cerradas del comite). Neutra si no hay artefacto.
+        self.calibration = load_active_calibration()
         super().__init__(
             selection=ActiveModelSelection(
                 version_key=None,
@@ -244,6 +248,9 @@ class PredictionCommittee(BaseMatchPredictor):
         total_weight = sum(weight for weight, _ in matrices)
         consensus_matrix = sum((weight / total_weight) * matrix for weight, matrix in matrices)
         consensus_matrix = consensus_matrix / consensus_matrix.sum()
+        # Calibracion del consenso antes de derivar 1X2 y marcadores: coherente
+        # para ambos. Neutra (identidad) si no hay artefacto activo.
+        consensus_matrix = self.calibration.calibrate_matrix(consensus_matrix)
         recommendations = optimize_prediction(consensus_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
         score_decision = exact_scoreline_decision(consensus_matrix, recommendations, is_knockout=is_knockout)
@@ -302,6 +309,8 @@ class PredictionCommittee(BaseMatchPredictor):
             "committee_members": member_predictions,
             "committee_consensus_used": True,
             "committee_weights": {member.role: member.weight for member in self.members},
+            "calibration_temperature": self.calibration.temperature,
+            "calibration_applied": not self.calibration.is_neutral,
             "discordance_warning": _discordance_warning(member_scores),
             "member_primary_scores": member_scores,
         }
