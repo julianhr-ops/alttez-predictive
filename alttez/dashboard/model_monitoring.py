@@ -24,6 +24,7 @@ def _prediction_memory_unavailable_snapshot() -> dict[str, object]:
         "recent_evaluations": pd.DataFrame(),
         "model_versions": pd.DataFrame(),
         "active_model": None,
+        "calibration": {"models": pd.DataFrame(), "global_ece": None, "artifact": {}, "samples": 0},
         "prediction_memory_error": (
             "No se pudo cargar el registry/memory del modelo. "
             "La interfaz sigue operativa con fallback local."
@@ -36,6 +37,7 @@ def load_monitoring_snapshot() -> dict[str, object]:
     try:
         from alttez.operations.prediction_memory import (
             load_active_model_record,
+            load_calibration_overview,
             load_model_versions,
             load_prediction_metrics_by_competition,
             load_prediction_metrics_by_confidence,
@@ -55,6 +57,7 @@ def load_monitoring_snapshot() -> dict[str, object]:
                 "recent_evaluations": load_recent_prediction_evaluations(),
                 "model_versions": load_model_versions(),
                 "active_model": load_active_model_record(),
+                "calibration": load_calibration_overview(),
                 "prediction_memory_error": None,
             }
         except Exception:
@@ -239,6 +242,40 @@ def _render_brier_by_confidence_chart(df: pd.DataFrame) -> None:
     st.altair_chart(chart, use_container_width=True)
 
 
+def _render_calibration_panel(calibration: dict[str, object] | None) -> None:
+    calibration = calibration or {}
+    artifact = calibration.get("artifact") or {}
+    temperature = artifact.get("temperature", 1.0)
+    is_neutral = artifact.get("is_neutral", True)
+    fitted_on = artifact.get("fitted_on_model", "—")
+    ece_before = artifact.get("ece_before")
+    ece_after = artifact.get("ece_after")
+    estado = "Neutra (sin artefacto)" if is_neutral else f"Activa · T={float(temperature):.3f}"
+    detalle = ""
+    if ece_before is not None and ece_after is not None:
+        detalle = f"<br>ECE del comité al ajustar: {float(ece_before):.4f} → {float(ece_after):.4f} (modelo: {fitted_on})"
+
+    st.markdown(
+        f"""
+        <div class="alttez-panel">
+            <div class="alttez-section-title">Calibración de probabilidad</div>
+            <div class="alttez-section-copy">
+                Estado: <strong>{estado}</strong>. La calibración (temperature scaling) se aplica
+                al consenso del comité; se omite cuando el comité defiere al campeón.{detalle}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    models = calibration.get("models")
+    if isinstance(models, pd.DataFrame) and not models.empty:
+        display_df = models.copy()
+        display_df["ece"] = _format_float(display_df["ece"])
+        st.dataframe(display_df, width="stretch", hide_index=True)
+    else:
+        st.info("Aún no hay predicciones cerradas para medir calibración (ECE).")
+
+
 def render_model_monitoring_dashboard() -> None:
     snapshot = load_monitoring_snapshot()
     overview = snapshot["overview"]
@@ -311,6 +348,7 @@ def render_model_monitoring_dashboard() -> None:
             display_df["brier_score"] = _format_float(display_df["brier_score"])
             display_df["log_loss"] = _format_float(display_df["log_loss"])
             st.dataframe(display_df, width="stretch", hide_index=True)
+        _render_calibration_panel(snapshot.get("calibration"))
 
     lower_left, lower_right = st.columns([1.1, 1.3], gap="large")
     with lower_left:

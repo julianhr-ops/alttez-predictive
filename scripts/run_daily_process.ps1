@@ -106,7 +106,7 @@ try {
     # Non-fatal: result enrichment must not abort the daily brief.
     $CurrentStage = "espn results backfill"
     Write-Output "PROCESS: espn results backfill"
-    $backfillFrom = ([DateTime]::Parse($Date)).AddDays(-3).ToString("yyyy-MM-dd")
+    $backfillFrom = ([DateTime]::Parse($Date)).AddDays(-7).ToString("yyyy-MM-dd")
     $backfillArgs = @($backfill, "--source", "espn", "--date-from", $backfillFrom, "--date-to", $Date, "--apply")
     if ($DatabaseUrl) {
         $backfillArgs += @("--database-url", $DatabaseUrl)
