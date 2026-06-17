@@ -13,6 +13,7 @@ import pandas as pd
 from alttez.api.db import read_dataframe
 from alttez.experiments.tournament_oracle import DEFAULT_DIXON_COLES_RHO, optimize_prediction
 from alttez.inference.calibration import load_active_calibration
+from alttez.inference.committee_weighting import WeightingDecision, resolve_committee_weights
 from alttez.inference.router import (
     ActiveModelSelection,
     BaseMatchPredictor,
@@ -149,10 +150,18 @@ def _normalize_members(members: list[CommitteeMember]) -> list[CommitteeMember]:
 
 
 class PredictionCommittee(BaseMatchPredictor):
-    def __init__(self, members: list[CommitteeMember], *, model_version: str = "committee-consensus-v1") -> None:
+    def __init__(
+        self,
+        members: list[CommitteeMember],
+        *,
+        model_version: str = "committee-consensus-v1",
+        weighting: WeightingDecision | None = None,
+    ) -> None:
         if not members:
             raise ValueError("PredictionCommittee requires at least one member.")
         self.members = _normalize_members(members)
+        # Decision de pesos (guardia de consenso / error inverso). None = pesos previos.
+        self.weighting = weighting
         # Calibracion post-hoc del consenso (temperature scaling ajustado offline
         # sobre las predicciones cerradas del comite). Neutra si no hay artefacto.
         self.calibration = load_active_calibration()
@@ -250,7 +259,13 @@ class PredictionCommittee(BaseMatchPredictor):
         consensus_matrix = consensus_matrix / consensus_matrix.sum()
         # Calibracion del consenso antes de derivar 1X2 y marcadores: coherente
         # para ambos. Neutra (identidad) si no hay artefacto activo.
-        consensus_matrix = self.calibration.calibrate_matrix(consensus_matrix)
+        # NO se aplica cuando el comite defiere al campeon: la temperatura se
+        # ajusto sobre el consenso (blend) y sobre-suavizaria la salida de un
+        # campeon ya bien calibrado (p.ej. Poisson).
+        deferred = bool(self.weighting and self.weighting.deferred_to_champion)
+        calibration_active = (not deferred) and (not self.calibration.is_neutral)
+        if calibration_active:
+            consensus_matrix = self.calibration.calibrate_matrix(consensus_matrix)
         recommendations = optimize_prediction(consensus_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
         score_decision = exact_scoreline_decision(consensus_matrix, recommendations, is_knockout=is_knockout)
@@ -309,8 +324,10 @@ class PredictionCommittee(BaseMatchPredictor):
             "committee_members": member_predictions,
             "committee_consensus_used": True,
             "committee_weights": {member.role: member.weight for member in self.members},
+            "committee_weighting_strategy": self.weighting.strategy if self.weighting else "default",
+            "committee_deferred_to_champion": bool(self.weighting.deferred_to_champion) if self.weighting else False,
             "calibration_temperature": self.calibration.temperature,
-            "calibration_applied": not self.calibration.is_neutral,
+            "calibration_applied": calibration_active,
             "discordance_warning": _discordance_warning(member_scores),
             "member_primary_scores": member_scores,
         }
@@ -366,4 +383,39 @@ def build_prediction_committee(
         except Exception as exc:  # noqa: BLE001 - committee can run without challenger.
             LOGGER.warning("challenger_committee_load_failed detail=%s", exc)
 
-    return PredictionCommittee(members)
+    weighting = _resolve_member_weights(members, database_url=database_url)
+    if weighting is not None:
+        members = [
+            CommitteeMember(member.role, member.predictor, weighting.weights.get(member.role, member.weight))
+            for member in members
+        ]
+    return PredictionCommittee(members, weighting=weighting)
+
+
+def _resolve_member_weights(
+    members: list[CommitteeMember],
+    *,
+    database_url: str | None,
+    committee_version: str = "committee-consensus-v1",
+) -> WeightingDecision | None:
+    """Reasigna pesos por metricas recientes (guardia de consenso / error inverso).
+
+    Devuelve None ante cualquier fallo de lectura para preservar el arranque del
+    comite con sus pesos por defecto (la inferencia nunca depende del registro).
+    """
+    try:
+        from alttez.operations.prediction_memory import load_prediction_learning_audit
+
+        # Ventana amplia: las evaluaciones cerradas pueden ser mas viejas que el
+        # default de 180 dias; necesitamos suficiente muestra para ponderar.
+        audit = load_prediction_learning_audit(database_url=database_url, lookback_days=365)
+        member_versions = {member.role: str(member.predictor.model_version) for member in members}
+        return resolve_committee_weights(
+            member_versions,
+            audit.get("models", []),
+            DEFAULT_COMMITTEE_WEIGHTS,
+            committee_version=committee_version,
+        )
+    except Exception as exc:  # noqa: BLE001 - weighting is an optimization, never a hard dependency.
+        LOGGER.warning("committee_weighting_failed detail=%s", exc)
+        return None
