@@ -18,6 +18,17 @@ def _decision_class(decision_tier: str) -> str:
     return "is-low"
 
 
+def _reliability_class(label: str) -> str:
+    normalized = (label or "").lower()
+    if "alta" in normalized:
+        return "rel-high"
+    if "media" in normalized:
+        return "rel-medium"
+    if "baja" in normalized:
+        return "rel-low"
+    return "rel-none"
+
+
 def _prob_value(raw: Any) -> float:
     try:
         value = float(raw)
@@ -44,6 +55,7 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
               <td class="nowrap">{competition}</td>
               <td class="match-cell"><strong>{home}</strong> <span class="vs">vs</span> <strong>{away}</strong><div class="muted">{tournament}</div></td>
               <td>{support}</td>
+              <td><span class="tag {reliability_class}">{reliability_label} {reliability_score}</span></td>
               <td><span class="tag {decision_class}">{decision}</span></td>
               <td class="num">{xg}</td>
               <td>{market}</td>
@@ -58,6 +70,13 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 away=html.escape(match["away_team"]),
                 tournament=html.escape(match["tournament"]),
                 support=html.escape(match["support_label"]),
+                reliability_label=html.escape((match.get("reliability") or {}).get("label", "N/D")),
+                reliability_score=html.escape(
+                    f"{(match.get('reliability') or {}).get('score', 0)}/100"
+                    if (match.get("reliability") or {}).get("label") not in (None, "Sin soporte confiable")
+                    else ""
+                ),
+                reliability_class=_reliability_class((match.get("reliability") or {}).get("label", "")),
                 decision=html.escape(match["decision_tier"]),
                 decision_class=_decision_class(match["decision_tier"]),
                 xg=html.escape(_fmt_float(match.get("xg_total"))),
@@ -112,6 +131,7 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
               <div class="meta">{kickoff} &middot; {city} &middot; {status}</div>
               <div class="pill-row">
                 <span class="pill">{support}</span>
+                <span class="tag {reliability_class}">Fiabilidad: {reliability_label} {reliability_score}</span>
               </div>
 
               <div class="chart-block">
@@ -148,6 +168,7 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 <p><strong>Pronosticos alternativos:</strong> {candidates}</p>
                 <p><strong>Estrategias EV alternativas:</strong> {alternatives}</p>
                 <p><strong>Comite predictivo:</strong> {committee}</p>
+                <p><strong>Fiabilidad ({reliability_label} {reliability_score}):</strong> {reliability_reasons}</p>
                 <p><strong>Riesgo operativo:</strong> {risk}</p>
               </div>
             </article>
@@ -194,6 +215,16 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 alternatives=html.escape(alt_text),
                 candidates=html.escape(candidate_text),
                 committee=html.escape(committee_note),
+                reliability_class=_reliability_class((match.get("reliability") or {}).get("label", "")),
+                reliability_label=html.escape((match.get("reliability") or {}).get("label", "N/D")),
+                reliability_score=html.escape(
+                    f"({(match.get('reliability') or {}).get('score', 0)}/100)"
+                    if (match.get("reliability") or {}).get("label") not in (None, "Sin soporte confiable")
+                    else ""
+                ),
+                reliability_reasons=html.escape(
+                    " ".join((match.get("reliability") or {}).get("reasons", []) or ["Sin detalle."])
+                ),
                 risk=html.escape(risk_note),
             )
         )
@@ -313,6 +344,10 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
     .tag.is-high {{ background: rgba(22,163,74,0.14); color: #15803d; }}
     .tag.is-watch {{ background: rgba(217,119,6,0.16); color: #b45309; }}
     .tag.is-low {{ background: rgba(107,118,130,0.14); color: #51606e; }}
+    .tag.rel-high {{ background: rgba(22,163,74,0.16); color: #15803d; }}
+    .tag.rel-medium {{ background: rgba(217,119,6,0.16); color: #b45309; }}
+    .tag.rel-low {{ background: rgba(220,38,38,0.13); color: #b91c1c; }}
+    .tag.rel-none {{ background: rgba(107,118,130,0.16); color: #51606e; }}
     .tag.lvl-critical {{ background: rgba(220,38,38,0.14); color: #b91c1c; }}
     .tag.lvl-warning {{ background: rgba(217,119,6,0.16); color: #b45309; }}
     .tag.lvl-info {{ background: rgba(63,109,181,0.14); color: #1d4e80; }}
@@ -402,6 +437,7 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                   <th>Tipo</th>
                   <th>Partido</th>
                   <th>Soporte</th>
+                  <th>Fiabilidad</th>
                   <th>Decision</th>
                   <th>xG</th>
                   <th>Mercado</th>
@@ -411,7 +447,7 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 </tr>
               </thead>
               <tbody>
-                {''.join(priority_rows) or '<tr><td colspan="10">No hay partidos analizables para esta fecha.</td></tr>'}
+                {''.join(priority_rows) or '<tr><td colspan="11">No hay partidos analizables para esta fecha.</td></tr>'}
               </tbody>
             </table>
           </div>

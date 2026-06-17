@@ -13,6 +13,7 @@ from alttez.ingestion.international import InternationalLoader
 from alttez.ingestion.live_matches import list_matches_for_date
 from .constants import DEFAULT_MAX_GOALS
 from .formatting import _decision_tier, localize_prediction_text, team_display_name
+from .reliability import compute_match_reliability, summarize_reliability
 
 
 def _build_result_summary(prob_matrix, team_a: str, team_b: str) -> pd.DataFrame:
@@ -365,9 +366,12 @@ def build_daily_brief_payload(
     )
 
     match_briefs = [_build_match_brief(row._asdict(), predictor) for row in filtered_agenda.itertuples(index=False)]
+    for brief in match_briefs:
+        brief["reliability"] = compute_match_reliability(brief, run_used_fallback=predictor.used_fallback)
     batch_summary = _load_batch_summary(target_date, database_url=database_url)
     alert_summary = _load_alert_summary(target_date, database_url=database_url)
     summary = _summarize_brief(match_briefs, batch_summary, alert_summary)
+    reliability_summary = summarize_reliability(match_briefs)
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -379,6 +383,7 @@ def build_daily_brief_payload(
         "batch_summary": batch_summary,
         "alert_summary": alert_summary,
         "summary": summary,
+        "reliability_summary": reliability_summary,
         "matches": match_briefs,
     }
 

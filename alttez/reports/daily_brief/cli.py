@@ -10,6 +10,7 @@ from alttez.operations.prediction_memory import persist_daily_predictions
 from .constants import DEFAULT_REPORT_DIR
 from .delivery import dispatch_daily_brief
 from .payload import build_daily_brief_payload
+from .reliability import evaluate_delivery_gate
 from .render_html import render_daily_brief_html
 from .writer import write_daily_brief
 
@@ -61,16 +62,29 @@ def generate_daily_brief(
         except Exception as exc:  # noqa: BLE001 - report generation should survive persistence issues.
             persistence["prediction_error"] = str(exc)
 
+    # Delivery gate: never ship a generic report. The gate keeps every match in
+    # the brief (each already carries a reliability marker); it only refuses to
+    # *send* when the run as a whole is untrustworthy (global Poisson fallback,
+    # or no match backed by the active model).
+    gate = evaluate_delivery_gate(payload)
+    payload["delivery_gate"] = gate
+
     payload.update(delivery)
     html_path, json_path = write_daily_brief(payload, report_dir=report_dir)
 
     if deliver:
         delivery["delivery_attempted"] = True
-        html_content = html_path.read_text(encoding="utf-8")
-        delivered, error_message, channel = dispatch_daily_brief(payload, html_content, html_path, json_path)
-        delivery["delivery_status"] = "delivered" if delivered else "failed"
-        delivery["delivery_channel"] = channel
-        delivery["delivery_error"] = error_message
+        if not gate["should_deliver"]:
+            delivery["delivery_status"] = "blocked"
+            delivery["delivery_channel"] = "none"
+            delivery["delivery_error"] = gate["block_reason"]
+            _raise_gate_incident(target_date, gate)
+        else:
+            html_content = html_path.read_text(encoding="utf-8")
+            delivered, error_message, channel = dispatch_daily_brief(payload, html_content, html_path, json_path)
+            delivery["delivery_status"] = "delivered" if delivered else "failed"
+            delivery["delivery_channel"] = channel
+            delivery["delivery_error"] = error_message
         payload.update(delivery)
         html_path, json_path = write_daily_brief(payload, report_dir=report_dir)
 
@@ -81,6 +95,27 @@ def generate_daily_brief(
         **persistence,
         **delivery,
     }
+
+
+def _raise_gate_incident(target_date: date, gate: dict[str, Any]) -> None:
+    """Alerts ops that delivery was blocked by the reliability gate. Best-effort."""
+
+    try:
+        from alttez.operations.alerts import send_pipeline_incident_telegram
+
+        send_pipeline_incident_telegram(
+            stage="daily brief delivery gate",
+            target_date=target_date.isoformat(),
+            message=(
+                "Envío del brief BLOQUEADO por el gate de fiabilidad: "
+                f"{gate.get('block_reason') or 'motivo desconocido'}. "
+                f"Partidos respaldados por el modelo: {gate.get('model_backed_matches', 0)}/"
+                f"{gate.get('total_matches', 0)}."
+            ),
+            level="critical",
+        )
+    except Exception:  # noqa: BLE001 - alerting must never block brief generation.
+        pass
 
 
 def exit_code_for_brief_result(result: dict[str, Any], *, deliver_requested: bool) -> int:
@@ -115,6 +150,11 @@ def main() -> int:
     print(f"daily_brief_delivery_status={result['delivery_status']}")
     print(f"daily_brief_delivery_channel={result['delivery_channel']}")
     brief_payload = result.get("payload") or {}
+    gate = brief_payload.get("delivery_gate") or {}
+    print(f"daily_brief_gate_should_deliver={gate.get('should_deliver')}")
+    print(f"daily_brief_gate_model_backed={gate.get('model_backed_matches', 0)}/{gate.get('total_matches', 0)}")
+    if gate.get("block_reason"):
+        print(f"daily_brief_gate_block_reason={gate.get('block_reason')}")
     print(f"daily_brief_model_version={brief_payload.get('model_version') or 'unknown'}")
     print(f"daily_brief_used_fallback={bool(brief_payload.get('used_fallback'))}")
     if brief_payload.get("used_fallback"):
