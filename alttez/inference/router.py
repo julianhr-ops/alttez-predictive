@@ -31,6 +31,7 @@ from alttez.features.klement import (
 )
 from alttez.ingestion.live_matches import canonical_team_name
 from alttez.features.poisson import PoissonEngine
+from alttez.inference.calibration import load_single_predictor_calibration
 
 
 DEFAULT_POISSON_MODEL_VERSION = "poisson-champion-v2"
@@ -272,6 +273,9 @@ class BaseMatchPredictor(ABC):
         self.model_family = selection.model_family
         self.used_fallback = used_fallback
         self.fallback_reason = fallback_reason
+        # Calibracion del predictor unico (separada del consenso del comite).
+        # NEUTRA salvo que ALTTEZ_CALIBRATE_SINGLE_PREDICTOR este encendido.
+        self.calibration = load_single_predictor_calibration()
 
     @abstractmethod
     def get_team_profile(self, team: str) -> dict[str, float]:
@@ -369,7 +373,11 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             }
 
         lambda_h, lambda_a = self.engine.predict_xg(home_team, away_team, is_neutral=is_neutral)
-        prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=DEFAULT_DIXON_COLES_RHO)
+        # rho=None resuelve el rho Dixon-Coles ajustado por MLE (artifact activo),
+        # con fallback a DEFAULT_DIXON_COLES_RHO cuando no hay artefacto.
+        prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=None)
+        if not self.calibration.is_neutral:
+            prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
         recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
         score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
@@ -532,7 +540,9 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         if self.artifact_schema_version >= 2 and self.models:
             lambda_h = max(float(self.models["home_goals"].predict(feature_df)[0]), 0.05)
             lambda_a = max(float(self.models["away_goals"].predict(feature_df)[0]), 0.05)
-            prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=DEFAULT_DIXON_COLES_RHO)
+            prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=None)
+            if not self.calibration.is_neutral:
+                prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
             recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
             recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
             score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
@@ -568,6 +578,11 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             probability_map.setdefault("H", 0.0)
             probability_map.setdefault("D", 0.0)
             probability_map.setdefault("A", 0.0)
+            if not self.calibration.is_neutral:
+                cal_h, cal_d, cal_a = self.calibration.calibrate_triplet(
+                    probability_map["H"], probability_map["D"], probability_map["A"]
+                )
+                probability_map["H"], probability_map["D"], probability_map["A"] = cal_h, cal_d, cal_a
             market_rows = [
                 {"Mercado": f"Victoria {home_team}", "Probabilidad": probability_map["H"]},
                 {"Mercado": "Empate", "Probabilidad": probability_map["D"]},

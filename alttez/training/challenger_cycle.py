@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ from sklearn.metrics import log_loss
 from xgboost import XGBRegressor
 
 from alttez.api.db import get_engine
+from alttez.evaluation.metrics import ranked_probability_score
 from alttez.evaluation.regulation_points import (
     max_regulation_points,
     points_optimal_prediction,
@@ -49,6 +51,13 @@ DEFAULT_CHALLENGER_VERSION = "xgboost-challenger-v2"
 DEFAULT_EVALUATION_MATCHES = 250
 DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE = 0.01
 DEFAULT_INCUMBENT_REGRESSION_EPSILON = 1e-9
+# Tolerancia para el RPS: el retador debe igualar o mejorar el RPS del champion
+# (mismo espiritu que el Brier, sin exigir margen arbitrario). Empeorar el RPS por
+# encima de este epsilon lo descalifica aunque el Brier nominal mejore.
+DEFAULT_PROMOTION_RPS_TOLERANCE = 1e-9
+# Umbral de significancia para la prueba de Diebold-Mariano. Solo aplica en la ruta
+# de auto-promocion: la diferencia de perdida debe ser estadisticamente significativa.
+DEFAULT_DM_SIGNIFICANCE_LEVEL = 0.05
 DEFAULT_CHAMPION_REFIT_INTERVAL = 25
 DEFAULT_MAX_GOALS = 7
 # Single source of truth lives in alttez.features.klement; aliased for compatibility.
@@ -144,6 +153,9 @@ def _score_prediction_row(
         "predicted_outcome": predicted_outcome,
         "actual_outcome": actual_outcome,
         "brier": brier_score_1x2(prob_home, prob_draw, prob_away, actual_outcome),
+        # RPS respeta la ordinalidad del 1X2 (H->D->A); complementa el Brier nominal
+        # y alimenta tanto la metrica agregada como la guardia de promocion.
+        "rps": ranked_probability_score(prob_home, prob_draw, prob_away, actual_outcome),
         "prob_home": prob_home,
         "prob_draw": prob_draw,
         "prob_away": prob_away,
@@ -198,10 +210,14 @@ def _summarize_probability_rows(
         "model_version": model_version,
         "model_family": model_family,
         "brier_score": float(eval_df["brier"].mean()),
+        "rps": float(eval_df["rps"].mean()),
         "log_loss": float(log_loss(y_true, probability_matrix, labels=[0, 1, 2])),
         "accuracy_1x2": float((eval_df["predicted_outcome"] == eval_df["actual_outcome"]).mean()),
         "exact_score_hit_rate": float(eval_df["exact_hit"].mean()),
         "expected_calibration_error": expected_calibration_error(eval_df),
+        # Serie de perdida Brier por partido (orden del holdout) para la prueba de
+        # Diebold-Mariano retador-vs-incumbente. Es metadata interna, no una metrica.
+        "brier_losses": [float(value) for value in eval_df["brier"].tolist()],
         **summarize_regulation_points(rows),
     }
     if extra:
@@ -276,7 +292,7 @@ def _score_lambda_stream(
     rows = []
     for (lambda_home, lambda_away), row in zip(lambdas, ordered_holdout.itertuples(index=False)):
         prob_matrix = build_probability_matrix(
-            lambda_home, lambda_away, max_goals=DEFAULT_MAX_GOALS, rho=DEFAULT_DIXON_COLES_RHO
+            lambda_home, lambda_away, max_goals=DEFAULT_MAX_GOALS, rho=None
         )
         rows.append(
             _score_prediction_row(
@@ -344,6 +360,45 @@ def evaluate_lambda_blend(
 
 DEFAULT_MIN_EARLY_STOPPING_SAMPLES = 50
 
+# Recencia para el ponderado del entrenamiento XGBoost. Default 365d para paridad
+# con PoissonEngine.recency_half_life_days (features/poisson.py): el campeon y el
+# retador decaen el pasado al mismo ritmo en vez de tratar todo el historico igual.
+DEFAULT_XGB_TIME_DECAY_HALFLIFE_DAYS = 365
+XGB_TIME_DECAY_HALFLIFE_ENV = "ALTTEZ_XGB_TIME_DECAY_HALFLIFE_DAYS"
+
+
+def _resolve_time_decay_half_life() -> float:
+    """Half-life en dias para el ponderado por recencia. Env override con fallback.
+
+    Valores no numericos o <= 0 caen al default (paridad con Poisson).
+    """
+    raw = os.getenv(XGB_TIME_DECAY_HALFLIFE_ENV)
+    if raw is None:
+        return float(DEFAULT_XGB_TIME_DECAY_HALFLIFE_DAYS)
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(DEFAULT_XGB_TIME_DECAY_HALFLIFE_DAYS)
+    return value if value > 0 else float(DEFAULT_XGB_TIME_DECAY_HALFLIFE_DAYS)
+
+
+def _compute_time_decay_weights(
+    dates: pd.Series, reference_date: Any, half_life_days: float
+) -> np.ndarray:
+    """Pesos exponenciales por recencia: w = 0.5^(dias_atras / half_life).
+
+    Espeja la formula de PoissonEngine._compute_match_weights. El partido mas
+    reciente del nucleo de entrenamiento pesa ~1.0; los antiguos decaen. La
+    referencia es el corte de entrenamiento (max fecha del nucleo), nunca una
+    fecha futura -> sin fuga temporal.
+    """
+    if half_life_days <= 0:
+        return np.ones(len(dates), dtype=float)
+    parsed = pd.to_datetime(dates)
+    reference = pd.to_datetime(reference_date)
+    days_ago = (reference - parsed).dt.days.clip(lower=0).to_numpy(dtype=float)
+    return np.power(0.5, days_ago / float(half_life_days))
+
 
 def _split_training_and_validation(train_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     """Carve a strictly disjoint, date-aligned validation tail for early stopping.
@@ -397,6 +452,13 @@ def _fit_goal_models(train_df: pd.DataFrame) -> dict[str, Any]:
     use_early_stopping = validation_df is not None
     x_train = train_core[FEATURE_COLUMNS].fillna(0.0)
 
+    # Ponderado por recencia: el corte (max fecha del nucleo) pesa ~1.0; el
+    # pasado decae con half-life. sample_weight se alinea por posicion con x_train
+    # (mismo orden de filas que train_core). El eval_set queda sin ponderar.
+    half_life_days = _resolve_time_decay_half_life()
+    reference_date = train_core["date"].max()
+    sample_weight = _compute_time_decay_weights(train_core["date"], reference_date, half_life_days)
+
     home_model = _build_goal_regressor(use_early_stopping=use_early_stopping)
     away_model = _build_goal_regressor(use_early_stopping=use_early_stopping)
 
@@ -405,18 +467,20 @@ def _fit_goal_models(train_df: pd.DataFrame) -> dict[str, Any]:
         home_model.fit(
             x_train,
             train_core["home_score"],
+            sample_weight=sample_weight,
             eval_set=[(x_validation, validation_df["home_score"])],
             verbose=False,
         )
         away_model.fit(
             x_train,
             train_core["away_score"],
+            sample_weight=sample_weight,
             eval_set=[(x_validation, validation_df["away_score"])],
             verbose=False,
         )
     else:
-        home_model.fit(x_train, train_core["home_score"], verbose=False)
-        away_model.fit(x_train, train_core["away_score"], verbose=False)
+        home_model.fit(x_train, train_core["home_score"], sample_weight=sample_weight, verbose=False)
+        away_model.fit(x_train, train_core["away_score"], sample_weight=sample_weight, verbose=False)
 
     # Average gain importance across both goal models, ranked, for auditability.
     home_imp = np.asarray(getattr(home_model, "feature_importances_", np.zeros(len(FEATURE_COLUMNS))), dtype=float)
@@ -439,6 +503,7 @@ def _fit_goal_models(train_df: pd.DataFrame) -> dict[str, Any]:
         },
         "validation_samples": int(len(validation_df)) if validation_df is not None else 0,
         "train_samples": int(len(train_core)),
+        "time_decay_half_life_days": float(half_life_days),
         "feature_importance": feature_importance,
     }
 
@@ -485,7 +550,7 @@ def _evaluate_challenger(
             float(lambdas_home[index]),
             float(lambdas_away[index]),
             max_goals=DEFAULT_MAX_GOALS,
-            rho=DEFAULT_DIXON_COLES_RHO,
+            rho=None,
         )
         rows.append(
             _score_prediction_row(
@@ -518,28 +583,114 @@ def _incumbent_brier(active_record: dict[str, Any] | None) -> float | None:
     return None
 
 
+def diebold_mariano(loss_a: list[float], loss_b: list[float]) -> tuple[float, float]:
+    """Prueba de Diebold-Mariano sobre dos series de perdida por partido (menor es mejor).
+
+    Compara la precision predictiva de dos modelos a partir de su perdida por partido
+    (p.ej. Brier por partido del retador vs el incumbente). La diferencia ``d = loss_a -
+    loss_b`` se promedia y se estandariza por su error estandar. Un ``dm_stat`` negativo
+    indica que ``loss_a`` (modelo A) tiene menor perdida -> A es mejor.
+
+    Aproximacion: se usa la varianza muestral simple (sin correccion HAC de Newey-West
+    para autocorrelacion ni el ajuste de muestra chica de Harvey-Leybourne-Newbold) y un
+    p-valor bilateral por aproximacion normal sobre ``dm_stat``. Es adecuado para perdidas
+    por partido razonablemente independientes; documentado como aproximacion.
+
+    Casos degenerados (longitudes distintas o < 2, o varianza ~0 de la diferencia) NO
+    levantan excepcion: devuelven ``(0.0, 1.0)`` (no significativo).
+    """
+
+    series_a = np.asarray(list(loss_a), dtype=float)
+    series_b = np.asarray(list(loss_b), dtype=float)
+    n = series_a.shape[0]
+    if n < 2 or series_b.shape[0] != n:
+        return 0.0, 1.0
+
+    diff = series_a - series_b
+    mean_diff = float(diff.mean())
+    # Varianza muestral (ddof=1) de la diferencia; error estandar de la media.
+    variance = float(diff.var(ddof=1))
+    if not np.isfinite(variance) or variance <= 1e-15:
+        # Series identicas o diferencia constante: sin evidencia de superioridad.
+        return 0.0, 1.0
+
+    standard_error = (variance / n) ** 0.5
+    if standard_error <= 0.0:
+        return 0.0, 1.0
+
+    dm_stat = mean_diff / standard_error
+    # p-valor bilateral por aproximacion normal: 2 * (1 - Phi(|z|)).
+    # math.erf evita una dependencia de scipy; Phi(z) = 0.5*(1+erf(z/sqrt(2))).
+    import math
+
+    cdf = 0.5 * (1.0 + math.erf(abs(dm_stat) / math.sqrt(2.0)))
+    p_value = 2.0 * (1.0 - cdf)
+    p_value = float(min(max(p_value, 0.0), 1.0))
+    return float(dm_stat), p_value
+
+
 def _promotion_decision(
     champion_metrics: dict[str, Any],
     challenger_metrics: dict[str, Any],
     *,
     incumbent_brier: float | None = None,
-) -> tuple[bool, str]:
+    challenger_brier_losses: list[float] | None = None,
+    incumbent_brier_losses: list[float] | None = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Decide elegibilidad del retador y devuelve el detalle de gobernanza.
+
+    Reglas compuestas (orden de evaluacion):
+      1. Brier (gate primario): el retador debe mejorar el Brier del champion.
+      2. Log Loss (guardrail): no deteriorar el Log Loss materialmente.
+      3. RPS (gate adicional ordinal): el retador debe igualar o mejorar el RPS del
+         champion. Es un requisito ADICIONAL al Brier, no un reemplazo.
+      4. Proteccion del incumbente: no regresar el Brier del modelo activo.
+
+    Devuelve ``(promote, reason, detail)``. ``detail`` expone ``challenger_rps``,
+    ``champion_rps`` y ``dm_p_value`` (Diebold-Mariano sobre las perdidas Brier por
+    partido retador vs incumbente) para que el reporte/dashboard las muestren. El
+    ``dm_p_value`` se calcula aqui pero NO bloquea esta decision: la guardia DM solo
+    aplica en la ruta de auto-promocion (ver ``_governance_decision``).
+    """
+
+    challenger_rps = challenger_metrics.get("rps")
+    champion_rps = champion_metrics.get("rps")
+    dm_stat, dm_p_value = diebold_mariano(
+        list(challenger_brier_losses or []), list(incumbent_brier_losses or [])
+    )
+    detail: dict[str, Any] = {
+        "challenger_rps": float(challenger_rps) if challenger_rps is not None else None,
+        "champion_rps": float(champion_rps) if champion_rps is not None else None,
+        "dm_stat": float(dm_stat),
+        "dm_p_value": float(dm_p_value),
+    }
+
     if float(challenger_metrics["brier_score"]) >= float(champion_metrics["brier_score"]):
-        return False, "Challenger no mejora Brier Score frente al champion actual."
+        return False, "Challenger no mejora Brier Score frente al champion actual.", detail
     if float(challenger_metrics["log_loss"]) > float(champion_metrics["log_loss"]) + DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE:
-        return False, "Challenger mejora Brier pero deteriora Log Loss materialmente."
+        return False, "Challenger mejora Brier pero deteriora Log Loss materialmente.", detail
+    # RPS gate (ordinal): el retador no puede empeorar el RPS aunque gane en Brier.
+    # El 1X2 es ordinal; un retador que mejora el Brier nominal pero degrada el RPS
+    # esta acertando peor en la *direccion* del resultado y no es elegible.
+    if (
+        challenger_rps is not None
+        and champion_rps is not None
+        and float(challenger_rps) > float(champion_rps) + DEFAULT_PROMOTION_RPS_TOLERANCE
+    ):
+        return False, "Challenger mejora Brier pero deteriora RPS ordinal frente al champion.", detail
     # Incumbent protection: never auto-replace the active model with a worse one.
     # Small wins are still wins; the tolerance above is only for material Log Loss
     # decay, not for demanding an arbitrary Brier margin over the active model.
     if incumbent_brier is not None and float(challenger_metrics["brier_score"]) > incumbent_brier + DEFAULT_INCUMBENT_REGRESSION_EPSILON:
-        return False, "Challenger empeora frente al modelo activo (sin regresion permitida)."
-    return True, "Challenger elegible por Brier; supera champion e incumbente."
+        return False, "Challenger empeora frente al modelo activo (sin regresion permitida).", detail
+    return True, "Challenger elegible por Brier y RPS; supera champion e incumbente.", detail
 
 
 def _governance_decision(
     *,
     promote: bool,
     challenger_family: str,
+    dm_p_value: float | None = None,
 ) -> tuple[str, str, str]:
     if not promote:
         return "shadow", "blocked", "Challenger descartado por politica de metricas."
@@ -547,6 +698,16 @@ def _governance_decision(
         return "eligible", "blocked", "Elegible por Brier, pero su familia aun no esta habilitada para inferencia productiva."
     if not auto_promotion_enabled():
         return "eligible", "manual", "Elegible por Brier; pendiente de aprobacion explicita para activacion productiva."
+    # Auto-promote gate adicional (Diebold-Mariano): solo en esta ruta exigimos que la
+    # mejora del retador sobre el incumbente sea estadisticamente significativa (p<0.05).
+    # No afecta las rutas manual/shadow: la activacion manual sigue siendo discrecional.
+    if dm_p_value is not None and float(dm_p_value) >= DEFAULT_DM_SIGNIFICANCE_LEVEL:
+        return (
+            "eligible",
+            "manual",
+            "Elegible por Brier/RPS, pero la mejora no es estadisticamente significativa "
+            f"(Diebold-Mariano p={float(dm_p_value):.3f} >= {DEFAULT_DM_SIGNIFICANCE_LEVEL}); requiere aprobacion manual.",
+        )
     return "active", "auto", "Promovido automaticamente por mejorar Brier sin deterioro material de Log Loss."
 
 
@@ -624,12 +785,24 @@ def run_challenger_cycle(
 
     active_record = load_active_model_record(database_url=database_url)
     incumbent_brier = _incumbent_brier(active_record)
-    promote, promotion_reason = _promotion_decision(
-        champion_metrics, challenger_metrics, incumbent_brier=incumbent_brier
+    # Series de perdida Brier por partido (mismo holdout, mismo orden) para la prueba
+    # de Diebold-Mariano. El champion Poisson evaluado en el holdout es el baseline
+    # incumbente por-partido comparable (las perdidas por-partido del modelo activo
+    # historico no se reconstruyen aqui).
+    challenger_brier_losses = list(challenger_metrics.get("brier_losses") or [])
+    incumbent_brier_losses = list(champion_metrics.get("brier_losses") or [])
+    promote, promotion_reason, promotion_detail = _promotion_decision(
+        champion_metrics,
+        challenger_metrics,
+        incumbent_brier=incumbent_brier,
+        challenger_brier_losses=challenger_brier_losses,
+        incumbent_brier_losses=incumbent_brier_losses,
     )
+    dm_p_value = promotion_detail.get("dm_p_value")
     production_status, activation_mode, governance_reason = _governance_decision(
         promote=promote,
         challenger_family=challenger_metrics["model_family"],
+        dm_p_value=dm_p_value,
     )
 
     report = {
@@ -643,6 +816,15 @@ def run_challenger_cycle(
         "ensemble": ensemble_metrics,
         "promotion_decision": promote,
         "promotion_reason": promotion_reason,
+        "challenger_rps": promotion_detail.get("challenger_rps"),
+        "champion_rps": promotion_detail.get("champion_rps"),
+        "rps_comparison": (
+            f"RPS retador={promotion_detail.get('challenger_rps')} vs "
+            f"champion={promotion_detail.get('champion_rps')} "
+            "(menor es mejor; el retador debe igualar o mejorar)."
+        ),
+        "dm_stat": promotion_detail.get("dm_stat"),
+        "dm_p_value": dm_p_value,
         "production_status": production_status,
         "activation_mode": activation_mode,
         "governance_reason": governance_reason,

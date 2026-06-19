@@ -16,6 +16,7 @@ from sqlalchemy.engine import Engine
 
 from alttez.api.db import get_engine, read_dataframe
 from alttez.api.settings import load_local_env
+from alttez.evaluation.metrics import ranked_probability_score
 
 
 LOGGER = logging.getLogger(__name__)
@@ -364,6 +365,12 @@ def close_finished_prediction_evaluations(
                         row["predicted_away_win_prob"],
                         actual_outcome,
                     ),
+                    "rps_1x2": ranked_probability_score(
+                        row["predicted_home_win_prob"],
+                        row["predicted_draw_prob"],
+                        row["predicted_away_win_prob"],
+                        actual_outcome,
+                    ),
                     "score_residual_home": predicted_home_score - actual_home_score,
                     "score_residual_away": predicted_away_score - actual_away_score,
                     "score_abs_error": abs(predicted_home_score - actual_home_score) + abs(predicted_away_score - actual_away_score),
@@ -395,6 +402,7 @@ def close_finished_prediction_evaluations(
                     count(*) as evaluated_predictions,
                     avg(pe.brier_1x2) as brier_score,
                     avg(pe.log_loss_1x2) as log_loss,
+                    avg(pe.rps_1x2) as rps,
                     avg(case when pe.hit_1x2 then 1.0 else 0.0 end) as accuracy_1x2,
                     avg(case when pe.hit_exact_score then 1.0 else 0.0 end) as exact_score_hit_rate
                 from public.prediction_evaluations as pe
@@ -408,10 +416,11 @@ def close_finished_prediction_evaluations(
 
     if audit_row and int(audit_row["evaluated_predictions"] or 0) > 0:
         LOGGER.info(
-            "prediction_learning_audit evaluated=%s brier=%.4f log_loss=%.4f accuracy_1x2=%.3f exact_score_hit=%.3f",
+            "prediction_learning_audit evaluated=%s brier=%.4f log_loss=%.4f rps=%.4f accuracy_1x2=%.3f exact_score_hit=%.3f",
             int(audit_row["evaluated_predictions"] or 0),
             float(audit_row["brier_score"] or 0.0),
             float(audit_row["log_loss"] or 0.0),
+            float(audit_row["rps"] or 0.0),
             float(audit_row["accuracy_1x2"] or 0.0),
             float(audit_row["exact_score_hit_rate"] or 0.0),
         )
@@ -430,6 +439,7 @@ def load_prediction_overview(*, database_url: str | None = None, lookback_days: 
             select
                 pe.brier_1x2,
                 pe.log_loss_1x2,
+                pe.rps_1x2,
                 pe.hit_1x2,
                 pe.hit_exact_score
             from public.prediction_evaluations as pe
@@ -445,6 +455,7 @@ def load_prediction_overview(*, database_url: str | None = None, lookback_days: 
             "evaluated_predictions": 0,
             "brier_score": 0.0,
             "log_loss": 0.0,
+            "rps": 0.0,
             "accuracy_1x2": 0.0,
             "exact_score_hit_rate": 0.0,
         }
@@ -454,6 +465,7 @@ def load_prediction_overview(*, database_url: str | None = None, lookback_days: 
             "evaluated_predictions": 0,
             "brier_score": 0.0,
             "log_loss": 0.0,
+            "rps": 0.0,
             "accuracy_1x2": 0.0,
             "exact_score_hit_rate": 0.0,
         }
@@ -462,6 +474,7 @@ def load_prediction_overview(*, database_url: str | None = None, lookback_days: 
         "evaluated_predictions": int(len(df)),
         "brier_score": float(df["brier_1x2"].mean()),
         "log_loss": float(df["log_loss_1x2"].mean()),
+        "rps": float(df["rps_1x2"].mean()),
         "accuracy_1x2": float(df["hit_1x2"].mean()),
         "exact_score_hit_rate": float(df["hit_exact_score"].mean()),
     }
@@ -698,6 +711,40 @@ def load_recent_prediction_evaluations(*, database_url: str | None = None, limit
             limit :limit
             """,
             params={"limit": limit},
+            database_url=database_url,
+        )
+    except Exception:
+        return pd.DataFrame()
+
+
+def load_closed_evaluation_samples(*, database_url: str | None = None, lookback_days: int = 180) -> pd.DataFrame:
+    """Carga las filas por-partido de evaluaciones cerradas (probabilidades + outcome + metricas).
+
+    Alimenta los diagnosticos del dashboard (descomposicion de Murphy del Brier y los
+    intervalos de confianza bootstrap). Lectura tolerante: ante cualquier fallo devuelve
+    un DataFrame vacio para que el dashboard nunca rompa cuando la DB/artefacto falta.
+
+    Columnas: prob_home, prob_draw, prob_away, actual_outcome, brier_1x2, rps_1x2,
+    log_loss_1x2.
+    """
+    params = {"lookback_start": (datetime.now(timezone.utc).date() - pd.Timedelta(days=lookback_days)).isoformat()}
+    try:
+        return read_dataframe(
+            """
+            select
+                mp.predicted_home_win_prob as prob_home,
+                mp.predicted_draw_prob as prob_draw,
+                mp.predicted_away_win_prob as prob_away,
+                pe.actual_outcome,
+                pe.brier_1x2,
+                pe.rps_1x2,
+                pe.log_loss_1x2
+            from public.prediction_evaluations as pe
+            join public.match_predictions as mp
+                on mp.id = pe.prediction_id
+            where mp.match_date >= :lookback_start and pe.actual_outcome is not null
+            """,
+            params=params,
             database_url=database_url,
         )
     except Exception:

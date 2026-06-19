@@ -1,3 +1,8 @@
+import json
+import os
+from pathlib import Path
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 from scipy.stats import poisson
@@ -8,8 +13,43 @@ from alttez.features.poisson import PoissonEngine
 
 # Typical Dixon-Coles low-score dependence parameter. Negative rho lifts the
 # probability of draws and low-scoring lines that the independent Poisson product
-# systematically underestimates.
+# systematically underestimates. Used as the strict fallback whenever the fitted
+# artifact is unavailable, so inference always boots.
 DEFAULT_DIXON_COLES_RHO = -0.13
+
+# Sane bounds for a Dixon-Coles low-score dependence parameter. The fit script
+# optimizes within [-0.3, 0.0]; the loader rejects anything outside this range.
+DIXON_COLES_RHO_MIN = -0.3
+DIXON_COLES_RHO_MAX = 0.0
+
+# Active artifact written by scripts/fit_dixon_coles_rho.py. Resolved relative to
+# the repo root (this file lives at <root>/alttez/experiments/).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DIXON_COLES_RHO_PATH = _REPO_ROOT / "artifacts" / "dixon_coles" / "active.json"
+
+
+def load_active_dixon_coles_rho(path: Optional[str] = None) -> float:
+    """Resuelve el rho de Dixon-Coles activo (ajustado por MLE).
+
+    Lee ``artifacts/dixon_coles/active.json`` (override via la variable de entorno
+    ``ALTTEZ_DIXON_COLES_RHO_PATH`` o el argumento ``path``) y devuelve su clave
+    ``rho``. Nunca lanza excepciones: si el archivo falta, es ilegible, no contiene
+    un rho numerico o cae fuera del rango ``[-0.3, 0.0]`` devuelve
+    ``DEFAULT_DIXON_COLES_RHO``. La inferencia debe arrancar sin el artefacto.
+    """
+
+    resolved = path or os.environ.get("ALTTEZ_DIXON_COLES_RHO_PATH") or DEFAULT_DIXON_COLES_RHO_PATH
+    try:
+        with open(resolved, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        rho = float(payload["rho"])
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return DEFAULT_DIXON_COLES_RHO
+
+    if not np.isfinite(rho) or rho < DIXON_COLES_RHO_MIN or rho > DIXON_COLES_RHO_MAX:
+        return DEFAULT_DIXON_COLES_RHO
+
+    return rho
 
 
 def calcular_puntos(pred_h: int, pred_a: int, real_h: int, real_a: int, is_knockout: bool = False) -> int:
@@ -32,14 +72,26 @@ def build_probability_matrix(
     lambda_home: float,
     lambda_away: float,
     max_goals: int = 7,
-    rho: float = 0.0,
+    rho: Optional[float] = None,
 ) -> np.ndarray:
     """Construye y normaliza la matriz de probabilidad de marcadores.
 
-    Si ``rho != 0`` aplica la correccion Dixon-Coles a las celdas de marcador bajo
-    (0-0, 0-1, 1-0, 1-1) antes de normalizar, corrigiendo la subestimacion de
-    empates propia del producto Poisson independiente.
+    ``rho`` controla la correccion Dixon-Coles sobre las celdas de marcador bajo
+    (0-0, 0-1, 1-0, 1-1), que corrige la subestimacion de empates propia del
+    producto Poisson independiente:
+
+    - ``rho=None`` (por defecto): resuelve el valor ajustado activo via
+      ``load_active_dixon_coles_rho()`` (cae a ``DEFAULT_DIXON_COLES_RHO`` si no
+      hay artefacto). Esto permite que el sistema use el rho ajustado por MLE.
+    - ``rho`` float explicito (incluye ``0.0`` y ``-0.13``): se usa tal cual. Asi
+      cualquier llamador existente que pase un rho explicito mantiene su
+      comportamiento sin cambios.
+
+    Con ``rho == 0.0`` no se aplica correccion alguna.
     """
+
+    if rho is None:
+        rho = load_active_dixon_coles_rho()
 
     prob_matrix = np.zeros((max_goals + 1, max_goals + 1))
     for home_goals in range(max_goals + 1):

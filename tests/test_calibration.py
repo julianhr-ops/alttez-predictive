@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 
 from alttez.inference.calibration import (
     NEUTRAL_CALIBRATION,
+    IsotonicCalibration,
     ProbabilityCalibration,
     apply_class_floor,
     expected_calibration_error,
+    fit_isotonic,
     fit_temperature,
     load_active_calibration,
     log_loss,
@@ -99,10 +104,113 @@ class TestMetrics(unittest.TestCase):
         self.assertAlmostEqual(expected_calibration_error(triplets, ["H"] * 5), 0.0, places=6)
 
 
+def _miscalibrated_dataset(n: int = 800, seed: int = 7):
+    """Genera tripletes sobreconfiados: prob alta en una clase pero acierta ~55%."""
+    rng = np.random.default_rng(seed)
+    triplets, outcomes = [], []
+    for _ in range(n):
+        which = rng.integers(0, 3)
+        base = [0.05, 0.05, 0.05]
+        base[which] = 0.90
+        triplets.append(base)
+        # Solo acierta 55% de las veces -> sobreconfianza marcada.
+        if rng.random() < 0.55:
+            outcomes.append("HDA"[which])
+        else:
+            other = (which + rng.integers(1, 3)) % 3
+            outcomes.append("HDA"[other])
+    return np.array(triplets, dtype=float), outcomes
+
+
+class TestIsotonicCalibration(unittest.TestCase):
+    def test_neutral_when_empty(self) -> None:
+        cal = IsotonicCalibration()
+        self.assertTrue(cal.is_neutral)
+        h, d, a = cal.calibrate_triplet(0.7, 0.2, 0.1)
+        # Neutra normaliza pero no deforma (ya suma 1).
+        self.assertAlmostEqual(h + d + a, 1.0, places=9)
+        self.assertAlmostEqual(h, 0.7, places=9)
+
+    def test_calibrate_matrix_is_identity(self) -> None:
+        cal = fit_isotonic(*_miscalibrated_dataset())
+        matrix = np.array([[0.1, 0.2], [0.3, 0.4]])
+        np.testing.assert_allclose(cal.calibrate_matrix(matrix), matrix, atol=1e-12)
+
+    def test_fit_reduces_log_loss_vs_raw(self) -> None:
+        triplets, outcomes = _miscalibrated_dataset()
+        cal = fit_isotonic(triplets, outcomes)
+        self.assertFalse(cal.is_neutral)
+        before = log_loss(triplets, outcomes)
+        calibrated = np.array([cal.calibrate_triplet(*row) for row in triplets])
+        after = log_loss(calibrated, outcomes)
+        self.assertLess(after, before)
+
+    def test_triplet_sums_to_one(self) -> None:
+        cal = fit_isotonic(*_miscalibrated_dataset())
+        h, d, a = cal.calibrate_triplet(0.9, 0.05, 0.05)
+        self.assertAlmostEqual(h + d + a, 1.0, places=9)
+
+    def test_serialization_round_trips_via_arrays(self) -> None:
+        cal = fit_isotonic(*_miscalibrated_dataset())
+        payload = cal.to_payload()
+        # El payload solo contiene arreglos (sin objetos sklearn) y es JSON-serializable.
+        text = json.dumps(payload)
+        self.assertIn("curves", payload)
+        for klass in ("home", "draw", "away"):
+            self.assertIsInstance(payload["curves"][klass]["x"], list)
+            self.assertIsInstance(payload["curves"][klass]["y"], list)
+        restored = IsotonicCalibration.from_payload(json.loads(text))
+        # Predicciones identicas tras round-trip.
+        for row in (np.array([0.9, 0.05, 0.05]), np.array([0.2, 0.3, 0.5])):
+            np.testing.assert_allclose(
+                cal.calibrate_triplet(*row), restored.calibrate_triplet(*row), atol=1e-12
+            )
+
+    def test_class_floor_applied(self) -> None:
+        triplets, outcomes = _miscalibrated_dataset()
+        cal = fit_isotonic(triplets, outcomes, class_floor=0.05)
+        h, d, a = cal.calibrate_triplet(0.95, 0.03, 0.02)
+        self.assertGreaterEqual(min(h, d, a), 0.05 - 1e-9)
+
+
 class TestLoadActiveCalibration(unittest.TestCase):
     def test_missing_artifact_returns_neutral(self) -> None:
         cal = load_active_calibration(path="does/not/exist.json")
         self.assertTrue(cal.is_neutral)
+
+    def test_loads_isotonic_artifact(self) -> None:
+        cal = fit_isotonic(*_miscalibrated_dataset())
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "active.json"
+            path.write_text(json.dumps(cal.to_payload()), encoding="utf-8")
+            loaded = load_active_calibration(path=path)
+        self.assertIsInstance(loaded, IsotonicCalibration)
+        self.assertFalse(loaded.is_neutral)
+        np.testing.assert_allclose(
+            loaded.calibrate_triplet(0.9, 0.05, 0.05),
+            cal.calibrate_triplet(0.9, 0.05, 0.05),
+            atol=1e-12,
+        )
+
+    def test_loads_legacy_no_method_artifact_as_temperature(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "active.json"
+            path.write_text(json.dumps({"temperature": 2.0, "class_floor": 0.03}), encoding="utf-8")
+            loaded = load_active_calibration(path=path)
+        self.assertIsInstance(loaded, ProbabilityCalibration)
+        self.assertEqual(loaded.temperature, 2.0)
+        self.assertEqual(loaded.class_floor, 0.03)
+
+    def test_loads_explicit_temperature_method(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "active.json"
+            path.write_text(
+                json.dumps({"method": "temperature", "temperature": 1.5, "class_floor": 0.0}),
+                encoding="utf-8",
+            )
+            loaded = load_active_calibration(path=path)
+        self.assertIsInstance(loaded, ProbabilityCalibration)
+        self.assertEqual(loaded.temperature, 1.5)
 
 
 if __name__ == "__main__":
