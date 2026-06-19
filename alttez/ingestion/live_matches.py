@@ -32,7 +32,7 @@ from alttez.ingestion.raw_matches_api import RawMatchRecord, upsert_raw_matches
 DEFAULT_SCHEMA = "public"
 DEFAULT_MATCH_LOCAL_TIMEZONE = "America/Bogota"
 DEFAULT_LIVE_PROVIDER_ORDER = (
-    "api_football",
+    "espn",
     "football_data_org",
     "local_json",
 )
@@ -63,6 +63,16 @@ TEAM_NAME_ALIASES = {
     "côte d'ivoire": "Ivory Coast",
     "ivory coast": "Ivory Coast",
     "england": "England",
+    # World Cup 2026 provider->historical reconciliation (verified vs Supabase
+    # historical names: ESPN emits "Congo DR"/"Czechia" but our 49k-match history
+    # stores "DR Congo" (522) / "Czech Republic" (359). Without these, both teams
+    # fall to <min-support and the brief returns N/D for their fixtures.
+    "congo dr": "DR Congo",
+    "dr congo": "DR Congo",
+    "democratic republic of congo": "DR Congo",
+    "congo democratic republic": "DR Congo",
+    "czechia": "Czech Republic",
+    "czech republic": "Czech Republic",
 }
 WORLD_CUP_KEYWORDS = (
     "fifa world cup",
@@ -451,6 +461,8 @@ def parse_provider_records(
     fetched_at,
     target_date: date,
 ) -> tuple[list[ScheduledMatch], list[RawMatchRecord]]:
+    if provider_name == "espn":
+        return parse_espn_records(records, fetched_at, target_date, provider_name)
     if provider_name == "api_football":
         return parse_api_football_records(records, fetched_at, target_date, provider_name)
     if provider_name == "football_data_org":
@@ -458,6 +470,117 @@ def parse_provider_records(
     if provider_name == "local_json":
         return parse_local_json_records(records, fetched_at, target_date, provider_name)
     raise ValueError(f"Unsupported live provider for agenda sync: {provider_name}")
+
+
+def map_espn_status(state: str | None) -> str:
+    if state == "post":
+        return "finished"
+    if state == "in":
+        return "in_progress"
+    return "scheduled"
+
+
+def parse_espn_records(
+    records: Iterable[dict[str, Any]],
+    fetched_at,
+    target_date: date,
+    provider_name: str = "espn",
+) -> tuple[list[ScheduledMatch], list[RawMatchRecord]]:
+    scheduled_matches: list[ScheduledMatch] = []
+    raw_records: list[RawMatchRecord] = []
+
+    for record in records:
+        competitions = record.get("competitions") or []
+        if not competitions:
+            continue
+        competition = competitions[0]
+        competitors = competition.get("competitors") or []
+        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+        if not home or not away:
+            continue
+
+        home_team = ((home.get("team") or {}).get("displayName"))
+        away_team = ((away.get("team") or {}).get("displayName"))
+        if not home_team or not away_team:
+            continue
+        home_team = canonical_team_name(home_team)
+        away_team = canonical_team_name(away_team)
+
+        external_id = str(record.get("id") or "")
+        if not external_id:
+            continue
+
+        kickoff_at = competition.get("date") or record.get("date")
+        match_day = match_day_from_kickoff(kickoff_at, target_date)
+        state = (((competition.get("status") or {}).get("type")) or {}).get("state")
+        status = map_espn_status(state)
+
+        season_year = record.get("_alttez_season_year")
+        season_obj = record.get("season") or {}
+        season_label = str(season_year) if season_year is not None else (
+            str(season_obj.get("year")) if season_obj.get("year") is not None else None
+        )
+        stage = season_obj.get("slug") or competition.get("notes") or None
+        if isinstance(stage, list):
+            stage = stage[0].get("headline") if stage and isinstance(stage[0], dict) else None
+        tournament_name = record.get("_alttez_league_name") or "FIFA World Cup"
+        competition_class = classify_competition(tournament_name, stage)
+        group_label = infer_group_label(stage, record)
+
+        venue = competition.get("venue") or {}
+        address = venue.get("address") or {}
+        venue_country = address.get("country")
+
+        def _score(side: dict[str, Any]) -> int:
+            try:
+                return int(side.get("score"))
+            except (TypeError, ValueError):
+                return 0
+
+        scheduled_matches.append(
+            ScheduledMatch(
+                provider=provider_name,
+                external_match_id=external_id,
+                kickoff_at=kickoff_at,
+                match_date=match_day,
+                season_label=season_label,
+                stage=stage,
+                group_label=group_label,
+                tournament_name=tournament_name,
+                competition_normalized_name=normalize_competition_name(tournament_name),
+                competition_class=competition_class,
+                tournament_region=venue_country,
+                home_team=home_team,
+                away_team=away_team,
+                venue_name=venue.get("fullName"),
+                city=address.get("city"),
+                venue_country_name=venue_country,
+                referee_name=None,
+                is_neutral=infer_effective_is_neutral(
+                    tournament_name=tournament_name,
+                    competition_class=competition_class,
+                    home_team=home_team,
+                    away_team=away_team,
+                    venue_country_name=venue_country,
+                    provider_is_neutral=competition.get("neutralSite"),
+                ),
+                status=status,
+                home_score=_score(home),
+                away_score=_score(away),
+                payload=record,
+            )
+        )
+        raw_records.append(
+            RawMatchRecord(
+                provider=provider_name,
+                external_match_id=external_id,
+                payload=record,
+                fetched_at=fetched_at,
+            )
+        )
+
+    return scheduled_matches, raw_records
 
 
 def parse_api_football_records(
@@ -946,7 +1069,7 @@ def filter_strict_world_cup_matches(
 
 
 def is_international_match(match: ScheduledMatch) -> bool:
-    if match.provider in {"football_data_org", "local_json"}:
+    if match.provider in {"espn", "football_data_org", "local_json"}:
         return True
 
     tournament_name = (match.tournament_name or "").casefold()
@@ -1465,7 +1588,29 @@ def list_matches_for_date(
         order by m.kickoff_at nulls last, ht.name, at.name
     """
     with engine.connect() as connection:
-        return pd.read_sql(text(sql), con=connection, params=params)
+        frame = pd.read_sql(text(sql), con=connection, params=params)
+    return _dedupe_agenda_by_provider(frame)
+
+
+# Lower rank wins when the same fixture was ingested by more than one provider
+# (e.g. after switching the live stack). Mirrors DEFAULT_LIVE_PROVIDER_ORDER.
+_PROVIDER_PRIORITY = {"espn": 0, "football_data_org": 1, "api_football": 2, "local_json": 3}
+
+
+def _dedupe_agenda_by_provider(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or "provider" not in frame.columns:
+        return frame
+    ranked = frame.copy()
+    ranked["_provider_rank"] = ranked["provider"].map(_PROVIDER_PRIORITY).fillna(99)
+    # Canonicalize names for the dedup key so the same fixture ingested by two
+    # providers collapses even when they spell a team differently and one row
+    # predates an alias fix (e.g. "Congo DR" vs "DR Congo").
+    ranked["_home_key"] = ranked["home_team"].map(lambda value: normalize_name(canonical_team_name(value)))
+    ranked["_away_key"] = ranked["away_team"].map(lambda value: normalize_name(canonical_team_name(value)))
+    ranked = ranked.sort_values("_provider_rank", kind="stable")
+    deduped = ranked.drop_duplicates(subset=["_home_key", "_away_key", "match_date"], keep="first")
+    deduped = deduped.drop(columns=["_provider_rank", "_home_key", "_away_key"])
+    return deduped.sort_values(["kickoff_at", "home_team", "away_team"], na_position="last").reset_index(drop=True)
 
 
 def parse_args() -> argparse.Namespace:

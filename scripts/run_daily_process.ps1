@@ -1,6 +1,7 @@
 param(
     [string]$Date = ([DateTime]::UtcNow.ToString("yyyy-MM-dd")),
     [switch]$ApplyMigrations,
+    [switch]$WriteSmoke,
     [string]$DatabaseUrl = $null,
     [string]$ProviderOrder = $null,
     [string]$Schema = "public"
@@ -14,6 +15,8 @@ $python = if (Test-Path $venvPython) { $venvPython } else { "python" }
 $preflight = Join-Path $root "scripts\shadow_readiness_check.py"
 $migrations = Join-Path $root "scripts\apply_supabase_migrations.py"
 $smoke = Join-Path $root "scripts\smoke_live_pipeline.py"
+$backfill = Join-Path $root "scripts\backfill_match_results.py"
+$calibrationFit = Join-Path $root "scripts\fit_probability_calibration.py"
 $brief = Join-Path $root "scripts\generate_daily_brief.py"
 $challenger = Join-Path $root "scripts\run_challenger_cycle.py"
 $pipelineAlert = Join-Path $root "scripts\send_pipeline_alert.py"
@@ -77,7 +80,10 @@ try {
 
     $CurrentStage = "forced live ingestion and evaluation closure"
     Write-Output "PROCESS: forced live ingestion and evaluation closure"
-    $smokeArgs = @($smoke, "--date", $Date, "--write")
+    $smokeArgs = @($smoke, "--date", $Date)
+    if ($WriteSmoke) {
+        $smokeArgs += "--write"
+    }
     if ($ProviderOrder) {
         $smokeArgs += @("--provider-order", $ProviderOrder)
     }
@@ -94,6 +100,38 @@ try {
     }
 
     Write-Output "PROCESS: prediction evaluations closed during ingestion finalize"
+
+    # Recurring ESPN results backfill (keyless; covers friendlies + WC finals).
+    # Closes prediction labels so the challenger evaluates on fresh outcomes.
+    # Non-fatal: result enrichment must not abort the daily brief.
+    $CurrentStage = "espn results backfill"
+    Write-Output "PROCESS: espn results backfill"
+    $backfillFrom = ([DateTime]::Parse($Date)).AddDays(-7).ToString("yyyy-MM-dd")
+    $backfillArgs = @($backfill, "--source", "espn", "--date-from", $backfillFrom, "--date-to", $Date, "--apply")
+    if ($DatabaseUrl) {
+        $backfillArgs += @("--database-url", $DatabaseUrl)
+    }
+    & $python @backfillArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "PROCESS: espn results backfill degraded (non-fatal)"
+        & $python $pipelineAlert --stage $CurrentStage --date $Date --message "ESPN results backfill failed (non-fatal)." --level warning | Out-Null
+    }
+
+    # Re-ajusta la calibracion de probabilidad sobre las evaluaciones recien
+    # cerradas, antes de generar el brief. El artefacto vive en artifacts/ (no
+    # versionado), por lo que debe regenerarse cada corrida. Non-fatal: si falla,
+    # el comite cae a calibracion neutra (comportamiento sin calibrar).
+    $CurrentStage = "probability calibration fit"
+    Write-Output "PROCESS: probability calibration fit"
+    $calibrationArgs = @($calibrationFit, "--lookback-days", "365", "--apply")
+    if ($DatabaseUrl) {
+        $calibrationArgs += @("--database-url", $DatabaseUrl)
+    }
+    & $python @calibrationArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "PROCESS: probability calibration fit degraded (non-fatal)"
+        & $python $pipelineAlert --stage $CurrentStage --date $Date --message "Probability calibration fit failed (non-fatal); committee falls back to neutral calibration." --level warning | Out-Null
+    }
 
     $CurrentStage = "committee daily decision brief"
     Write-Output "PROCESS: committee daily decision brief"

@@ -20,8 +20,11 @@ jobs:
       ALTTEZ_SUPABASE_VIEW: public.international_results_compat
       ALTTEZ_ALLOW_LOCAL_FALLBACK: "true"
       ALTTEZ_USE_SYSTEM_PROXY: "false"
-      ALTTEZ_PROVIDER_STACK: api_football,football_data_org,statsbomb_open,local_json
-      ALTTEZ_LIVE_PROVIDER_STACK: api_football,football_data_org,local_json
+      ALTTEZ_PROVIDER_STACK: espn,football_data_org,statsbomb_open,local_json
+      ALTTEZ_LIVE_PROVIDER_STACK: espn,football_data_org,local_json
+      ALTTEZ_ESPN_ENABLED: "true"
+      ALTTEZ_ESPN_LEAGUES: fifa.world,fifa.friendly
+      ALTTEZ_ESPN_BASE_URL: https://site.api.espn.com/apis/site/v2/sports/soccer
       ALTTEZ_API_FOOTBALL_KEY: ${{ secrets.ALTTEZ_API_FOOTBALL_KEY }}
       ALTTEZ_API_FOOTBALL_BASE_URL: https://v3.football.api-sports.io
       ALTTEZ_FOOTBALL_DATA_KEY: ${{ secrets.ALTTEZ_FOOTBALL_DATA_KEY }}
@@ -68,6 +71,9 @@ jobs:
           ALTTEZ_USE_SYSTEM_PROXY=$env:ALTTEZ_USE_SYSTEM_PROXY
           ALTTEZ_PROVIDER_STACK=$env:ALTTEZ_PROVIDER_STACK
           ALTTEZ_LIVE_PROVIDER_STACK=$env:ALTTEZ_LIVE_PROVIDER_STACK
+          ALTTEZ_ESPN_ENABLED=$env:ALTTEZ_ESPN_ENABLED
+          ALTTEZ_ESPN_LEAGUES=$env:ALTTEZ_ESPN_LEAGUES
+          ALTTEZ_ESPN_BASE_URL=$env:ALTTEZ_ESPN_BASE_URL
           ALTTEZ_API_FOOTBALL_KEY=$env:ALTTEZ_API_FOOTBALL_KEY
           ALTTEZ_API_FOOTBALL_BASE_URL=$env:ALTTEZ_API_FOOTBALL_BASE_URL
           ALTTEZ_FOOTBALL_DATA_KEY=$env:ALTTEZ_FOOTBALL_DATA_KEY

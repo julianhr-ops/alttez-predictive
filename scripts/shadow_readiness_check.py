@@ -93,9 +93,16 @@ def _check_python_sources() -> bool:
         ROOT / "alttez" / "operations" / "alerts.py",
         ROOT / "alttez" / "operations" / "expansion_policy.py",
         ROOT / "alttez" / "operations" / "prediction_memory.py",
-        ROOT / "alttez" / "reports" / "daily_brief.py",
+        ROOT / "alttez" / "reports" / "daily_brief" / "__init__.py",
+        ROOT / "alttez" / "reports" / "daily_brief" / "cli.py",
+        ROOT / "alttez" / "reports" / "daily_brief" / "payload.py",
+        ROOT / "alttez" / "reports" / "daily_brief" / "formatting.py",
+        ROOT / "alttez" / "reports" / "daily_brief" / "render_html.py",
+        ROOT / "alttez" / "reports" / "daily_brief" / "delivery.py",
+        ROOT / "alttez" / "reports" / "daily_brief" / "writer.py",
         ROOT / "alttez" / "training" / "challenger_cycle.py",
         ROOT / "alttez" / "ingestion" / "providers" / "api_football.py",
+        ROOT / "alttez" / "ingestion" / "providers" / "espn.py",
         ROOT / "alttez" / "ingestion" / "live_matches.py",
         ROOT / "alttez" / "dashboard" / "app.py",
         ROOT / "scripts" / "send_pipeline_alert.py",
@@ -105,6 +112,9 @@ def _check_python_sources() -> bool:
         try:
             ast.parse(path.read_text(encoding="utf-8"))
             print(f"{path.relative_to(ROOT)}=ok")
+        except FileNotFoundError:
+            print(f"{path.relative_to(ROOT)}=missing")
+            ok = False
         except SyntaxError as exc:
             print(f"{path.relative_to(ROOT)}=syntax-error:{exc}")
             ok = False
@@ -114,9 +124,11 @@ def _check_python_sources() -> bool:
 def _check_providers() -> bool:
     print("\n[providers]")
     ok = True
-    for item in run_healthcheck("api_football,football_data_org,local_json"):
+    # ESPN is the keyless primary live provider; football_data_org is the fallback.
+    # api_football was retired (dead key) so it is no longer a readiness gate.
+    for item in run_healthcheck("espn,football_data_org,local_json"):
         print(f"{item['provider']} configured={item['configured']}")
-        if item["provider"] == "api_football":
+        if item["provider"] == "espn":
             ok = ok and item["configured"] == "yes"
     return ok
 

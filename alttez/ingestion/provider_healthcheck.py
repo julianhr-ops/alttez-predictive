@@ -39,7 +39,10 @@ def run_healthcheck(explicit_order: str | None = None) -> list[dict[str, str]]:
             "env_state": "n/a",
         }
 
-        if provider.provider_name == "api_football":
+        if provider.provider_name == "espn":
+            item["detail"] = "keyless ESPN scoreboard (opt-out via ALTTEZ_ESPN_ENABLED=false)"
+            item["env_state"] = "n/a"
+        elif provider.provider_name == "api_football":
             item["detail"] = "expects ALTTEZ_API_FOOTBALL_KEY"
             item["env_state"] = _secret_state(getattr(provider, "api_key", ""))
         elif provider.provider_name == "football_data_org":

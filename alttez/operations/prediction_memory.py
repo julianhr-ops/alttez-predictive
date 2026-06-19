@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import MetaData, Table, inspect, select, text
 from sqlalchemy.dialects.postgresql import insert
@@ -23,7 +24,11 @@ DEFAULT_SCHEMA = "public"
 DEFAULT_POISSON_MODEL_VERSION = "poisson-champion-v2"
 DEFAULT_POISSON_MODEL_FAMILY = "poisson"
 DEFAULT_SUPPORTED_PRODUCTION_MODEL_FAMILIES = "poisson,xgboost"
-DEFAULT_EVALUATION_EPSILON = 1e-9
+# Piso de probabilidad para el log loss almacenado. Un piso demasiado pequeno
+# (p.ej. 1e-9 -> -log = 20.7) infla artificialmente el log loss cuando una clase
+# recibe prob ~0, haciendo que la metrica de monitoreo reporte ~3.85 cuando el
+# log loss real (piso sano) es ~0.98. 1e-3 acota el castigo a -log(1e-3)=6.9.
+DEFAULT_EVALUATION_EPSILON = 1e-3
 
 
 def get_active_model_version() -> str:
@@ -525,6 +530,67 @@ def load_prediction_learning_audit(*, database_url: str | None = None, lookback_
         "exact_score_hit_rate": float(df["hit_exact_score"].mean()),
         "models": sorted(models, key=lambda row: row["evaluated_predictions"], reverse=True),
         "error": None,
+    }
+
+
+def load_calibration_overview(*, database_url: str | None = None, lookback_days: int = 365) -> dict[str, Any]:
+    """Resumen de calibración: ECE por modelo + global y el artefacto activo.
+
+    Alimenta el panel del dashboard. Lectura tolerante: ante cualquier fallo
+    devuelve estructura vacía en vez de propagar (el dashboard nunca debe romper).
+    """
+    from alttez.inference.calibration import expected_calibration_error, load_active_calibration
+
+    artifact = load_active_calibration()
+    artifact_meta: dict[str, Any] = {
+        "temperature": artifact.temperature,
+        "class_floor": artifact.class_floor,
+        "is_neutral": artifact.is_neutral,
+    }
+    artifact_path = Path(os.getenv("ALTTEZ_CALIBRATION_PATH") or "artifacts/calibration/active.json")
+    if artifact_path.exists():
+        try:
+            artifact_meta.update(json.loads(artifact_path.read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001 - artefacto corrupto no debe romper el panel.
+            pass
+
+    empty = {"models": pd.DataFrame(), "global_ece": None, "artifact": artifact_meta, "samples": 0}
+    params = {"lookback_start": (datetime.now(timezone.utc).date() - pd.Timedelta(days=lookback_days)).isoformat()}
+    try:
+        df = read_dataframe(
+            """
+            select
+                mp.model_version,
+                mp.predicted_home_win_prob as prob_home,
+                mp.predicted_draw_prob as prob_draw,
+                mp.predicted_away_win_prob as prob_away,
+                pe.actual_outcome
+            from public.prediction_evaluations as pe
+            join public.match_predictions as mp on mp.id = pe.prediction_id
+            where mp.match_date >= :lookback_start and pe.actual_outcome is not null
+            """,
+            params=params,
+            database_url=database_url,
+        )
+    except Exception:  # noqa: BLE001
+        return empty
+
+    if df.empty:
+        return empty
+
+    def _ece(frame: pd.DataFrame) -> float:
+        triplets = frame[["prob_home", "prob_draw", "prob_away"]].to_numpy(dtype=float)
+        return round(expected_calibration_error(triplets, frame["actual_outcome"].tolist()), 4)
+
+    rows = [
+        {"model_version": str(model_version), "evaluated_predictions": int(len(group)), "ece": _ece(group)}
+        for model_version, group in df.groupby("model_version")
+    ]
+    return {
+        "models": pd.DataFrame(rows).sort_values("evaluated_predictions", ascending=False),
+        "global_ece": _ece(df),
+        "artifact": artifact_meta,
+        "samples": int(len(df)),
     }
 
 

@@ -10,6 +10,7 @@ from alttez.api.db import get_engine
 from alttez.api.settings import load_local_env
 from alttez.ingestion.providers import (
     ApiFootballProvider,
+    EspnProvider,
     FootballDataOrgProvider,
     LocalJsonProvider,
     MatchProvider,
@@ -32,6 +33,7 @@ DEFAULT_PROVIDER_ORDER = (
 
 def _provider_registry() -> dict[str, MatchProvider]:
     return {
+        "espn": EspnProvider(),
         "api_football": ApiFootballProvider(),
         "football_data_org": FootballDataOrgProvider(),
         "statsbomb_open": StatsBombOpenProvider(),
@@ -104,6 +106,9 @@ def deduplicate_records(records: Iterable[RawMatchRecord]) -> list[RawMatchRecor
 
 
 def _extract_external_id(provider_name: str, payload: dict) -> str:
+    if provider_name == "espn" and payload.get("id") is not None:
+        return str(payload["id"])
+
     if provider_name == "api_football":
         fixture = payload.get("fixture", {})
         if fixture.get("id") is not None:
