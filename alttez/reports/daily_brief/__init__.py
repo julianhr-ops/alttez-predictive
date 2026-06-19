@@ -5,6 +5,7 @@ from .delivery import _build_telegram_summary_text, _executive_decision_label, d
 from .formatting import (
     _decision_tier,
     localize_prediction_text,
+    most_likely_total_goals,
     prob_over_2_5,
     team_display_name,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "generate_daily_brief",
     "localize_prediction_text",
     "main",
+    "most_likely_total_goals",
     "parse_args",
     "prob_over_2_5",
     "render_daily_brief_html",

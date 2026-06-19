@@ -8,6 +8,7 @@ from alttez.reports.daily_brief import (
     _executive_decision_label,
     exit_code_for_brief_result,
     localize_prediction_text,
+    most_likely_total_goals,
     prob_over_2_5,
     render_daily_brief_html,
     team_display_name,
@@ -131,7 +132,9 @@ class TestDailyBrief(unittest.TestCase):
         self.assertIn("Provider degraded", html)
         self.assertIn("https://cdn.jsdelivr.net/npm/chart.js", html)
         self.assertIn("score-chart-0", html)
-        self.assertIn("Prob. score", html)
+        self.assertIn("Prob. marcador", html)
+        self.assertIn("Total mas probable", html)
+        self.assertIn("Goles esperados", html)
         self.assertIn("Score estrategia EV", html)
         self.assertIn("Pronosticos alternativos", html)
 
@@ -250,6 +253,13 @@ class TestDailyBrief(unittest.TestCase):
         self.assertIsNone(prob_over_2_5(None, 1.0))
         self.assertIsNone(prob_over_2_5(0.0, 0.0))
 
+    def test_most_likely_total_goals_is_poisson_mode_of_sum(self) -> None:
+        # Brasil-Haiti: lambda total ~3.64 -> moda del total = 3 goles.
+        self.assertEqual(most_likely_total_goals(2.97, 0.66), 3)
+        # USA-Australia: lambda total ~2.53 -> moda = 2 goles.
+        self.assertEqual(most_likely_total_goals(1.12, 1.41), 2)
+        self.assertIsNone(most_likely_total_goals(None, 1.0))
+
     def test_telegram_summary_surfaces_expected_goals_not_only_modal_score(self) -> None:
         payload = {
             "target_date": "2026-06-19",
@@ -289,7 +299,10 @@ class TestDailyBrief(unittest.TestCase):
         # El nivel de goles esperado se comunica explicitamente (no solo el modal).
         self.assertIn("Goles esperados", message)
         self.assertIn("Over 2.5", message)
-        self.assertIn("Marcador mas probable", message)
+        self.assertIn("Total mas probable", message)
+        # El marcador se rotula como pick sugerido (no como "el resultado"), para no
+        # contradecir el 1X2 con la moda pura.
+        self.assertIn("Marcador sugerido", message)
 
     def test_executive_decision_label_maps_match_priority(self) -> None:
         self.assertEqual(

@@ -114,6 +114,33 @@ def prob_over_2_5(lambda_h: Any, lambda_a: Any) -> float | None:
     return max(0.0, min(1.0, 1.0 - p_le_2))
 
 
+def most_likely_total_goals(lambda_h: Any, lambda_a: Any) -> int | None:
+    """Numero de goles totales mas probable (moda de Poisson(lambda_h+lambda_a)).
+
+    El total de dos Poisson independientes es Poisson de la suma. Devuelve el k con
+    mayor masa via recurrencia de la pmf (exacto, sin scipy). Este total es mas
+    intuitivo y coherente con los goles esperados que un marcador exacto unico (cuya
+    moda cae por debajo de la media). Devuelve None si las lambdas no son validas.
+    """
+    if lambda_h is None or lambda_a is None:
+        return None
+    try:
+        total = float(lambda_h) + float(lambda_a)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(total) or total <= 0:
+        return None
+    best_k, best_p = 0, -1.0
+    pmf = math.exp(-total)  # k = 0
+    k = 0
+    while k <= total + 12:
+        if pmf > best_p:
+            best_p, best_k = pmf, k
+        k += 1
+        pmf = pmf * total / k
+    return best_k
+
+
 def _fmt_expected_goals(lambda_h: Any, lambda_a: Any) -> str:
     """Texto de goles esperados: total y desglose local-visitante."""
     if lambda_h is None or lambda_a is None:

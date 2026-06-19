@@ -6,7 +6,14 @@ from typing import Any
 
 from alttez.dashboard.analysis_helpers import safe_text
 from alttez.reports.brand import ISOTYPE_SVG
-from .formatting import _fmt_expected_goals, _fmt_float, _fmt_pct, _fmt_points_profile, prob_over_2_5
+from .formatting import (
+    _fmt_expected_goals,
+    _fmt_float,
+    _fmt_pct,
+    _fmt_points_profile,
+    most_likely_total_goals,
+    prob_over_2_5,
+)
 
 
 def _decision_class(decision_tier: str) -> str:
@@ -141,7 +148,8 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
               <div class="goals-strip">
                 <span>&#9917; Goles esperados <strong>{xg_total_disp}</strong></span>
                 <span>Over 2.5: <strong>{over_25}</strong></span>
-                <span class="muted">Marcador m&aacute;s probable {prediction} (no es la media)</span>
+                <span>Total m&aacute;s probable: <strong>{total_goals} goles</strong></span>
+                <span class="muted">Marcador sugerido {prediction} (pick, no la media)</span>
               </div>
 
               <div class="chart-block">
@@ -159,9 +167,9 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 <div class="metric"><span>xG visitante</span><strong>{xg_away}</strong></div>
                 <div class="metric"><span>1X2 principal</span><strong>{market}</strong></div>
                 <div class="metric"><span>Probabilidad</span><strong>{market_prob}</strong></div>
-                <div class="metric"><span>Marcador 10 pts</span><strong>{prediction}</strong></div>
-                <div class="metric"><span>Prob. score</span><strong>{score_prob}</strong></div>
-                <div class="metric"><span>Score exacto puro</span><strong>{raw_score}</strong></div>
+                <div class="metric"><span>Marcador sugerido (10 pts)</span><strong>{prediction}</strong></div>
+                <div class="metric"><span>Prob. marcador</span><strong>{score_prob}</strong></div>
+                <div class="metric"><span>Total mas probable</span><strong>{total_goals} goles</strong></div>
                 <div class="metric"><span>Score estrategia EV</span><strong>{ev_score}</strong></div>
                 <div class="metric"><span>EV pick exacto</span><strong>{ev}</strong></div>
                 <div class="metric"><span>Confianza media</span><strong>{avg_confidence}</strong></div>
@@ -204,6 +212,7 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 xg_away=html.escape(_fmt_float(match.get("lambda_a"))),
                 xg_total_disp=html.escape(_fmt_expected_goals(match.get("lambda_h"), match.get("lambda_a"))),
                 over_25=html.escape(_fmt_pct(prob_over_2_5(match.get("lambda_h"), match.get("lambda_a")))),
+                total_goals=html.escape(str(most_likely_total_goals(match.get("lambda_h"), match.get("lambda_a")) or "N/D")),
                 market=html.escape(match.get("best_market") or "N/D"),
                 market_prob=html.escape(_fmt_pct(match.get("best_market_probability"))),
                 prediction=html.escape(match.get("primary_score") or "N/D"),
