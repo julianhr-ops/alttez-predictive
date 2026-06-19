@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from contextlib import contextmanager
 from unittest import mock
 
 import alttez.reports.telegram_delivery as td

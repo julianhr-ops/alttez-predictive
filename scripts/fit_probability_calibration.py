@@ -19,7 +19,6 @@ import numpy as np
 from alttez.api.settings import load_local_env
 from alttez.inference.calibration import (
     DEFAULT_CALIBRATION_PATH,
-    DEFAULT_CLASS_FLOOR,
     ProbabilityCalibration,
     expected_calibration_error,
     fit_temperature,

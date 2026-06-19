@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import mimetypes
 import os
 from datetime import datetime, timezone

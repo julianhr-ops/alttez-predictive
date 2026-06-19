@@ -1,0 +1,7 @@
+# Ruff config. CI runs `ruff check alttez scripts tests` (non-blocking gate in ci.yml).
+target-version = "py313"
+
+[lint.per-file-ignores]
+# Standalone scripts bootstrap sys.path (insert ROOT) before importing the
+# alttez package, so module-level imports legitimately follow that statement.
+"scripts/*" = ["E402"]

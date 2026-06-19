@@ -589,12 +589,6 @@ def predict_world_cup_2026_bracket(
         if row.get("position") == 3 and row.get("third_rank") is not None and int(row["third_rank"]) <= 8
     ]
 
-    next_stage = {
-        "round_of_32": "round_of_16",
-        "round_of_16": "quarter_final",
-        "quarter_final": "semi_final",
-        "semi_final": "final",
-    }
     knockout: dict[str, list[dict[str, Any]]] = {}
     for stage_name in ("round_of_32", "round_of_16", "quarter_final", "semi_final", "final"):
         stage_fixtures = [fixture for fixture in knockout_fixtures if fixture["stage"] == stage_name]

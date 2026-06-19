@@ -8,7 +8,7 @@ from typing import Any
 from urllib import error, request
 import html
 
-from sqlalchemy import Table, select, text
+from sqlalchemy import Table, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Engine
 

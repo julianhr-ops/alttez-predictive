@@ -9,9 +9,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import numpy as np
 import pandas as pd
-from sqlalchemy import MetaData, Table, inspect, select, text
+from sqlalchemy import MetaData, Table, inspect, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Engine
 

@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from alttez.api.db import read_dataframe
-from alttez.experiments.tournament_oracle import DEFAULT_DIXON_COLES_RHO, optimize_prediction
+from alttez.experiments.tournament_oracle import optimize_prediction
 from alttez.inference.calibration import load_active_calibration
 from alttez.inference.committee_weighting import WeightingDecision, resolve_committee_weights
 from alttez.inference.router import (
