@@ -11,7 +11,7 @@ from urllib import error, parse, request
 
 from alttez.dashboard.analysis_helpers import safe_text
 from .constants import DEFAULT_DELIVERY_TIMEOUT_SECONDS
-from .formatting import _fmt_float, _fmt_pct
+from .formatting import _fmt_expected_goals, _fmt_float, _fmt_pct, prob_over_2_5
 
 
 def _delivery_timeout_seconds() -> int:
@@ -76,13 +76,16 @@ def _build_telegram_summary_text(payload: dict[str, Any]) -> str:
         lines.extend(["", "🎯 <b>Top decisiones</b>"])
         for index, match in enumerate(ranked_matches, start=1):
             executive_decision = _executive_decision_label(match)
+            over_prob = prob_over_2_5(match.get("lambda_h"), match.get("lambda_a"))
+            over_text = f" · Over 2.5 {_fmt_pct(over_prob)}" if over_prob is not None else ""
             lines.append(
                 (
                     f"{index}. <b>{html.escape(match['home_team'])} vs {html.escape(match['away_team'])}</b>\n"
                     f"    🧭 {html.escape(executive_decision)} · {html.escape(safe_text(match.get('support_label'), 'N/D'))}\n"
                     f"    💡 {html.escape(safe_text(match.get('best_market'), 'N/D'))} "
                     f"{_fmt_pct(match.get('best_market_probability'))}\n"
-                    f"    🔢 Score {html.escape(safe_text(match.get('primary_score'), 'N/D'))} · "
+                    f"    ⚽ Goles esperados {html.escape(_fmt_expected_goals(match.get('lambda_h'), match.get('lambda_a')))}{over_text}\n"
+                    f"    🔢 Marcador mas probable {html.escape(safe_text(match.get('primary_score'), 'N/D'))} · "
                     f"EV {_fmt_float(match.get('primary_ev'), digits=3)}"
                 )
             )
