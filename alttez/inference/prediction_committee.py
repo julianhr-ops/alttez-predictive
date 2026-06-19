@@ -17,6 +17,7 @@ from alttez.inference.committee_weighting import WeightingDecision, resolve_comm
 from alttez.inference.router import (
     ActiveModelSelection,
     BaseMatchPredictor,
+    BivariatePoissonMatchPredictor,
     PoissonMatchPredictor,
     XGBoostMatchPredictor,
     _numeric_result_summary,
@@ -29,9 +30,10 @@ from alttez.ingestion.live_matches import canonical_team_name
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_COMMITTEE_WEIGHTS = {
-    "champion": 0.5,
+    "champion": 0.45,
     "challenger": 0.3,
     "poisson_baseline": 0.2,
+    "bivariate": 0.15,
 }
 DEFAULT_DISCORDANCE_GOAL_DISTANCE = 3
 
@@ -361,6 +363,21 @@ def build_prediction_committee(
                 ),
             ),
             DEFAULT_COMMITTEE_WEIGHTS["poisson_baseline"],
+        ),
+        CommitteeMember(
+            "bivariate",
+            BivariatePoissonMatchPredictor(
+                historical_df,
+                target_date_str,
+                selection=ActiveModelSelection(
+                    version_key=None,
+                    model_version="bivariate-poisson-committee",
+                    model_family="bivariate_poisson",
+                    artifact_path=None,
+                    requested_production_status="committee",
+                ),
+            ),
+            DEFAULT_COMMITTEE_WEIGHTS["bivariate"],
         ),
     ]
 

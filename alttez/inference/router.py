@@ -31,6 +31,7 @@ from alttez.features.klement import (
 )
 from alttez.ingestion.live_matches import canonical_team_name
 from alttez.features.poisson import PoissonEngine
+from alttez.features.bivariate_poisson import BivariatePoissonEngine, load_active_bivariate_params
 from alttez.inference.calibration import load_single_predictor_calibration
 
 
@@ -598,6 +599,99 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         baseline["best_market_probability"] = float(best_market["Probabilidad"])
         baseline["artifact_schema_version"] = self.artifact_schema_version
         baseline["xgboost_feature_payload"] = feature_df.iloc[0].to_dict()
+        return baseline
+
+
+class BivariatePoissonMatchPredictor(BaseMatchPredictor):
+    """Miembro del comite basado en Bivariate Poisson con inflacion diagonal.
+
+    Reusa las lambdas marginales del PoissonMatchPredictor (misma senal de entrada)
+    y reemplaza la matriz de marcadores por la del DI-BP, que modela la correlacion
+    nativamente. Si no hay artefacto de parametros, el engine es neutro (Poisson
+    independiente) y el miembro sigue aportando una matriz valida.
+    """
+
+    def __init__(
+        self,
+        historical_df: pd.DataFrame,
+        target_date: str,
+        *,
+        selection: ActiveModelSelection,
+        poisson_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(selection=selection)
+        self.model_family = "bivariate_poisson"
+        self.poisson_baseline = PoissonMatchPredictor(
+            historical_df, target_date, selection=selection, poisson_kwargs=poisson_kwargs
+        )
+        params = load_active_bivariate_params()
+        self.engine = BivariatePoissonEngine(
+            lambda3=params.lambda3, diagonal_weight=params.diagonal_weight
+        )
+
+    def get_team_profile(self, team: str) -> dict[str, float]:
+        return self.poisson_baseline.get_team_profile(team)
+
+    def predict_match(
+        self,
+        home_team: str,
+        away_team: str,
+        *,
+        is_neutral: bool = False,
+        is_knockout: bool = False,
+        max_goals: int = DEFAULT_MAX_GOALS,
+        tournament_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        home_team = canonical_team_name(home_team)
+        away_team = canonical_team_name(away_team)
+        baseline = self.poisson_baseline.predict_match(
+            home_team,
+            away_team,
+            is_neutral=is_neutral,
+            is_knockout=is_knockout,
+            max_goals=max_goals,
+            tournament_context=tournament_context,
+        )
+        baseline["model_version"] = self.model_version
+        baseline["model_family"] = self.model_family
+        if not baseline["prediction_supported"]:
+            return baseline
+
+        lambda_h = float(baseline["lambda_h"])
+        lambda_a = float(baseline["lambda_a"])
+        prob_matrix = self.engine.build_matrix(lambda_h, lambda_a, max_goals=max_goals)
+        if not self.calibration.is_neutral:
+            prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
+        recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
+        recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
+        score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
+        result_summary = _numeric_result_summary(prob_matrix, home_team, away_team)
+        result_probabilities = {
+            row["Mercado"]: float(row["Probabilidad"])
+            for row in result_summary.to_dict(orient="records")
+        }
+        best_market = max(result_summary.to_dict(orient="records"), key=lambda row: float(row["Probabilidad"]))
+
+        baseline["prob_matrix"] = prob_matrix
+        baseline["prob_home"] = result_probabilities.get(f"Victoria {home_team}")
+        baseline["prob_draw"] = result_probabilities.get("Empate")
+        baseline["prob_away"] = result_probabilities.get(f"Victoria {away_team}")
+        baseline["result_summary"] = result_summary
+        baseline["recommendations"] = recommendations
+        baseline["primary_score"] = score_decision["primary_score"]
+        baseline["primary_score_probability"] = score_decision["primary_score_probability"]
+        baseline["primary_outcome"] = score_decision["primary_outcome"]
+        baseline["most_likely_score"] = score_decision["most_likely_score"]
+        baseline["most_likely_score_probability"] = score_decision["most_likely_score_probability"]
+        baseline["primary_ev"] = score_decision["primary_ev"]
+        baseline["ev_optimal_score"] = score_decision["ev_optimal_score"]
+        baseline["ev_optimal_probability"] = score_decision["ev_optimal_probability"]
+        baseline["ev_optimal_value"] = score_decision["ev_optimal_value"]
+        baseline["primary_score_scenarios"] = score_decision["primary_score_scenarios"]
+        baseline["scoreline_candidates"] = score_decision["scoreline_candidates"]
+        baseline["score_selection_policy"] = "most_likely_outcome_exact_score"
+        baseline["best_market"] = str(best_market.get("Mercado") or "Por definir")
+        baseline["best_market_probability"] = float(best_market.get("Probabilidad") or 0.0)
         return baseline
 
 
