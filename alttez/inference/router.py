@@ -32,6 +32,7 @@ from alttez.features.klement import (
 from alttez.ingestion.live_matches import canonical_team_name
 from alttez.features.poisson import PoissonEngine
 from alttez.features.bivariate_poisson import BivariatePoissonEngine, load_active_bivariate_params
+from alttez.features.hierarchical import HierarchicalBayesEngine, load_active_hierarchical_strengths
 from alttez.inference.calibration import load_single_predictor_calibration
 
 
@@ -693,6 +694,117 @@ class BivariatePoissonMatchPredictor(BaseMatchPredictor):
         baseline["best_market"] = str(best_market.get("Mercado") or "Por definir")
         baseline["best_market_probability"] = float(best_market.get("Probabilidad") or 0.0)
         return baseline
+
+
+class HierarchicalMatchPredictor(BaseMatchPredictor):
+    """Predictor de fuerzas jerarquicas bayesianas (Baio-Blangiardo).
+
+    Carga el artefacto compacto de medias posteriores (sin dependencia de PyMC en
+    inferencia) y construye la matriz de marcadores. Si el artefacto no existe el
+    engine no esta listo y la prediccion se marca como NO soportada, para que el
+    comite lo omita en vez de promediar ruido neutro.
+    """
+
+    def __init__(
+        self,
+        *,
+        selection: ActiveModelSelection,
+        strengths_path: str | None = None,
+    ) -> None:
+        super().__init__(selection=selection)
+        self.model_family = "hierarchical_bayes"
+        self.engine = HierarchicalBayesEngine(load_active_hierarchical_strengths(strengths_path))
+
+    def get_team_profile(self, team: str) -> dict[str, float]:
+        strength = self.engine.strengths.strength_for(team)
+        return {"attack": strength.attack, "defense": strength.defense, "matches": float(self.engine.strengths.samples)}
+
+    def _unsupported(self, message: str) -> dict[str, Any]:
+        return {
+            "model_version": self.model_version,
+            "model_family": self.model_family,
+            "requested_model_version": self.requested_model_version,
+            "requested_model_family": self.requested_model_family,
+            "used_fallback": self.used_fallback,
+            "fallback_reason": self.fallback_reason,
+            "prediction_supported": False,
+            "support_message": message,
+            "support_label": "Sin historial suficiente",
+            "lambda_h": None,
+            "lambda_a": None,
+            "prob_matrix": None,
+            "prob_home": None,
+            "prob_draw": None,
+            "prob_away": None,
+            "result_summary": pd.DataFrame(),
+            "recommendations": pd.DataFrame(),
+            "primary_score": "N/D",
+            "best_market": "Sin soporte",
+            "best_market_probability": 0.0,
+        }
+
+    def predict_match(
+        self,
+        home_team: str,
+        away_team: str,
+        *,
+        is_neutral: bool = False,
+        is_knockout: bool = False,
+        max_goals: int = DEFAULT_MAX_GOALS,
+        tournament_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        home_team = canonical_team_name(home_team)
+        away_team = canonical_team_name(away_team)
+        if not self.engine.is_ready:
+            return self._unsupported("Modelo jerarquico sin artefacto activo.")
+
+        lambda_h, lambda_a = self.engine.expected_goals(home_team, away_team, is_neutral=is_neutral)
+        prob_matrix = self.engine.build_matrix(home_team, away_team, is_neutral=is_neutral, max_goals=max_goals)
+        if not self.calibration.is_neutral:
+            prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
+        recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
+        recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
+        score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
+        result_summary = _numeric_result_summary(prob_matrix, home_team, away_team)
+        result_probabilities = {
+            row["Mercado"]: float(row["Probabilidad"])
+            for row in result_summary.to_dict(orient="records")
+        }
+        best_market = max(result_summary.to_dict(orient="records"), key=lambda row: float(row["Probabilidad"]))
+
+        return {
+            "model_version": self.model_version,
+            "model_family": self.model_family,
+            "requested_model_version": self.requested_model_version,
+            "requested_model_family": self.requested_model_family,
+            "used_fallback": self.used_fallback,
+            "fallback_reason": self.fallback_reason,
+            "prediction_supported": True,
+            "support_message": None,
+            "support_label": "Modelo jerarquico",
+            "lambda_h": float(lambda_h),
+            "lambda_a": float(lambda_a),
+            "prob_matrix": prob_matrix,
+            "prob_home": result_probabilities.get(f"Victoria {home_team}"),
+            "prob_draw": result_probabilities.get("Empate"),
+            "prob_away": result_probabilities.get(f"Victoria {away_team}"),
+            "result_summary": result_summary,
+            "recommendations": recommendations,
+            "primary_score": score_decision["primary_score"],
+            "primary_score_probability": score_decision["primary_score_probability"],
+            "primary_outcome": score_decision["primary_outcome"],
+            "most_likely_score": score_decision["most_likely_score"],
+            "most_likely_score_probability": score_decision["most_likely_score_probability"],
+            "primary_ev": score_decision["primary_ev"],
+            "ev_optimal_score": score_decision["ev_optimal_score"],
+            "ev_optimal_probability": score_decision["ev_optimal_probability"],
+            "ev_optimal_value": score_decision["ev_optimal_value"],
+            "primary_score_scenarios": score_decision["primary_score_scenarios"],
+            "scoreline_candidates": score_decision["scoreline_candidates"],
+            "score_selection_policy": "most_likely_outcome_exact_score",
+            "best_market": str(best_market.get("Mercado") or "Por definir"),
+            "best_market_probability": float(best_market.get("Probabilidad") or 0.0),
+        }
 
 
 def _selection_from_record(record: dict[str, Any] | None) -> ActiveModelSelection:
