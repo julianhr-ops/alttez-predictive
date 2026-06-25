@@ -12,7 +12,6 @@ from alttez.dashboard.analysis_helpers import (
     build_recommendation_summary as _build_recommendation_summary,
     competition_class_label as _competition_class_label,
     filter_noise_matches as _filter_noise_matches,
-    is_youth_or_u17_match as _is_youth_or_u17_match,
     safe_key as _safe_key,
     safe_text as _safe_text,
     support_level as _support_level,

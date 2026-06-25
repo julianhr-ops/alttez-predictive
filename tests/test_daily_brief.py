@@ -8,6 +8,8 @@ from alttez.reports.daily_brief import (
     _executive_decision_label,
     exit_code_for_brief_result,
     localize_prediction_text,
+    most_likely_total_goals,
+    prob_over_2_5,
     render_daily_brief_html,
     team_display_name,
 )
@@ -130,7 +132,9 @@ class TestDailyBrief(unittest.TestCase):
         self.assertIn("Provider degraded", html)
         self.assertIn("https://cdn.jsdelivr.net/npm/chart.js", html)
         self.assertIn("score-chart-0", html)
-        self.assertIn("Prob. score", html)
+        self.assertIn("Prob. marcador", html)
+        self.assertIn("Total mas probable", html)
+        self.assertIn("Goles esperados", html)
         self.assertIn("Score estrategia EV", html)
         self.assertIn("Pronosticos alternativos", html)
 
@@ -241,6 +245,64 @@ class TestDailyBrief(unittest.TestCase):
 
         self.assertIn("Australia", message)
         self.assertIn("Turkey", message)
+
+    def test_prob_over_2_5_matches_poisson_sum(self) -> None:
+        # lambda total 2.7 -> P(>2.5) = 1 - e^-2.7 (1 + 2.7 + 2.7^2/2) ~ 0.506
+        self.assertAlmostEqual(prob_over_2_5(1.5, 1.2), 0.5064, places=3)
+        # Lambdas invalidas devuelven None (no rompen el resumen).
+        self.assertIsNone(prob_over_2_5(None, 1.0))
+        self.assertIsNone(prob_over_2_5(0.0, 0.0))
+
+    def test_most_likely_total_goals_is_poisson_mode_of_sum(self) -> None:
+        # Brasil-Haiti: lambda total ~3.64 -> moda del total = 3 goles.
+        self.assertEqual(most_likely_total_goals(2.97, 0.66), 3)
+        # USA-Australia: lambda total ~2.53 -> moda = 2 goles.
+        self.assertEqual(most_likely_total_goals(1.12, 1.41), 2)
+        self.assertIsNone(most_likely_total_goals(None, 1.0))
+
+    def test_telegram_summary_surfaces_expected_goals_not_only_modal_score(self) -> None:
+        payload = {
+            "target_date": "2026-06-19",
+            "model_family": "committee",
+            "model_version": "committee-consensus-v1",
+            "used_fallback": False,
+            "summary": {
+                "total_matches": 1,
+                "analyzable_matches": 1,
+                "high_priority_matches": 1,
+                "critical_alerts": 0,
+                "warning_alerts": 0,
+                "coverage_pct": 0.0,
+                "ranked_matches": [
+                    {
+                        "home_team": "Brazil",
+                        "away_team": "Haiti",
+                        "best_market": "Victoria Brazil",
+                        "best_market_probability": 0.83,
+                        "primary_score": "2 - 0",
+                        "primary_ev": 5.9,
+                        "support_label": "Analizable",
+                        "lambda_h": 2.72,
+                        "lambda_a": 0.58,
+                    }
+                ],
+            },
+            "batch_summary": {
+                "provider_used": "espn",
+                "certification_status": "skipped",
+                "quarantine_reason": None,
+            },
+        }
+
+        message = _build_telegram_summary_text(payload)
+
+        # El nivel de goles esperado se comunica explicitamente (no solo el modal).
+        self.assertIn("Goles esperados", message)
+        self.assertIn("Over 2.5", message)
+        self.assertIn("Total mas probable", message)
+        # El marcador se rotula como pick sugerido (no como "el resultado"), para no
+        # contradecir el 1X2 con la moda pura.
+        self.assertIn("Marcador sugerido", message)
 
     def test_executive_decision_label_maps_match_priority(self) -> None:
         self.assertEqual(

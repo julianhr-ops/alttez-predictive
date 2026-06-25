@@ -237,5 +237,64 @@ class TestInferenceRouter(unittest.TestCase):
         self.assertNotIn("gdp_per_capita_diff", payload)
 
 
+class TestSinglePredictorCalibration(unittest.TestCase):
+    def _max_prob(self, prediction) -> float:
+        return max(
+            float(prediction["prob_home"] or 0.0),
+            float(prediction["prob_draw"] or 0.0),
+            float(prediction["prob_away"] or 0.0),
+        )
+
+    def test_calibration_flattens_single_predictor_when_enabled(self) -> None:
+        import json
+        import tempfile
+
+        with patch("alttez.inference.router._load_active_model_record_safe", return_value=None):
+            # Baseline sin calibracion (compuerta apagada).
+            with patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}, clear=False):
+                os.environ.pop("ALTTEZ_CALIBRATE_SINGLE_PREDICTOR", None)
+                base_pred = build_active_predictor(_historical_df(), "2026-05-27").predict_match(
+                    "Mexico", "USA", is_neutral=True
+                )
+            base_max = self._max_prob(base_pred)
+
+            # Con calibracion T>1 (aplana) y artefacto separado.
+            with tempfile.TemporaryDirectory() as tmp:
+                artifact = Path(tmp) / "single_predictor.json"
+                artifact.write_text(json.dumps({"temperature": 4.0, "class_floor": 0.0}), encoding="utf-8")
+                with patch.dict(
+                    os.environ,
+                    {
+                        "ALTTEZ_MIN_SUPPORTED_MATCHES": "0",
+                        "ALTTEZ_CALIBRATE_SINGLE_PREDICTOR": "true",
+                        "ALTTEZ_SINGLE_PREDICTOR_CALIBRATION_PATH": str(artifact),
+                    },
+                    clear=False,
+                ):
+                    cal_pred = build_active_predictor(_historical_df(), "2026-05-27").predict_match(
+                        "Mexico", "USA", is_neutral=True
+                    )
+            cal_max = self._max_prob(cal_pred)
+
+        # La calibracion esta cableada: cambia la salida del predictor unico.
+        # (No se asume direccion del max: temperature_scale opera sobre la matriz
+        # de marcadores 8x8, no sobre el triplete 1X2, asi que aplanar la matriz
+        # no aplana necesariamente las 3 clases.)
+        self.assertNotAlmostEqual(cal_max, base_max, places=4)
+        # Sigue siendo distribucion valida.
+        self.assertAlmostEqual(
+            float(cal_pred["prob_home"]) + float(cal_pred["prob_draw"]) + float(cal_pred["prob_away"]),
+            1.0,
+            places=3,
+        )
+
+    def test_calibration_neutral_when_flag_off(self) -> None:
+        with patch("alttez.inference.router._load_active_model_record_safe", return_value=None):
+            with patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}, clear=False):
+                os.environ.pop("ALTTEZ_CALIBRATE_SINGLE_PREDICTOR", None)
+                predictor = build_active_predictor(_historical_df(), "2026-05-27")
+        self.assertTrue(predictor.calibration.is_neutral)
+
+
 if __name__ == "__main__":
     unittest.main()

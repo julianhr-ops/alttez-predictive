@@ -11,12 +11,15 @@ import numpy as np
 import pandas as pd
 
 from alttez.api.db import read_dataframe
-from alttez.experiments.tournament_oracle import DEFAULT_DIXON_COLES_RHO, optimize_prediction
+from alttez.experiments.tournament_oracle import optimize_prediction
 from alttez.inference.calibration import load_active_calibration
 from alttez.inference.committee_weighting import WeightingDecision, resolve_committee_weights
+from alttez.features.hierarchical import load_active_hierarchical_strengths
 from alttez.inference.router import (
     ActiveModelSelection,
     BaseMatchPredictor,
+    BivariatePoissonMatchPredictor,
+    HierarchicalMatchPredictor,
     PoissonMatchPredictor,
     XGBoostMatchPredictor,
     _numeric_result_summary,
@@ -29,9 +32,11 @@ from alttez.ingestion.live_matches import canonical_team_name
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_COMMITTEE_WEIGHTS = {
-    "champion": 0.5,
+    "champion": 0.45,
     "challenger": 0.3,
     "poisson_baseline": 0.2,
+    "bivariate": 0.15,
+    "hierarchical": 0.25,
 }
 DEFAULT_DISCORDANCE_GOAL_DISTANCE = 3
 
@@ -362,7 +367,45 @@ def build_prediction_committee(
             ),
             DEFAULT_COMMITTEE_WEIGHTS["poisson_baseline"],
         ),
+        CommitteeMember(
+            "bivariate",
+            BivariatePoissonMatchPredictor(
+                historical_df,
+                target_date_str,
+                selection=ActiveModelSelection(
+                    version_key=None,
+                    model_version="bivariate-poisson-committee",
+                    model_family="bivariate_poisson",
+                    artifact_path=None,
+                    requested_production_status="committee",
+                ),
+            ),
+            DEFAULT_COMMITTEE_WEIGHTS["bivariate"],
+        ),
     ]
+
+    # Miembro jerarquico bayesiano: solo se anade si hay artefacto de fuerzas
+    # activo (ajuste offline via scripts/fit_hierarchical_bayes.py). Sin artefacto
+    # no aporta senal y se omite para no diluir el consenso.
+    if not load_active_hierarchical_strengths().is_empty:
+        try:
+            members.append(
+                CommitteeMember(
+                    "hierarchical",
+                    HierarchicalMatchPredictor(
+                        selection=ActiveModelSelection(
+                            version_key=None,
+                            model_version="hierarchical-bayes-committee",
+                            model_family="hierarchical_bayes",
+                            artifact_path=None,
+                            requested_production_status="committee",
+                        ),
+                    ),
+                    DEFAULT_COMMITTEE_WEIGHTS["hierarchical"],
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - committee can run without hierarchical.
+            LOGGER.warning("hierarchical_committee_load_failed detail=%s", exc)
 
     challenger_record = load_latest_challenger_record(database_url=database_url)
     if challenger_record:

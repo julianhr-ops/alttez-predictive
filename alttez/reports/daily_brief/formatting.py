@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
@@ -91,6 +92,65 @@ def _fmt_pct(value: Any, default: str = "N/D") -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return default
     return _format_probability(float(value))
+
+
+def prob_over_2_5(lambda_h: Any, lambda_a: Any) -> float | None:
+    """Probabilidad de mas de 2.5 goles totales desde las lambdas del modelo.
+
+    La suma de dos Poisson independientes es Poisson(lambda_h + lambda_a), asi que
+    P(total > 2.5) = 1 - P(0) - P(1) - P(2). Funcion pura para que el resumen de
+    Telegram comunique el nivel de goles esperado (no solo el marcador modal, que
+    cae por debajo de la media). Devuelve None si las lambdas no son validas.
+    """
+    if lambda_h is None or lambda_a is None:
+        return None
+    try:
+        total = float(lambda_h) + float(lambda_a)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(total) or total <= 0:
+        return None
+    p_le_2 = math.exp(-total) * (1.0 + total + (total * total) / 2.0)
+    return max(0.0, min(1.0, 1.0 - p_le_2))
+
+
+def most_likely_total_goals(lambda_h: Any, lambda_a: Any) -> int | None:
+    """Numero de goles totales mas probable (moda de Poisson(lambda_h+lambda_a)).
+
+    El total de dos Poisson independientes es Poisson de la suma. Devuelve el k con
+    mayor masa via recurrencia de la pmf (exacto, sin scipy). Este total es mas
+    intuitivo y coherente con los goles esperados que un marcador exacto unico (cuya
+    moda cae por debajo de la media). Devuelve None si las lambdas no son validas.
+    """
+    if lambda_h is None or lambda_a is None:
+        return None
+    try:
+        total = float(lambda_h) + float(lambda_a)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(total) or total <= 0:
+        return None
+    best_k, best_p = 0, -1.0
+    pmf = math.exp(-total)  # k = 0
+    k = 0
+    while k <= total + 12:
+        if pmf > best_p:
+            best_p, best_k = pmf, k
+        k += 1
+        pmf = pmf * total / k
+    return best_k
+
+
+def _fmt_expected_goals(lambda_h: Any, lambda_a: Any) -> str:
+    """Texto de goles esperados: total y desglose local-visitante."""
+    if lambda_h is None or lambda_a is None:
+        return "N/D"
+    try:
+        lh = float(lambda_h)
+        la = float(lambda_a)
+    except (TypeError, ValueError):
+        return "N/D"
+    return f"{lh + la:.1f} ({lh:.1f}-{la:.1f})"
 
 
 def _fmt_points_profile(points_probability: dict[Any, Any] | None) -> str:

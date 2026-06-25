@@ -529,9 +529,14 @@ def build_klement_feature_state(
         is_knockout_values.append(is_knockout)
 
         home_advantage = 100 if not bool(row.neutral) else 0
-        expected_home = elo_engine.get_expected_score(current_home_elo + home_advantage, current_away_elo)
+        home_eff = current_home_elo + home_advantage
+        expected_home = elo_engine.get_expected_score(home_eff, current_away_elo)
         expected_away = 1 - expected_home
         k = _elo_k_for_tournament(getattr(row, "tournament", None), elo_engine.k_factor)
+        if elo_engine.mov_enabled:
+            k *= elo_engine.margin_of_victory_multiplier(
+                int(row.home_score), int(row.away_score), home_eff, current_away_elo
+            )
         new_home_elo = elo_engine.update_rating(current_home_elo, expected_home, float(row.home_result), k)
         new_away_elo = elo_engine.update_rating(current_away_elo, expected_away, 1 - float(row.home_result), k)
         ratings[home_team] = new_home_elo

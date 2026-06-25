@@ -31,6 +31,13 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CALIBRATION_PATH = Path("artifacts/calibration/active.json")
 CALIBRATION_PATH_ENV = "ALTTEZ_CALIBRATION_PATH"
+# Calibracion separada para el path de predictor unico (campeon directo, sin
+# pasar por el consenso del comite). La T de active.json se ajusto sobre el blend
+# del consenso; reusarla sobre un campeon ya calibrado lo sobre-suavizaria. Por eso
+# este path tiene su propio artefacto y su propia compuerta.
+DEFAULT_SINGLE_PREDICTOR_CALIBRATION_PATH = Path("artifacts/calibration/single_predictor.json")
+SINGLE_PREDICTOR_CALIBRATION_PATH_ENV = "ALTTEZ_SINGLE_PREDICTOR_CALIBRATION_PATH"
+SINGLE_PREDICTOR_CALIBRATION_ENABLED_ENV = "ALTTEZ_CALIBRATE_SINGLE_PREDICTOR"
 # Piso por clase aplicado a 1X2 en inferencia. 0.0 = neutro (sin piso).
 DEFAULT_CLASS_FLOOR = 0.0
 MIN_TEMPERATURE = 0.05
@@ -110,17 +117,197 @@ class ProbabilityCalibration:
 NEUTRAL_CALIBRATION = ProbabilityCalibration()
 
 
-def load_active_calibration(path: str | Path | None = None) -> ProbabilityCalibration:
-    """Carga la calibracion activa desde el artefacto JSON.
+# --- Calibracion isotonica (alternativa no parametrica a temperature) --------
+#
+# Temperature scaling impone una unica curva monotona global (p^(1/T)); la
+# calibracion isotonica aprende una curva monotona libre por clase, mas flexible
+# cuando la mala calibracion no es uniforme entre clases.
+#
+# Enfoque: one-vs-rest. Para cada clase (H, D, A) se ajusta una IsotonicRegression
+# que mapea la prob cruda de esa clase -> prob calibrada (frecuencia empirica de
+# acierto). Luego se renormaliza el triplete a suma 1.
+#
+# Serializacion SIN picklear sklearn: la funcion escalonada de IsotonicRegression
+# queda definida por sus puntos de quiebre (X_thresholds_, y_thresholds_). Se
+# persisten esos pares (x, y) por clase y se reevalua con np.interp en carga y
+# prediccion. np.interp reproduce exactamente la interpolacion lineal por tramos
+# que usa IsotonicRegression.predict (out_of_bounds="clip" = extremos planos).
+
+
+def _isotonic_curve(raw: np.ndarray, hits: np.ndarray) -> tuple[list[float], list[float]]:
+    """Ajusta una IsotonicRegression one-vs-rest y devuelve sus puntos (x, y).
+
+    raw: prob cruda de la clase. hits: 1 si la clase fue el resultado real, 0 si no.
+    Devuelve (x_thresholds, y_values) como listas serializables. Si no hay datos o
+    sklearn no esta disponible, devuelve curvas vacias (identidad al evaluar).
+    """
+    raw = np.asarray(raw, dtype=float)
+    hits = np.asarray(hits, dtype=float)
+    if raw.size == 0:
+        return [], []
+    try:
+        from sklearn.isotonic import IsotonicRegression
+    except Exception as exc:  # noqa: BLE001 - sin sklearn caemos a identidad.
+        LOGGER.warning("isotonic_unavailable detail=%s", exc)
+        return [], []
+    iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+    iso.fit(raw, hits)
+    xs = np.asarray(iso.X_thresholds_, dtype=float)
+    ys = np.asarray(iso.y_thresholds_, dtype=float)
+    return xs.tolist(), ys.tolist()
+
+
+def _eval_curve(x_points: list[float], y_points: list[float], value: float) -> float:
+    """Evalua la curva isotonica (puntos x, y) en value via np.interp.
+
+    Curva vacia = identidad. np.interp aplica extremos planos fuera de rango,
+    igual que out_of_bounds='clip' de sklearn.
+    """
+    if not x_points:
+        return float(value)
+    return float(np.interp(float(value), np.asarray(x_points, dtype=float), np.asarray(y_points, dtype=float)))
+
+
+@dataclass(slots=True, frozen=True)
+class IsotonicCalibration:
+    """Calibracion isotonica one-vs-rest para el triplete 1X2.
+
+    Mantiene tres curvas (x, y) escalonadas, una por clase (H, D, A). Se serializa
+    como arreglos puros (sin objetos sklearn) y se reevalua con np.interp.
+
+    NOTA: la calibracion isotonica se define solo sobre el triplete 1X2. No hay
+    una calibracion bien definida a nivel de matriz de marcadores, asi que
+    calibrate_matrix es IDENTIDAD (no rompe a los llamadores que la invocan antes
+    de derivar 1X2; la correccion 1X2 se aplica luego en calibrate_triplet).
+    """
+
+    home_x: tuple[float, ...] = ()
+    home_y: tuple[float, ...] = ()
+    draw_x: tuple[float, ...] = ()
+    draw_y: tuple[float, ...] = ()
+    away_x: tuple[float, ...] = ()
+    away_y: tuple[float, ...] = ()
+    class_floor: float = DEFAULT_CLASS_FLOOR
+
+    @property
+    def is_neutral(self) -> bool:
+        # Neutra cuando no hay curvas aprendidas (arreglos vacios) y sin piso.
+        return (
+            not self.home_x
+            and not self.draw_x
+            and not self.away_x
+            and self.class_floor <= 0.0
+        )
+
+    def calibrate_matrix(self, matrix: np.ndarray) -> np.ndarray:
+        """Identidad: la calibracion isotonica solo aplica al triplete 1X2."""
+        return np.asarray(matrix, dtype=float)
+
+    def calibrate_triplet(self, home: float, draw: float, away: float) -> tuple[float, float, float]:
+        cal_h = _eval_curve(list(self.home_x), list(self.home_y), home)
+        cal_d = _eval_curve(list(self.draw_x), list(self.draw_y), draw)
+        cal_a = _eval_curve(list(self.away_x), list(self.away_y), away)
+        triplet = np.array([cal_h, cal_d, cal_a], dtype=float)
+        total = triplet.sum()
+        if not np.isfinite(total) or total <= 0:
+            triplet = np.array([home, draw, away], dtype=float)
+            total = triplet.sum()
+            if total <= 0:
+                return 1 / 3, 1 / 3, 1 / 3
+        normalized = triplet / total
+        floored = apply_class_floor(normalized, self.class_floor)
+        return float(floored[0]), float(floored[1]), float(floored[2])
+
+    def to_payload(self) -> dict:
+        """Serializa a dict listo para JSON (solo arreglos x, y; sin sklearn)."""
+        return {
+            "method": "isotonic",
+            "class_floor": self.class_floor,
+            "curves": {
+                "home": {"x": list(self.home_x), "y": list(self.home_y)},
+                "draw": {"x": list(self.draw_x), "y": list(self.draw_y)},
+                "away": {"x": list(self.away_x), "y": list(self.away_y)},
+            },
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "IsotonicCalibration":
+        curves = payload.get("curves", {}) or {}
+        home = curves.get("home", {}) or {}
+        draw = curves.get("draw", {}) or {}
+        away = curves.get("away", {}) or {}
+        return cls(
+            home_x=tuple(float(v) for v in home.get("x", [])),
+            home_y=tuple(float(v) for v in home.get("y", [])),
+            draw_x=tuple(float(v) for v in draw.get("x", [])),
+            draw_y=tuple(float(v) for v in draw.get("y", [])),
+            away_x=tuple(float(v) for v in away.get("x", [])),
+            away_y=tuple(float(v) for v in away.get("y", [])),
+            class_floor=float(payload.get("class_floor", DEFAULT_CLASS_FLOOR)),
+        )
+
+
+NEUTRAL_ISOTONIC = IsotonicCalibration()
+
+
+def fit_isotonic(
+    triplets: np.ndarray,
+    outcomes: list[str],
+    *,
+    class_floor: float = DEFAULT_CLASS_FLOOR,
+) -> IsotonicCalibration:
+    """Ajusta una calibracion isotonica one-vs-rest desde (tripletes, resultados).
+
+    Para cada clase ajusta IsotonicRegression(prob_cruda -> acierto binario) y
+    guarda la curva escalonada como arreglos (x, y). Devuelve calibracion NEUTRA
+    si no hay muestras validas.
+    """
+    probs = np.asarray(triplets, dtype=float)
+    if probs.size == 0 or probs.ndim != 2 or probs.shape[1] != 3:
+        return NEUTRAL_ISOTONIC
+    actual = np.array([_OUTCOME_INDEX.get(o, -1) for o in outcomes])
+    mask = actual >= 0
+    if not mask.any():
+        return NEUTRAL_ISOTONIC
+    probs = probs[mask]
+    actual = actual[mask]
+
+    home_x, home_y = _isotonic_curve(probs[:, 0], (actual == 0).astype(float))
+    draw_x, draw_y = _isotonic_curve(probs[:, 1], (actual == 1).astype(float))
+    away_x, away_y = _isotonic_curve(probs[:, 2], (actual == 2).astype(float))
+    return IsotonicCalibration(
+        home_x=tuple(home_x),
+        home_y=tuple(home_y),
+        draw_x=tuple(draw_x),
+        draw_y=tuple(draw_y),
+        away_x=tuple(away_x),
+        away_y=tuple(away_y),
+        class_floor=class_floor,
+    )
+
+
+def load_active_calibration(
+    path: str | Path | None = None,
+) -> ProbabilityCalibration | IsotonicCalibration:
+    """Carga la calibracion activa desde el artefacto JSON (esquema versionado).
+
+    El artefacto declara su metodo en la clave "method":
+      - "temperature" (o ausente, por compatibilidad): {temperature, class_floor}.
+      - "isotonic": {curves: {home/draw/away: {x, y}}, class_floor}.
 
     Devuelve la calibracion NEUTRA si el archivo no existe o es ilegible: la
-    inferencia nunca debe romperse por falta del artefacto.
+    inferencia nunca debe romperse por falta del artefacto. El objeto devuelto
+    siempre expone is_neutral / calibrate_matrix / calibrate_triplet.
     """
     resolved = Path(path or os.getenv(CALIBRATION_PATH_ENV) or DEFAULT_CALIBRATION_PATH)
     if not resolved.exists():
         return NEUTRAL_CALIBRATION
     try:
         payload = json.loads(resolved.read_text(encoding="utf-8"))
+        method = str(payload.get("method", "temperature")).strip().lower()
+        if method == "isotonic":
+            return IsotonicCalibration.from_payload(payload)
+        # Compatibilidad: sin "method" o "temperature" == comportamiento previo.
         return ProbabilityCalibration(
             temperature=float(payload.get("temperature", 1.0)),
             class_floor=float(payload.get("class_floor", DEFAULT_CLASS_FLOOR)),
@@ -128,6 +315,30 @@ def load_active_calibration(path: str | Path | None = None) -> ProbabilityCalibr
     except Exception as exc:  # noqa: BLE001 - artefacto corrupto no debe tumbar inferencia.
         LOGGER.warning("calibration_artifact_unreadable path=%s detail=%s", resolved, exc)
         return NEUTRAL_CALIBRATION
+
+
+def load_single_predictor_calibration() -> ProbabilityCalibration:
+    """Calibracion para el path de predictor unico (router, sin consenso de comite).
+
+    Compuerta: ALTTEZ_CALIBRATE_SINGLE_PREDICTOR (default OFF durante fase de grupos
+    para no mover el campeon; se enciende post-grupos). Usa un artefacto SEPARADO
+    del consenso (ALTTEZ_SINGLE_PREDICTOR_CALIBRATION_PATH) porque la temperatura
+    del consenso se ajusto sobre el blend, no sobre el campeon aislado. NEUTRA si la
+    compuerta esta apagada o el artefacto no existe.
+    """
+    enabled = os.getenv(SINGLE_PREDICTOR_CALIBRATION_ENABLED_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not enabled:
+        return NEUTRAL_CALIBRATION
+    resolved = Path(
+        os.getenv(SINGLE_PREDICTOR_CALIBRATION_PATH_ENV)
+        or DEFAULT_SINGLE_PREDICTOR_CALIBRATION_PATH
+    )
+    return load_active_calibration(resolved)
 
 
 # --- Metricas de calibracion (para el arnes de evaluacion) -------------------

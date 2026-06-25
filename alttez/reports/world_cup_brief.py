@@ -224,9 +224,9 @@ def render_world_cup_brief_html(bracket: dict[str, Any], *, odds: list[dict[str,
         + brand_head("ALTTEZ | Predicción Mundial 2026")
         + "</head><body><div class=\"wrap\">"
         + brand_topbar("Predicción Mundial 2026")
-        + f'<div class="hero"><h1>Cuadro completo del torneo</h1>'
+        + '<div class="hero"><h1>Cuadro completo del torneo</h1>'
         + f'<div class="muted">Modelo {model}{fallback}</div></div>'
-        + f'<div class="champion"><div class="label">Campeón pronosticado</div>'
+        + '<div class="champion"><div class="label">Campeón pronosticado</div>'
         + f'<div class="team">🏆 {champion}{champion_pct}</div>'
         + f'<div class="runner">Subcampeón: {runner_up}</div></div>'
         + '<h2 class="section">Fase de grupos</h2>'

@@ -9,14 +9,20 @@ from alttez.experiments.tournament_oracle import DEFAULT_DIXON_COLES_RHO, build_
 from alttez.training.challenger_cycle import (
     DEFAULT_CHALLENGER_VERSION,
     DEFAULT_MAX_GOALS,
+    DEFAULT_XGB_TIME_DECAY_HALFLIFE_DAYS,
     FEATURE_COLUMNS,
+    XGB_TIME_DECAY_HALFLIFE_ENV,
     _build_goal_regressor,
+    _compute_time_decay_weights,
     _evaluate_challenger,
     _evaluate_poisson_champion,
     _fit_goal_models,
+    _governance_decision,
     _promotion_decision,
+    _resolve_time_decay_half_life,
     _split_training_and_validation,
     _train_challenger,
+    diebold_mariano,
 )
 
 
@@ -75,7 +81,7 @@ class TestChallengerCycle(unittest.TestCase):
         champion = {"brier_score": 0.6200, "log_loss": 0.9800}
         challenger = {"brier_score": 0.6100, "log_loss": 0.9810}
 
-        promote, reason = _promotion_decision(champion, challenger)
+        promote, reason, _detail = _promotion_decision(champion, challenger)
 
         self.assertTrue(promote)
         self.assertIn("Brier", reason)
@@ -84,7 +90,7 @@ class TestChallengerCycle(unittest.TestCase):
         champion = {"brier_score": 0.6200, "log_loss": 0.9800}
         challenger = {"brier_score": 0.6100, "log_loss": 1.0500}
 
-        promote, reason = _promotion_decision(champion, challenger)
+        promote, reason, _detail = _promotion_decision(champion, challenger)
 
         self.assertFalse(promote)
         self.assertIn("Log Loss", reason)
@@ -93,22 +99,108 @@ class TestChallengerCycle(unittest.TestCase):
         champion = {"brier_score": 0.6500, "log_loss": 1.0000}
         challenger = {"brier_score": 0.6000, "log_loss": 0.9500}  # beats Poisson champion
         # Active model is already better (0.55) -> must not regress production.
-        promote, reason = _promotion_decision(champion, challenger, incumbent_brier=0.5500)
+        promote, reason, _detail = _promotion_decision(champion, challenger, incumbent_brier=0.5500)
         self.assertFalse(promote)
         self.assertIn("activo", reason)
 
     def test_promotion_allowed_when_beating_active_model(self) -> None:
         champion = {"brier_score": 0.6500, "log_loss": 1.0000}
         challenger = {"brier_score": 0.5000, "log_loss": 0.9000}
-        promote, reason = _promotion_decision(champion, challenger, incumbent_brier=0.5500)
+        promote, reason, _detail = _promotion_decision(champion, challenger, incumbent_brier=0.5500)
         self.assertTrue(promote)
 
     def test_promotion_allows_small_brier_win_over_active_model(self) -> None:
         champion = {"brier_score": 0.6250, "log_loss": 1.0300}
         challenger = {"brier_score": 0.5433, "log_loss": 0.9170}
-        promote, reason = _promotion_decision(champion, challenger, incumbent_brier=0.5446)
+        promote, reason, _detail = _promotion_decision(champion, challenger, incumbent_brier=0.5446)
         self.assertTrue(promote)
         self.assertIn("incumbente", reason)
+
+    def test_diebold_mariano_identical_series_is_non_significant(self) -> None:
+        series = [0.2, 0.3, 0.25, 0.4, 0.1, 0.35]
+        dm_stat, p_value = diebold_mariano(series, series)
+        # Diferencia identica -> sin evidencia -> p ~ 1.0 (no significativo).
+        self.assertAlmostEqual(p_value, 1.0)
+        self.assertEqual(dm_stat, 0.0)
+
+    def test_diebold_mariano_separated_series_is_significant(self) -> None:
+        # Modelo A consistentemente con menor perdida que B, con diferencia variable
+        # por partido (varianza no nula -> el estadistico DM es genuino).
+        loss_a = [0.10, 0.15, 0.08, 0.20, 0.12, 0.09, 0.18, 0.11, 0.14, 0.07]
+        loss_b = [0.45, 0.38, 0.50, 0.41, 0.55, 0.39, 0.48, 0.52, 0.40, 0.47]
+        dm_stat, p_value = diebold_mariano(loss_a, loss_b)
+        # A es mejor -> dm_stat negativo y altamente significativo.
+        self.assertLess(dm_stat, 0.0)
+        self.assertLess(p_value, 0.05)
+
+    def test_diebold_mariano_handles_short_and_mismatched_series(self) -> None:
+        self.assertEqual(diebold_mariano([0.2], [0.3]), (0.0, 1.0))
+        self.assertEqual(diebold_mariano([], []), (0.0, 1.0))
+        self.assertEqual(diebold_mariano([0.2, 0.3, 0.4], [0.2, 0.3]), (0.0, 1.0))
+
+    def test_promotion_decision_carries_rps_and_dm_fields(self) -> None:
+        champion = {"brier_score": 0.6200, "log_loss": 0.9800, "rps": 0.2200}
+        challenger = {"brier_score": 0.6100, "log_loss": 0.9810, "rps": 0.2100}
+        promote, reason, detail = _promotion_decision(
+            champion,
+            challenger,
+            challenger_brier_losses=[0.10, 0.12, 0.11, 0.09, 0.13],
+            incumbent_brier_losses=[0.40, 0.42, 0.41, 0.39, 0.43],
+        )
+        self.assertTrue(promote)
+        self.assertIn("RPS", reason)
+        self.assertEqual(detail["challenger_rps"], 0.2100)
+        self.assertEqual(detail["champion_rps"], 0.2200)
+        self.assertIn("dm_p_value", detail)
+        self.assertIsInstance(detail["dm_p_value"], float)
+
+    def test_promotion_blocked_when_rps_worsens_despite_better_brier(self) -> None:
+        # Retador mejora Brier nominal pero empeora el RPS ordinal -> NO elegible.
+        champion = {"brier_score": 0.6200, "log_loss": 0.9800, "rps": 0.2000}
+        challenger = {"brier_score": 0.6100, "log_loss": 0.9790, "rps": 0.2500}
+        promote, reason, detail = _promotion_decision(champion, challenger)
+        self.assertFalse(promote)
+        self.assertIn("RPS", reason)
+        self.assertEqual(detail["challenger_rps"], 0.2500)
+        self.assertEqual(detail["champion_rps"], 0.2000)
+
+    def test_governance_dm_gate_blocks_auto_promote_when_insignificant(self) -> None:
+        # En la ruta de auto-promocion, un p-valor DM no significativo cae a manual.
+        with (
+            patch("alttez.training.challenger_cycle.auto_promotion_enabled", return_value=True),
+            patch(
+                "alttez.training.challenger_cycle.production_supported_model_families",
+                return_value={"xgboost"},
+            ),
+        ):
+            status, mode, reason = _governance_decision(
+                promote=True, challenger_family="xgboost", dm_p_value=0.30
+            )
+            self.assertEqual(status, "eligible")
+            self.assertEqual(mode, "manual")
+            self.assertIn("Diebold-Mariano", reason)
+
+            # p significativo -> se permite la auto-promocion.
+            status2, mode2, _reason2 = _governance_decision(
+                promote=True, challenger_family="xgboost", dm_p_value=0.01
+            )
+            self.assertEqual(status2, "active")
+            self.assertEqual(mode2, "auto")
+
+    def test_governance_dm_gate_does_not_affect_manual_path(self) -> None:
+        # Con auto-promocion OFF, el p-valor DM es irrelevante (no cambia comportamiento).
+        with (
+            patch("alttez.training.challenger_cycle.auto_promotion_enabled", return_value=False),
+            patch(
+                "alttez.training.challenger_cycle.production_supported_model_families",
+                return_value={"xgboost"},
+            ),
+        ):
+            status, mode, _reason = _governance_decision(
+                promote=True, challenger_family="xgboost", dm_p_value=0.30
+            )
+            self.assertEqual(status, "eligible")
+            self.assertEqual(mode, "manual")
 
     def test_feature_columns_include_gdp_with_coverage_flag(self) -> None:
         # GDP restored as a static macro prior, paired with a coverage flag.
@@ -292,6 +384,43 @@ class TestChallengerCycle(unittest.TestCase):
     def test_goal_regressor_without_early_stopping_drops_param(self) -> None:
         model = _build_goal_regressor(use_early_stopping=False)
         self.assertIsNone(model.get_params().get("early_stopping_rounds"))
+
+    def test_time_decay_weights_decrease_into_the_past(self) -> None:
+        dates = pd.Series(pd.to_datetime(["2024-01-01", "2024-07-01", "2025-01-01"]))
+        weights = _compute_time_decay_weights(dates, pd.Timestamp("2025-01-01"), 365.0)
+        # Estrictamente crecientes hacia el presente.
+        self.assertLess(weights[0], weights[1])
+        self.assertLess(weights[1], weights[2])
+        # El partido en la fecha de corte pesa ~1.0.
+        self.assertAlmostEqual(weights[2], 1.0)
+        # Exactamente un half-life atras -> ~0.5.
+        self.assertAlmostEqual(weights[0], 0.5, places=2)
+
+    def test_time_decay_weights_neutral_when_half_life_non_positive(self) -> None:
+        dates = pd.Series(pd.to_datetime(["2020-01-01", "2025-01-01"]))
+        weights = _compute_time_decay_weights(dates, pd.Timestamp("2025-01-01"), 0.0)
+        self.assertTrue((weights == 1.0).all())
+
+    def test_resolve_half_life_default_and_override(self) -> None:
+        with patch.dict("os.environ", {}, clear=False):
+            import os as _os
+
+            _os.environ.pop(XGB_TIME_DECAY_HALFLIFE_ENV, None)
+            self.assertEqual(
+                _resolve_time_decay_half_life(), float(DEFAULT_XGB_TIME_DECAY_HALFLIFE_DAYS)
+            )
+        with patch.dict("os.environ", {XGB_TIME_DECAY_HALFLIFE_ENV: "180"}):
+            self.assertEqual(_resolve_time_decay_half_life(), 180.0)
+        with patch.dict("os.environ", {XGB_TIME_DECAY_HALFLIFE_ENV: "garbage"}):
+            self.assertEqual(
+                _resolve_time_decay_half_life(), float(DEFAULT_XGB_TIME_DECAY_HALFLIFE_DAYS)
+            )
+
+    def test_fit_goal_models_reports_half_life(self) -> None:
+        fitted = _fit_goal_models(_feature_df(60))
+        self.assertEqual(
+            fitted["time_decay_half_life_days"], float(DEFAULT_XGB_TIME_DECAY_HALFLIFE_DAYS)
+        )
 
 
 if __name__ == "__main__":

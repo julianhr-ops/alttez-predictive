@@ -11,7 +11,6 @@ from .constants import DEFAULT_REPORT_DIR
 from .delivery import dispatch_daily_brief
 from .payload import build_daily_brief_payload
 from .reliability import evaluate_delivery_gate
-from .render_html import render_daily_brief_html
 from .writer import write_daily_brief
 
 
