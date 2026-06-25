@@ -4,7 +4,8 @@ param(
     [switch]$WriteSmoke,
     [string]$DatabaseUrl = $null,
     [string]$ProviderOrder = $null,
-    [string]$Schema = "public"
+    [string]$Schema = "public",
+    [int]$ChallengerEvaluationMatches = 120
 )
 
 $ErrorActionPreference = "Stop"
@@ -80,7 +81,7 @@ try {
 
     $CurrentStage = "forced live ingestion and evaluation closure"
     Write-Output "PROCESS: forced live ingestion and evaluation closure"
-    $smokeArgs = @($smoke, "--date", $Date)
+    $smokeArgs = @($smoke, "--date", $Date, "--skip-analysis")
     if ($WriteSmoke) {
         $smokeArgs += "--write"
     }
@@ -150,7 +151,13 @@ try {
 
     $CurrentStage = "challenger cycle"
     Write-Output "PROCESS: challenger cycle"
-    $challengerArgs = @($challenger, "--date", $Date)
+    $challengerArgs = @(
+        $challenger,
+        "--date",
+        $Date,
+        "--evaluation-matches",
+        $ChallengerEvaluationMatches
+    )
     if ($DatabaseUrl) {
         $challengerArgs += @("--database-url", $DatabaseUrl)
     }

@@ -170,13 +170,10 @@ def _elo_k_for_tournament(tournament: str | None, base_k: float) -> float:
 
 
 def _latest_rating_at_or_before(history: list[tuple[pd.Timestamp, float]], anchor: pd.Timestamp) -> float | None:
-    latest_rating: float | None = None
-    for rating_date, rating_value in history:
+    for rating_date, rating_value in reversed(history):
         if rating_date <= anchor:
-            latest_rating = float(rating_value)
-        else:
-            break
-    return latest_rating
+            return float(rating_value)
+    return None
 
 
 def _resolve_tournament_name(context: dict[str, Any] | None, fallback_tournament: str | None = None) -> str:
@@ -322,19 +319,34 @@ def _h2h_key(team_a: str, team_b: str) -> tuple[str, str]:
 
 
 def _rest_days(dates: list[pd.Timestamp], ref: pd.Timestamp) -> float:
-    past = [d for d in dates if d < ref]
-    if not past:
-        return DEFAULT_REST_DAYS
-    return min(float((ref - max(past)).days), REST_CAP_DAYS)
+    for match_date in reversed(dates):
+        if match_date < ref:
+            return min(float((ref - match_date).days), REST_CAP_DAYS)
+    return DEFAULT_REST_DAYS
 
 
 def _congestion(dates: list[pd.Timestamp], ref: pd.Timestamp, window: int = CONGESTION_WINDOW_DAYS) -> float:
+    if not dates:
+        return 0.0
     start = ref - pd.Timedelta(days=window)
-    return float(sum(1 for d in dates if start <= d < ref))
+    count = 0
+    for match_date in reversed(dates):
+        if match_date >= ref:
+            continue
+        if match_date < start:
+            break
+        count += 1
+    return float(count)
 
 
 def _goal_rates(goals: list[tuple[pd.Timestamp, int, int]], ref: pd.Timestamp, n: int = ROLLING_GOALS_WINDOW) -> tuple[float, float]:
-    past = [(gf, ga) for (d, gf, ga) in goals if d < ref][-n:]
+    past: list[tuple[int, int]] = []
+    for match_date, gf, ga in reversed(goals):
+        if match_date >= ref:
+            continue
+        past.append((gf, ga))
+        if len(past) >= n:
+            break
     if not past:
         return 0.0, 0.0
     gf = sum(item[0] for item in past) / len(past)
@@ -344,7 +356,9 @@ def _goal_rates(goals: list[tuple[pd.Timestamp, int, int]], ref: pd.Timestamp, n
 
 def _win_streak(goals: list[tuple[pd.Timestamp, int, int]], ref: pd.Timestamp) -> float:
     streak = 0
-    for d, gf, ga in sorted((g for g in goals if g[0] < ref), key=lambda g: g[0], reverse=True):
+    for match_date, gf, ga in reversed(goals):
+        if match_date >= ref:
+            continue
         if gf > ga:
             streak += 1
         else:
@@ -353,10 +367,15 @@ def _win_streak(goals: list[tuple[pd.Timestamp, int, int]], ref: pd.Timestamp) -
 
 
 def _h2h_goal_diff(h2h_list: list[tuple[pd.Timestamp, str, int, int]], ref: pd.Timestamp, home_team: str, k: int = H2H_WINDOW) -> tuple[float, float]:
-    past = [(match_home, home_goals - away_goals) for (d, match_home, home_goals, away_goals) in h2h_list if d < ref][-k:]
+    past: list[tuple[str, int]] = []
+    for match_date, match_home, home_goals, away_goals in reversed(h2h_list):
+        if match_date >= ref:
+            continue
+        past.append((match_home, home_goals - away_goals))
+        if len(past) >= k:
+            break
     if not past:
         return 0.0, 0.0
-    # Goal difference from the CURRENT home team's perspective.
     values = [gd if match_home == home_team else -gd for (match_home, gd) in past]
     return float(sum(values) / len(values)), float(len(past))
 
@@ -367,7 +386,13 @@ def _h2h_result_summary(
     home_team: str,
     k: int = H2H_WINDOW,
 ) -> tuple[float, float, float, float, float]:
-    past = [(match_home, home_goals, away_goals) for (d, match_home, home_goals, away_goals) in h2h_list if d < ref][-k:]
+    past: list[tuple[str, int, int]] = []
+    for match_date, match_home, home_goals, away_goals in reversed(h2h_list):
+        if match_date >= ref:
+            continue
+        past.append((match_home, home_goals, away_goals))
+        if len(past) >= k:
+            break
     if not past:
         return 0.0, 0.0, 0.0, 0.0, 0.0
     home_wins = 0.0

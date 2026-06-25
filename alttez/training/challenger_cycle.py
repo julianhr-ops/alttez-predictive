@@ -292,7 +292,7 @@ def _score_lambda_stream(
     rows = []
     for (lambda_home, lambda_away), row in zip(lambdas, ordered_holdout.itertuples(index=False)):
         prob_matrix = build_probability_matrix(
-            lambda_home, lambda_away, max_goals=DEFAULT_MAX_GOALS, rho=None
+            lambda_home, lambda_away, max_goals=DEFAULT_MAX_GOALS, rho=DEFAULT_DIXON_COLES_RHO
         )
         rows.append(
             _score_prediction_row(
@@ -550,7 +550,7 @@ def _evaluate_challenger(
             float(lambdas_home[index]),
             float(lambdas_away[index]),
             max_goals=DEFAULT_MAX_GOALS,
-            rho=None,
+            rho=DEFAULT_DIXON_COLES_RHO,
         )
         rows.append(
             _score_prediction_row(
@@ -767,19 +767,23 @@ def run_challenger_cycle(
     train_df = challenger_df.iloc[:split_index].copy()
     holdout_df = challenger_df.iloc[split_index:].copy()
 
-    champion_metrics = _evaluate_poisson_champion(
+    champion_lambdas, champion_refit_count = _champion_lambda_stream(
         train_df,
         holdout_df,
         champion_refit_interval=champion_refit_interval,
+    )
+    champion_metrics = _score_lambda_stream(
+        champion_lambdas,
+        holdout_df,
+        model_version=get_active_model_version(),
+        model_family=get_active_model_family(),
+        extra={"refit_count": champion_refit_count, "champion_refit_interval": champion_refit_interval},
     )
     challenger_artifact = _train_challenger(train_df)
     challenger_metrics = _evaluate_challenger(challenger_artifact, holdout_df)
     challenger_metrics["feature_importance"] = challenger_artifact.get("feature_importance")
 
     # Ensemble probe: does blending champion + challenger lambdas beat either alone?
-    champion_lambdas, _ = _champion_lambda_stream(
-        train_df, holdout_df, champion_refit_interval=champion_refit_interval
-    )
     challenger_lambdas = _xgb_lambda_stream(challenger_artifact, holdout_df)
     ensemble_metrics = evaluate_lambda_blend(champion_lambdas, challenger_lambdas, holdout_df)
 

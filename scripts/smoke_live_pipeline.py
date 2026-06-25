@@ -43,6 +43,7 @@ def run_smoke(
     database_url: str | None,
     schema: str,
     write: bool,
+    skip_analysis: bool = False,
 ) -> int:
     load_local_env(override=True)
 
@@ -64,51 +65,52 @@ def run_smoke(
         print("live_fetch=empty")
         return 1
 
-    print("\n[historical]")
-    historical_loader = InternationalLoader()
-    historical_df = historical_loader.fetch_data()
-    print(f"historical_rows={len(historical_df)}")
+    if not skip_analysis:
+        print("\n[historical]")
+        historical_loader = InternationalLoader()
+        historical_df = historical_loader.fetch_data()
+        print(f"historical_rows={len(historical_df)}")
 
-    predictor = build_active_predictor(historical_df, target_date, database_url=database_url)
-    fixture = _pick_fixture(fixtures, predictor)
-    prediction = predictor.predict_match(
-        fixture.home_team,
-        fixture.away_team,
-        is_neutral=fixture.is_neutral,
-        is_knockout=False,
-        max_goals=7,
-    )
-    recommendations = prediction.get("recommendations", pd.DataFrame())
-    result_summary = prediction.get("result_summary", pd.DataFrame())
-    recommendation_summary = build_recommendation_summary(
-        {
-            "recomendaciones": recommendations,
-            "result_summary": result_summary,
-        }
-    )
-
-    print("\n[analysis]")
-    print(f"fixture={fixture.home_team} vs {fixture.away_team}")
-    print(f"provider={fixture.provider}")
-    print(f"tournament={fixture.tournament_name}")
-    print(f"kickoff={fixture.kickoff_at or 'n/a'}")
-    print(f"model_version={prediction.get('model_version')}")
-    print(f"model_family={prediction.get('model_family')}")
-    print(f"used_fallback={prediction.get('used_fallback', False)}")
-    if prediction.get("fallback_reason"):
-        print(f"fallback_reason={prediction['fallback_reason']}")
-    print(f"xg_home={prediction.get('lambda_h')}")
-    print(f"xg_away={prediction.get('lambda_a')}")
-    print(f"primary_prediction={recommendation_summary.get('primary_score', 'n/a')}")
-    print(f"primary_ev={recommendation_summary.get('primary_ev', 'n/a')}")
-    print(
-        "best_market="
-        + (
-            str(recommendation_summary["best_market"]["Mercado"])
-            if recommendation_summary.get("best_market")
-            else "n/a"
+        predictor = build_active_predictor(historical_df, target_date, database_url=database_url)
+        fixture = _pick_fixture(fixtures, predictor)
+        prediction = predictor.predict_match(
+            fixture.home_team,
+            fixture.away_team,
+            is_neutral=fixture.is_neutral,
+            is_knockout=False,
+            max_goals=7,
         )
-    )
+        recommendations = prediction.get("recommendations", pd.DataFrame())
+        result_summary = prediction.get("result_summary", pd.DataFrame())
+        recommendation_summary = build_recommendation_summary(
+            {
+                "recomendaciones": recommendations,
+                "result_summary": result_summary,
+            }
+        )
+
+        print("\n[analysis]")
+        print(f"fixture={fixture.home_team} vs {fixture.away_team}")
+        print(f"provider={fixture.provider}")
+        print(f"tournament={fixture.tournament_name}")
+        print(f"kickoff={fixture.kickoff_at or 'n/a'}")
+        print(f"model_version={prediction.get('model_version')}")
+        print(f"model_family={prediction.get('model_family')}")
+        print(f"used_fallback={prediction.get('used_fallback', False)}")
+        if prediction.get("fallback_reason"):
+            print(f"fallback_reason={prediction['fallback_reason']}")
+        print(f"xg_home={prediction.get('lambda_h')}")
+        print(f"xg_away={prediction.get('lambda_a')}")
+        print(f"primary_prediction={recommendation_summary.get('primary_score', 'n/a')}")
+        print(f"primary_ev={recommendation_summary.get('primary_ev', 'n/a')}")
+        print(
+            "best_market="
+            + (
+                str(recommendation_summary["best_market"]["Mercado"])
+                if recommendation_summary.get("best_market")
+                else "n/a"
+            )
+        )
 
     if write:
         print("\n[persist]")
@@ -165,6 +167,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Persist the live agenda into Supabase and verify readback.",
     )
+    parser.add_argument(
+        "--skip-analysis",
+        action="store_true",
+        help="Skip historical model analysis; useful when the daily brief will run inference later.",
+    )
     return parser.parse_args()
 
 
@@ -177,6 +184,7 @@ def main() -> int:
         database_url=args.database_url,
         schema=args.schema,
         write=args.write,
+        skip_analysis=args.skip_analysis,
     )
 
 
