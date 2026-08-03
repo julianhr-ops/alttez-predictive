@@ -329,5 +329,13 @@ class TestDailyBrief(unittest.TestCase):
         )
 
 
+    def test_exit_code_for_empty_agenda_is_success_when_delivery_requested(self) -> None:
+        result = {
+            "delivery_status": "no_schedule",
+            "payload": {"delivery_gate": {"status": "no_schedule"}},
+        }
+
+        self.assertEqual(exit_code_for_brief_result(result, deliver_requested=True), 0)
+
 if __name__ == "__main__":
     unittest.main()

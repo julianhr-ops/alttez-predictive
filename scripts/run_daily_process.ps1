@@ -18,6 +18,7 @@ $migrations = Join-Path $root "scripts\apply_supabase_migrations.py"
 $smoke = Join-Path $root "scripts\smoke_live_pipeline.py"
 $backfill = Join-Path $root "scripts\backfill_match_results.py"
 $calibrationFit = Join-Path $root "scripts\fit_probability_calibration.py"
+$tournamentReviews = Join-Path $root "scripts\process_tournament_reviews.py"
 $brief = Join-Path $root "scripts\generate_daily_brief.py"
 $challenger = Join-Path $root "scripts\run_challenger_cycle.py"
 $pipelineAlert = Join-Path $root "scripts\send_pipeline_alert.py"
@@ -96,11 +97,18 @@ try {
     }
 
     & $python @smokeArgs
-    if ($LASTEXITCODE -ne 0) {
+    $smokeExitCode = $LASTEXITCODE
+    $NoSchedule = $smokeExitCode -eq 3
+    if ($smokeExitCode -ne 0 -and -not $NoSchedule) {
         throw "Forced live ingestion failed."
     }
 
-    Write-Output "PROCESS: prediction evaluations closed during ingestion finalize"
+    if ($NoSchedule) {
+        Write-Output "PROCESS: idle - no international matches scheduled for $Date"
+    }
+    else {
+        Write-Output "PROCESS: prediction evaluations closed during ingestion finalize"
+    }
 
     # Recurring ESPN results backfill (keyless; covers friendlies + WC finals).
     # Closes prediction labels so the challenger evaluates on fresh outcomes.
@@ -116,6 +124,25 @@ try {
     if ($LASTEXITCODE -ne 0) {
         Write-Output "PROCESS: espn results backfill degraded (non-fatal)"
         & $python $pipelineAlert --stage $CurrentStage --date $Date --message "ESPN results backfill failed (non-fatal)." --level warning | Out-Null
+    }
+
+    # Cierres de torneo registrados. Idempotente: la tabla de entregas evita
+    # reenviar un informe ya entregado. Non-fatal para no bloquear el brief diario.
+    $CurrentStage = "tournament review delivery"
+    Write-Output "PROCESS: tournament review delivery"
+    $tournamentReviewArgs = @($tournamentReviews, "--date", $Date, "--deliver")
+    if ($DatabaseUrl) {
+        $tournamentReviewArgs += @("--database-url", $DatabaseUrl)
+    }
+    & $python @tournamentReviewArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "PROCESS: tournament review delivery degraded (non-fatal)"
+        & $python $pipelineAlert --stage $CurrentStage --date $Date --message "Tournament review delivery failed (non-fatal)." --level warning | Out-Null
+    }
+
+    if ($NoSchedule) {
+        Write-Output "PROCESS: complete (idle/no_schedule)"
+        exit 0
     }
 
     # Re-ajusta la calibracion de probabilidad sobre las evaluaciones recien

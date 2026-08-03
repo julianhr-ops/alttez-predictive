@@ -22,6 +22,10 @@ from alttez.ingestion.live_matches import (
 )
 from alttez.ingestion.provider_healthcheck import run_healthcheck
 
+EXIT_SUCCESS = 0
+EXIT_FAILURE = 1
+EXIT_NO_SCHEDULE = 3
+
 
 def _pick_fixture(fixtures, predictor: BaseMatchPredictor):
     for fixture in fixtures:
@@ -62,8 +66,14 @@ def run_smoke(
     print(f"fixtures={len(fixtures)}")
     print(f"raw_records={len(raw_records)}")
     if not fixtures:
-        print("live_fetch=empty")
-        return 1
+        provider_query_succeeded = any(item.get("status") == "ok" for item in attempts)
+        if provider_query_succeeded:
+            print("live_fetch=no_schedule")
+            print("operational_status=idle")
+            return EXIT_NO_SCHEDULE
+        print("live_fetch=error")
+        print("operational_status=failed")
+        return EXIT_FAILURE
 
     if not skip_analysis:
         print("\n[historical]")
@@ -140,20 +150,23 @@ def run_smoke(
         if result.get("status") != "success":
             print(f"error_category={result.get('error_category')}")
             print(f"error={result.get('error') or 'n/a'}")
-            return 1
+            if result.get("status") == "empty":
+                print("operational_status=idle")
+                return EXIT_NO_SCHEDULE
+            return EXIT_FAILURE
 
         rows = list_matches_for_date(target_date, database_url=database_url)
         print(f"readback_matches={len(rows)}")
         if rows.empty:
             print("readback=empty")
-            return 1
+            return EXIT_FAILURE
 
         if "provider" in rows.columns:
             print(f"readback_provider={rows.iloc[0]['provider']}")
 
     print("\n[summary]")
     print("smoke=ok")
-    return 0
+    return EXIT_SUCCESS
 
 
 def parse_args() -> argparse.Namespace:

@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "tournaments": [
+    {
+      "key": "fifa-world-cup-2026",
+      "name": "FIFA World Cup 2026",
+      "query": "FIFA World Cup",
+      "date_from": "2026-06-11",
+      "date_to": "2026-07-19",
+      "deliver_after": "2026-07-21",
+      "minimum_unique_matches": 90,
+      "minimum_evaluable_rate": 0.8,
+      "enabled": true
+    }
+  ]
+}

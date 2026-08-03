@@ -76,6 +76,7 @@ class TestDeliveryGate(unittest.TestCase):
         gate = evaluate_delivery_gate({"used_fallback": False, "matches": []})
 
         self.assertFalse(gate["should_deliver"])
+        self.assertEqual(gate["status"], "no_schedule")
         self.assertIn("agenda", gate["block_reason"].lower())
 
     def test_gate_blocks_global_fallback(self) -> None:

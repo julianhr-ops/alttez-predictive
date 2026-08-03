@@ -119,6 +119,8 @@ jobs:
           path: |
             artifacts/reports/*.html
             artifacts/reports/*.json
+            artifacts/tournament-reviews/*.html
+            artifacts/tournament-reviews/*.json
           if-no-files-found: ignore
           retention-days: 14
 

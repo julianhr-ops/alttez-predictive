@@ -152,6 +152,7 @@ def evaluate_delivery_gate(payload: dict[str, Any]) -> dict[str, Any]:
     if not matches:
         return {
             "should_deliver": False,
+            "status": "no_schedule",
             "block_reason": "No hay partidos en la agenda para la fecha.",
             "model_backed_matches": 0,
             "total_matches": 0,
@@ -164,6 +165,7 @@ def evaluate_delivery_gate(payload: dict[str, Any]) -> dict[str, Any]:
     if missing_markers:
         return {
             "should_deliver": False,
+            "status": "blocked",
             "block_reason": f"{len(missing_markers)} partido(s) sin marcador de fiabilidad.",
             "model_backed_matches": model_backed,
             "total_matches": summary["total_matches"],
@@ -172,6 +174,7 @@ def evaluate_delivery_gate(payload: dict[str, Any]) -> dict[str, Any]:
     if run_used_fallback:
         return {
             "should_deliver": False,
+            "status": "blocked",
             "block_reason": (
                 "El modelo activo no pudo cargarse; todo el informe usaría el respaldo Poisson "
                 f"(motivo: {payload.get('fallback_reason') or 'desconocido'})."
@@ -183,6 +186,7 @@ def evaluate_delivery_gate(payload: dict[str, Any]) -> dict[str, Any]:
     if model_backed == 0:
         return {
             "should_deliver": False,
+            "status": "blocked",
             "block_reason": "Ningún partido está respaldado por el modelo activo (informe genérico).",
             "model_backed_matches": 0,
             "total_matches": summary["total_matches"],
@@ -190,6 +194,7 @@ def evaluate_delivery_gate(payload: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "should_deliver": True,
+        "status": "ready",
         "block_reason": None,
         "model_backed_matches": model_backed,
         "total_matches": summary["total_matches"],

@@ -135,6 +135,8 @@ venv\Scripts\python.exe scripts\smoke_live_pipeline.py --date 2026-05-26 --write
 
 When the live batch includes finished matches with enough metric coverage, ALTTEZ also writes a certification report under `artifacts/certification/` and the dashboard surfaces that status alongside the sync result.
 
+A successful provider query with no international fixtures exits with code 3 (idle/no_schedule), distinct from code 1 for provider or operational failures.
+
 Daily process runner:
 
 ```powershell

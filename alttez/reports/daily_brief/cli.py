@@ -23,9 +23,12 @@ def generate_daily_brief(
     persist_predictions: bool = True,
 ) -> dict[str, Any]:
     payload = build_daily_brief_payload(target_date, database_url=database_url)
+    gate = evaluate_delivery_gate(payload)
+    payload["delivery_gate"] = gate
+    no_schedule = gate.get("status") == "no_schedule"
     # Fallback is no longer expected to be silent: if the active model could not load and the
     # brief is served by the Poisson safety net, raise a non-critical incident so ops sees it.
-    if payload.get("used_fallback"):
+    if payload.get("used_fallback") and not no_schedule:
         try:
             from alttez.operations.alerts import send_pipeline_incident_telegram
 
@@ -53,7 +56,7 @@ def generate_daily_brief(
         "prediction_rows": 0,
         "prediction_error": None,
     }
-    if persist_predictions:
+    if persist_predictions and not no_schedule:
         try:
             persistence = persist_daily_predictions(payload, database_url=database_url)
             if persistence.get("prediction_run_id"):
@@ -65,15 +68,16 @@ def generate_daily_brief(
     # the brief (each already carries a reliability marker); it only refuses to
     # *send* when the run as a whole is untrustworthy (global Poisson fallback,
     # or no match backed by the active model).
-    gate = evaluate_delivery_gate(payload)
-    payload["delivery_gate"] = gate
-
     payload.update(delivery)
     html_path, json_path = write_daily_brief(payload, report_dir=report_dir)
 
     if deliver:
         delivery["delivery_attempted"] = True
-        if not gate["should_deliver"]:
+        if no_schedule:
+            delivery["delivery_status"] = "no_schedule"
+            delivery["delivery_channel"] = "none"
+            delivery["delivery_error"] = None
+        elif not gate["should_deliver"]:
             delivery["delivery_status"] = "blocked"
             delivery["delivery_channel"] = "none"
             delivery["delivery_error"] = gate["block_reason"]
@@ -118,6 +122,9 @@ def _raise_gate_incident(target_date: date, gate: dict[str, Any]) -> None:
 
 
 def exit_code_for_brief_result(result: dict[str, Any], *, deliver_requested: bool) -> int:
+    gate = (result.get("payload") or {}).get("delivery_gate") or {}
+    if gate.get("status") == "no_schedule":
+        return 0
     if deliver_requested and result.get("delivery_status") != "delivered":
         return 1
     return 0
