@@ -71,7 +71,7 @@ jobs:
           if ($env:SUPABASE_DB_URL) {
             $dbUri = [System.Uri]$env:SUPABASE_DB_URL
             $dbUser = [System.Uri]::UnescapeDataString(($dbUri.UserInfo -split ':', 2)[0])
-            $projectRef = ($dbUser -split '\.', 2)[-1]
+            $projectRef = if ($dbUser -match '^postgres\.(.+)$') { $Matches[1] } elseif ($dbUri.Host -match '^db\.([^.]+)\.supabase\.co$') { $Matches[1] }
             foreach ($value in @($dbUri.Host, $dbUser, $projectRef)) {
               if ($value) { Write-Output "::add-mask::$value" }
             }
