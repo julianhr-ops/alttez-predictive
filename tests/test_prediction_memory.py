@@ -1,24 +1,30 @@
 from __future__ import annotations
 
+import json
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
-from sqlalchemy import Column, Float, MetaData, String, Table
+from sqlalchemy import Column, Float, MetaData, String, Table, create_engine
 
 from alttez.operations.prediction_memory import (
     RAW_PROBABILITY_COLUMNS,
     _filter_match_prediction_row,
+    _pending_prediction_rows,
     _restrict_to_table_columns,
     activate_model_version_by_key,
     brier_score_1x2,
     load_closed_evaluation_samples,
+    load_committee_paired_losses,
     load_prediction_learning_audit,
     load_prediction_metrics_by_competition,
     load_prediction_metrics_by_confidence,
     load_prediction_metrics_by_model,
     load_prediction_overview,
+    load_recent_prediction_evaluations,
     log_loss_1x2,
     select_latest_pre_kickoff,
 )
@@ -193,6 +199,122 @@ class TestDeduplicatedLoaders(unittest.TestCase):
             samples = load_closed_evaluation_samples()
 
         self.assertEqual(len(samples), 2)
+
+
+class TestPendingPredictionRows(unittest.TestCase):
+    def _connection(self):
+        engine = create_engine("sqlite://")
+        connection = engine.connect()
+        connection.exec_driver_sql("attach database ':memory:' as public")
+        connection.exec_driver_sql(
+            "create table public.matches (id text, status text, match_date text, home_score int, away_score int)"
+        )
+        connection.exec_driver_sql(
+            """create table public.match_predictions (
+                id text, match_id text, predicted_outcome text, predicted_home_win_prob real,
+                predicted_draw_prob real, predicted_away_win_prob real, predicted_scoreline text,
+                prediction_created_at text, kickoff_at text)"""
+        )
+        connection.exec_driver_sql("create table public.prediction_evaluations (id text, prediction_id text)")
+        connection.exec_driver_sql("insert into public.matches values ('m1', 'finished', '2026-06-01', 2, 1)")
+        return connection
+
+    def _insert_prediction(self, connection, prediction_id, created, kickoff="2026-06-01 18:00:00") -> None:
+        connection.exec_driver_sql(
+            "insert into public.match_predictions values (?, 'm1', 'H', 0.5, 0.3, 0.2, '1 - 0', ?, ?)",
+            (prediction_id, created, kickoff),
+        )
+
+    def test_rows_created_at_or_after_kickoff_are_not_evaluated(self) -> None:
+        connection = self._connection()
+        self._insert_prediction(connection, "before", "2026-06-01 08:00:00")
+        self._insert_prediction(connection, "at_kickoff", "2026-06-01 18:00:00")
+        self._insert_prediction(connection, "after", "2026-06-01 21:00:00")
+
+        rows = _pending_prediction_rows(connection, None)
+
+        self.assertEqual([row["prediction_id"] for row in rows], ["before"])
+
+    def test_unknown_timestamps_are_still_evaluated_and_evaluated_rows_are_skipped(self) -> None:
+        connection = self._connection()
+        self._insert_prediction(connection, "no_kickoff", "2026-06-02 08:00:00", kickoff=None)
+        self._insert_prediction(connection, "no_created", None)
+        self._insert_prediction(connection, "done", "2026-06-01 08:00:00")
+        connection.exec_driver_sql("insert into public.prediction_evaluations values ('e1', 'done')")
+
+        rows = _pending_prediction_rows(connection, date(2026, 6, 1))
+
+        self.assertEqual(sorted(row["prediction_id"] for row in rows), ["no_created", "no_kickoff"])
+
+
+class TestRecentEvaluationsAndPairedLosses(unittest.TestCase):
+    def test_recent_evaluations_list_one_row_per_match_and_model(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {**_eval_row("m1", "2026-05-29T08:00:00+00:00"), "evaluated_at": "2026-06-02T01:00:00+00:00"},
+                {**_eval_row("m1", "2026-05-30T08:00:00+00:00"), "evaluated_at": "2026-06-02T02:00:00+00:00"},
+                {**_eval_row("m1", "2026-06-02T08:00:00+00:00"), "evaluated_at": "2026-06-02T03:00:00+00:00"},
+                {**_eval_row("m2", "2026-05-30T08:00:00+00:00"), "evaluated_at": "2026-06-02T04:00:00+00:00"},
+            ]
+        )
+        with patch("alttez.operations.prediction_memory.read_dataframe", return_value=frame):
+            recent = load_recent_prediction_evaluations(limit=10)
+
+        self.assertEqual(recent["evaluated_at"].tolist(), ["2026-06-02T04:00:00+00:00", "2026-06-02T02:00:00+00:00"])
+        self.assertNotIn("match_id", recent.columns)
+
+    def _consensus_row(self, match_id, created, member_probs, *, outcome="H", member_version="champion-v1", payload_as_json=False):
+        payload = {
+            "committee_members": [
+                {
+                    "role": "champion",
+                    "model_version": member_version,
+                    "prediction_supported": True,
+                    **dict(zip(("prob_home", "prob_draw", "prob_away"), member_probs)),
+                }
+            ]
+        }
+        return {
+            "match_id": match_id,
+            "model_version": "committee-consensus-v1",
+            "prediction_created_at": created,
+            "kickoff_at": "2026-06-01T18:00:00+00:00",
+            "prob_home": 0.4,
+            "prob_draw": 0.3,
+            "prob_away": 0.3,
+            "payload": json.dumps(payload) if payload_as_json else payload,
+            "actual_outcome": outcome,
+        }
+
+    def test_paired_losses_use_identical_matches_and_latest_pre_kickoff_row(self) -> None:
+        frame = pd.DataFrame(
+            [
+                self._consensus_row("m1", "2026-05-30T08:00:00+00:00", (0.1, 0.1, 0.8)),
+                self._consensus_row("m1", "2026-05-31T08:00:00+00:00", (0.7, 0.2, 0.1)),
+                self._consensus_row("m2", "2026-05-31T08:00:00+00:00", (0.6, 0.2, 0.2), payload_as_json=True),
+                self._consensus_row("m3", "2026-05-31T08:00:00+00:00", (0.6, 0.2, 0.2), member_version="other-champion"),
+                self._consensus_row("m4", "2026-05-31T08:00:00+00:00", (0.6, 0.2, 0.2)) | {"payload": None},
+            ]
+        )
+        with patch("alttez.operations.prediction_memory.read_dataframe", return_value=frame):
+            losses = load_committee_paired_losses(
+                consensus_version="committee-consensus-v1", member_role="champion", member_version="champion-v1"
+            )
+
+        consensus_losses, champion_losses = losses
+        self.assertEqual(len(consensus_losses), 2)
+        self.assertEqual(len(champion_losses), 2)
+        np.testing.assert_allclose(consensus_losses, [0.36 + 0.09 + 0.09] * 2)
+        np.testing.assert_allclose(champion_losses, [0.09 + 0.04 + 0.01, 0.16 + 0.04 + 0.04])
+
+    def test_no_common_matches_returns_none(self) -> None:
+        frame = pd.DataFrame([self._consensus_row("m1", "2026-05-30T08:00:00+00:00", (0.7, 0.2, 0.1), member_version="x")])
+        with patch("alttez.operations.prediction_memory.read_dataframe", return_value=frame):
+            self.assertIsNone(
+                load_committee_paired_losses(
+                    consensus_version="committee-consensus-v1", member_role="champion", member_version="champion-v1"
+                )
+            )
 
 
 def _match_payload(**overrides) -> dict:
