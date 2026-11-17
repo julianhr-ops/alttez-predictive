@@ -270,7 +270,7 @@ class TestRecentEvaluationsAndPairedLosses(unittest.TestCase):
                     "role": "champion",
                     "model_version": member_version,
                     "prediction_supported": True,
-                    **dict(zip(("prob_home", "prob_draw", "prob_away"), member_probs)),
+                    **dict(zip(("prob_home", "prob_draw", "prob_away"), member_probs, strict=True)),
                 }
             ]
         }
