@@ -282,7 +282,7 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual((report["config"]["first_test_year"], report["config"]["last_test_year"]), (2016, 2017))
         self.assertEqual(set(report["pooled"]["metrics"]), set(sb.MODELS))
         pooled = {(r["model"], r["baseline"], r["metric"]) for r in report["pooled"]["comparisons"]}
-        self.assertEqual(len(pooled), len(sb.COMPARISONS) * len(sb.METRICS))
+        self.assertEqual(len(pooled), len(sb.reported_comparisons(sb.CANDIDATE_NAMES)) * len(sb.METRICS))
         self.assertEqual(set(report["by_year"]), {"2016", "2017"})
         json.dumps(report)
         self.assertIn("Poisson + temperature", sb.render_markdown(report))

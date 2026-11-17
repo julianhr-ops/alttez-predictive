@@ -35,6 +35,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n-boot", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workers", type=int, default=1, help="processes used to predict years in parallel")
+    parser.add_argument(
+        "--raw-cache-dir",
+        type=Path,
+        default=None,
+        help="reuse or store the raw Poisson output of every predicted year here (keyed by data and cadence)",
+    )
+    parser.add_argument(
+        "--report-years",
+        type=int,
+        nargs=2,
+        metavar=("FIRST", "LAST"),
+        help="score and report only these years (inclusive); every test year is still predicted",
+    )
+    parser.add_argument("--select", action="store_true", help="choose the candidate on the reported years (must end by 2022)")
+    parser.add_argument("--candidates", nargs="+", choices=sb.CANDIDATE_NAMES, help="candidate models to report (default all)")
     args = parser.parse_args(argv)
 
     try:
@@ -50,12 +65,15 @@ def main(argv: list[str] | None = None) -> int:
         refit_days=args.refit_days,
         n_boot=args.n_boot,
         seed=args.seed,
+        report_years=tuple(args.report_years) if args.report_years else None,
+        candidates=args.candidates or sb.CANDIDATE_NAMES,
+        select=args.select,
     )
     if args.workers > 1:
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            report = sb.run_backtest(matches, map_fn=pool.map, **options)
+            report = sb.run_backtest(matches, map_fn=pool.map, raw_cache_dir=args.raw_cache_dir, **options)
     else:
-        report = sb.run_backtest(matches, **options)
+        report = sb.run_backtest(matches, raw_cache_dir=args.raw_cache_dir, **options)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")

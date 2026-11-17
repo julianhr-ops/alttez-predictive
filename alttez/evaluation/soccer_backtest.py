@@ -21,8 +21,10 @@ router would serve (both teams with enough recent history).
 from __future__ import annotations
 
 import gzip
+import hashlib
 import io
 import os
+import pickle
 import tempfile
 import urllib.error
 import urllib.request
@@ -45,8 +47,17 @@ from alttez.evaluation.paired import (
     paired_bootstrap_diff,
     reliability_table,
 )
+from alttez.evaluation.soccer_candidates import (
+    CANDIDATE_NAMES,
+    CANDIDATES,
+    SELECTION_LAST_YEAR,
+    fit_candidate,
+    scoreline_log_loss,
+    select_candidate,
+    served_scoreline,
+)
 from alttez.experiments.tournament_oracle import build_probability_matrix
-from alttez.features.elo import HOME_ADVANTAGE_ELO, EloEngine, tournament_k_factor
+from alttez.features.elo import HOME_ADVANTAGE_ELO, EloEngine, rate_matches
 from alttez.features.poisson import PoissonEngine
 from alttez.inference.calibration import ProbabilityCalibration, fit_temperature, matrix_1x2
 from alttez.inference.router import DEFAULT_MAX_GOALS, DEFAULT_POISSON_KWARGS
@@ -65,13 +76,15 @@ REFIT_DAYS = 7
 MIN_SUPPORTED_MATCHES = DEFAULT_POISSON_KWARGS["min_history_matches"]
 
 CLASSES = ("H", "D", "A")
-MODELS = ("uniform", "base_rate", "elo_only", "poisson_raw", "poisson_calibrated")
+BASE_MODELS = ("uniform", "base_rate", "elo_only", "poisson_raw", "poisson_calibrated")
+MODELS = (*BASE_MODELS, *CANDIDATE_NAMES)
 LABELS = {
     "uniform": "uniform",
     "base_rate": "base rate",
     "elo_only": "Elo only",
     "poisson_raw": "Poisson raw",
     "poisson_calibrated": "Poisson + temperature",
+    **{spec.name: spec.label for spec in CANDIDATES},
 }
 COMPARISONS = (
     ("poisson_raw", "uniform"),
@@ -178,45 +191,13 @@ def prepare_matches(csv_path: Path) -> Matches:
 def add_pre_match_elo(matches: pd.DataFrame, *, engine: EloEngine | None = None) -> pd.DataFrame:
     """Add ``elo_home_before``, ``elo_away_before`` and ``elo_diff`` using only earlier dates.
 
-    All matches on one date see the ratings as they stood at the start of that date, and
-    their updates are applied together afterwards. ``matches`` must be sorted by date.
+    ``matches`` must be sorted by date; the walk is :func:`alttez.features.elo.rate_matches`.
     """
-    elo = engine or EloEngine(mov_enabled=False)
-    ratings: dict[str, float] = {}
-    home_before = np.empty(len(matches))
-    away_before = np.empty(len(matches))
-    home = matches["home_team"].to_numpy()
-    away = matches["away_team"].to_numpy()
-    neutral = matches["neutral"].to_numpy(bool)
-    tournament = matches["tournament"].to_numpy()
-    result = np.where(matches["outcome"].to_numpy() == "H", 1.0, np.where(matches["outcome"].to_numpy() == "D", 0.5, 0.0))
-    if not matches["date"].is_monotonic_increasing:
-        raise ValueError("matches must be sorted by date")
-    dates = matches["date"].to_numpy()
-
-    start = 0
-    while start < len(matches):
-        stop = start
-        while stop < len(matches) and dates[stop] == dates[start]:
-            stop += 1
-        pending: list[tuple[str, float]] = []
-        for i in range(start, stop):
-            h = ratings.get(home[i], elo.base_rating)
-            a = ratings.get(away[i], elo.base_rating)
-            home_before[i], away_before[i] = h, a
-            h_eff = h + (0 if neutral[i] else HOME_ADVANTAGE_ELO)
-            expected_home = elo.get_expected_score(h_eff, a)
-            k = tournament_k_factor(tournament[i], elo.k_factor)
-            pending.append((home[i], elo.update_rating(0.0, expected_home, result[i], k)))
-            pending.append((away[i], elo.update_rating(0.0, 1 - expected_home, 1 - result[i], k)))
-        for team, delta in pending:
-            ratings[team] = ratings.get(team, elo.base_rating) + delta
-        start = stop
-
+    run = rate_matches(matches, engine=engine)
     out = matches.copy()
-    out["elo_home_before"] = home_before
-    out["elo_away_before"] = away_before
-    out["elo_diff"] = home_before - away_before
+    out["elo_home_before"] = run.home_before
+    out["elo_away_before"] = run.away_before
+    out["elo_diff"] = run.home_before - run.away_before
     return out
 
 
@@ -322,6 +303,7 @@ class FoldInfo:
     draw_prob_at_parity: float
     n_matches: int
     n_supported: int
+    candidates: dict[str, dict[str, float | None]]
 
 
 def _window(matches: pd.DataFrame, year: int, window_years: int) -> pd.DataFrame:
@@ -357,6 +339,7 @@ def walk_forward(
     window_years: int = WINDOW_YEARS,
     refit_days: int = REFIT_DAYS,
     map_fn: Callable[..., Any] = map,
+    raw_cache_dir: Path | None = None,
 ) -> tuple[pd.DataFrame, list[FoldInfo]]:
     """Predictions of every model for ``test_years`` and the per-fold fitted parameters.
 
@@ -369,7 +352,7 @@ def walk_forward(
     predicted = list(range(test_years[0] - window_years, test_years[-1] + 1))
     raw_by_year = {}
     cut = [matches[matches["year"] <= y] for y in predicted]
-    jobs = [(subset, y) for subset, y in zip(cut, predicted, strict=True)]
+    jobs = [(subset, y, raw_cache_dir) for subset, y in zip(cut, predicted, strict=True)]
     results = map_fn(_raw_job, jobs, [refit_days] * len(jobs))
     for raw in results:
         raw_by_year[raw.year] = raw
@@ -388,10 +371,16 @@ def walk_forward(
             target["neutral"].to_numpy(bool),
         )
         frame = raw.frame.copy()
+        frame["home_score"] = target["home_score"].to_numpy(int)
+        frame["away_score"] = target["away_score"].to_numpy(int)
         for name, probs in base.items():
             frame = _with_probabilities(frame, name, probs)
-        frame = _with_probabilities(frame, "poisson_calibrated", calibrate_matrices(raw.matrices, frame["supported"].to_numpy(bool), temperature))
+        supported = frame["supported"].to_numpy(bool)
+        frame = _with_probabilities(frame, "poisson_calibrated", calibrate_matrices(raw.matrices, supported, temperature))
         frame["elo_diff"] = target["elo_diff"].to_numpy(float)
+        poisson_train = _poisson_training_rows(raw_by_year, matches, cal_years)
+        candidate_fits, candidate_columns = _candidate_predictions(train, poisson_train, frame, raw.matrices)
+        frame = pd.concat([frame, candidate_columns], axis=1)
         frames.append(frame)
         draw_at_parity = fit_draw_prob_at_parity(train["elo_diff"].to_numpy(float), train["outcome"].tolist(), train["neutral"].to_numpy(bool))
         folds.append(
@@ -407,14 +396,78 @@ def walk_forward(
                 draw_prob_at_parity=draw_at_parity,
                 n_matches=len(frame),
                 n_supported=int(frame["supported"].sum()),
+                candidates=candidate_fits,
             )
         )
     return pd.concat(frames, ignore_index=True), folds
 
 
-def _raw_job(job: tuple[pd.DataFrame, int], refit_days: int) -> RawYear:
-    subset, year = job
-    return raw_poisson_year(subset, year, refit_days=refit_days)
+def _poisson_training_rows(raw_by_year: Mapping[int, RawYear], matches: pd.DataFrame, years: Sequence[int]) -> pd.DataFrame:
+    """Supported rows of the walk-forward raw Poisson output of ``years`` with their Elo gap, for the blend weight."""
+    parts = []
+    for y in years:
+        part = raw_by_year[y].frame.copy()
+        part["elo_diff"] = matches.loc[matches["year"] == y, "elo_diff"].to_numpy(float)
+        parts.append(part[part["supported"]])
+    return pd.concat(parts, ignore_index=True)
+
+
+def _candidate_predictions(
+    train: pd.DataFrame, poisson_train: pd.DataFrame, frame: pd.DataFrame, matrices: np.ndarray
+) -> tuple[dict[str, dict[str, float | None]], pd.DataFrame]:
+    """Fit every candidate on the training window and predict the test year, with scoreline checks."""
+    supported = frame["supported"].to_numpy(bool)
+    poisson_probs = model_probabilities(frame, "poisson_raw")
+    columns: dict[str, np.ndarray] = {}
+    fits: dict[str, dict[str, float | None]] = {}
+    raw_scoreline = scoreline_log_loss(matrices, supported, frame["home_score"].to_numpy(int), frame["away_score"].to_numpy(int))
+    columns["scoreline_ll_poisson_raw"] = raw_scoreline
+    for spec in CANDIDATES:
+        fitted = fit_candidate(spec, train, poisson_train)
+        probs = fitted.predict(frame["elo_diff"].to_numpy(float), frame["neutral"].to_numpy(bool), poisson_probs)
+        for column, cls in enumerate(CLASSES):
+            columns[f"{spec.name}_{cls}"] = probs[:, column]
+        served = served_scoreline(matrices, supported & np.isfinite(probs).all(axis=1), probs, frame["home_score"].to_numpy(int), frame["away_score"].to_numpy(int))
+        columns[f"scoreline_ll_{spec.name}"], columns[f"marginal_gap_{spec.name}"] = served.log_loss, served.marginal_gap
+        fits[spec.name] = {
+            "home_advantage": fitted.draw_model.home_advantage,
+            "draw_param": fitted.draw_model.draw_param,
+            "scale": fitted.draw_model.scale,
+            "blend_weight": fitted.blend_weight,
+        }
+    return fits, pd.DataFrame(columns, index=frame.index)
+
+
+def _raw_cache_path(cache_dir: Path, subset: pd.DataFrame, year: int, refit_days: int) -> Path:
+    """Cache file keyed by everything the raw output depends on, so a stale file is never reused."""
+    digest = hashlib.sha256(
+        repr(
+            (
+                year,
+                refit_days,
+                DEFAULT_MAX_GOALS,
+                sorted(DEFAULT_POISSON_KWARGS.items()),
+                len(subset),
+                str(subset["date"].max()),
+                int(subset["home_score"].sum()),
+                int(subset["away_score"].sum()),
+            )
+        ).encode()
+    ).hexdigest()[:16]
+    return Path(cache_dir) / f"raw_poisson_{year}_refit{refit_days}_{digest}.pkl"
+
+
+def _raw_job(job: tuple[pd.DataFrame, int, Path | None], refit_days: int) -> RawYear:
+    subset, year, cache_dir = job
+    if cache_dir is None:
+        return raw_poisson_year(subset, year, refit_days=refit_days)
+    path = _raw_cache_path(cache_dir, subset, year, refit_days)
+    if path.exists():
+        with path.open("rb") as handle:
+            return pickle.load(handle)
+    raw = raw_poisson_year(subset, year, refit_days=refit_days)
+    _atomic_write(path, pickle.dumps(raw))
+    return raw
 
 
 def log_loss_1x2_per_game(probs_hda: np.ndarray, outcomes: Sequence[str], *, eps: float = LOG_LOSS_EPS) -> np.ndarray:
@@ -483,13 +536,40 @@ def compare(frame: pd.DataFrame, model: str, baseline: str, *, n_boot: int, seed
     return rows
 
 
-def scope_report(frame: pd.DataFrame, *, n_boot: int, seed: int) -> dict[str, Any]:
+def _scoreline_report(frame: pd.DataFrame, models: Sequence[str], *, n_boot: int, seed: int) -> dict[str, Any]:
+    """Scoreline log loss of the raw Poisson matrix and of each reported candidate's rescaled matrix, on identical rows."""
+    columns = {m: f"scoreline_ll_{m}" for m in ["poisson_raw", *[c for c in models if c in CANDIDATE_NAMES]]}
+    rows = frame[list(columns.values())].notna().all(axis=1).to_numpy()
+    subset = frame[rows]
+    blocks = subset["date"].to_numpy()
+    raw_loss = subset[columns["poisson_raw"]].to_numpy(float)
+    out: dict[str, Any] = {}
+    for model, column in columns.items():
+        loss = subset[column].to_numpy(float)
+        gap = subset[f"marginal_gap_{model}"].max() if model != "poisson_raw" else None
+        vs_raw = None
+        if model != "poisson_raw":
+            vs_raw = asdict(paired_bootstrap_diff(loss, raw_loss, n_boot=n_boot, seed=seed, block_ids=blocks))
+        out[model] = {"n": int(rows.sum()), "mean_log_loss": float(loss.mean()), "max_marginal_gap": None if gap is None else float(gap), "vs_raw": vs_raw}
+    return out
+
+
+def scope_report(frame: pd.DataFrame, *, models: Sequence[str], comparisons: Sequence[tuple[str, str]], n_boot: int, seed: int) -> dict[str, Any]:
     outcomes = frame["outcome"].tolist()
     return {
         "n": len(frame),
-        "metrics": {m: point_metrics(model_probabilities(frame, m), outcomes) for m in MODELS},
-        "comparisons": [row for a, b in COMPARISONS for row in compare(frame, a, b, n_boot=n_boot, seed=seed)],
+        "metrics": {m: point_metrics(model_probabilities(frame, m), outcomes) for m in models},
+        "comparisons": [row for a, b in comparisons for row in compare(frame, a, b, n_boot=n_boot, seed=seed)],
+        "scorelines": _scoreline_report(frame, models, n_boot=n_boot, seed=seed),
     }
+
+
+def reported_models(candidates: Sequence[str]) -> tuple[str, ...]:
+    return (*BASE_MODELS, *candidates)
+
+
+def reported_comparisons(candidates: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    return (*COMPARISONS, *[(c, b) for c in candidates for b in ("poisson_raw", "elo_only", "base_rate")])
 
 
 def run_backtest(
@@ -501,23 +581,54 @@ def run_backtest(
     n_boot: int = 2000,
     seed: int = 0,
     map_fn: Callable[..., Any] = map,
+    raw_cache_dir: Path | None = None,
+    report_years: tuple[int, int] | None = None,
+    candidates: Sequence[str] = CANDIDATE_NAMES,
+    select: bool = False,
 ) -> dict[str, Any]:
-    """Full report: the data audit, per-fold parameters, pooled and per-year scores."""
+    """Full report: the data audit, per-fold parameters, pooled and per-year scores.
+
+    Every year in the test range is predicted, but only ``report_years`` (inclusive) is
+    scored and reported, so a development run can leave the held-out years unread.
+    ``select`` runs the candidate selection on the reported rows and refuses to look at any
+    year after :data:`SELECTION_LAST_YEAR`. ``candidates`` limits which candidate models are reported.
+    """
     frame = add_pre_match_elo(matches.frame)
     last_complete = int(frame["year"].max()) - 1
     earliest = int(frame["year"].min()) + window_years + 1
     test_years = list(range(max(first_test_year, earliest), last_complete + 1))
     if not test_years:
         raise ValueError("no complete test year with enough earlier history")
-    predictions, folds = walk_forward(frame, test_years, window_years=window_years, refit_days=refit_days, map_fn=map_fn)
-    scored = predictions[predictions["supported"]].reset_index(drop=True)
-    in_test = frame[frame["year"].isin(test_years)]
-    return {
+    first_report, last_report = report_years or (test_years[0], test_years[-1])
+    if select and last_report > SELECTION_LAST_YEAR:
+        raise ValueError(f"candidate selection may only use years up to {SELECTION_LAST_YEAR}, not {last_report}")
+    unknown = sorted(set(candidates) - set(CANDIDATE_NAMES))
+    if unknown:
+        raise ValueError(f"unknown candidates {unknown}")
+    predictions, folds = walk_forward(
+        frame, test_years, window_years=window_years, refit_days=refit_days, map_fn=map_fn, raw_cache_dir=raw_cache_dir
+    )
+    reported = predictions[predictions["year"].between(first_report, last_report)]
+    scored = reported[reported["supported"]].reset_index(drop=True)
+    in_test = frame[frame["year"].isin(range(first_report, last_report + 1))]
+    models, comparisons = reported_models(candidates), reported_comparisons(candidates)
+    selection = None
+    if select:
+        chosen = select_candidate(scored, n_boot=n_boot, seed=seed)
+        selection = {
+            "best": chosen.best,
+            "chosen": chosen.chosen,
+            "pooled_brier": chosen.pooled_brier,
+            "versus_best": {name: asdict(diff) for name, diff in chosen.versus_best.items()},
+        }
+    scope = {"models": models, "comparisons": comparisons, "n_boot": n_boot, "seed": seed}
+    report = {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "source": {"url": DATA_URL, "license": DATA_LICENSE},
         "config": {
             "first_test_year": test_years[0],
             "last_test_year": test_years[-1],
+            "report_years": [first_report, last_report],
             "window_years": window_years,
             "refit_days": refit_days,
             "poisson_kwargs": dict(DEFAULT_POISSON_KWARGS),
@@ -527,6 +638,8 @@ def run_backtest(
             "n_boot": n_boot,
             "seed": seed,
             "primary_metric": PRIMARY_METRIC,
+            "models": list(models),
+            "selection_last_year": SELECTION_LAST_YEAR,
         },
         "data": {
             "rows_in_csv": matches.n_rows,
@@ -536,14 +649,17 @@ def run_backtest(
             "last_date": frame["date"].max().date().isoformat(),
             "test_year_matches": len(in_test),
             "test_year_neutral": int(in_test["neutral"].sum()),
-            "test_year_unsupported_excluded": int((~predictions["supported"]).sum()),
+            "test_year_unsupported_excluded": int((~reported["supported"]).sum()),
             "scored_in_backtest": len(scored),
         },
         "labels": LABELS,
-        "folds": [asdict(f) for f in folds],
-        "pooled": scope_report(scored, n_boot=n_boot, seed=seed),
-        "by_year": {str(y): scope_report(g.reset_index(drop=True), n_boot=n_boot, seed=seed) for y, g in scored.groupby("year")},
+        "folds": [asdict(f) for f in folds if first_report <= f.year <= last_report],
+        "pooled": scope_report(scored, **scope),
+        "by_year": {str(y): scope_report(g.reset_index(drop=True), **scope) for y, g in scored.groupby("year")},
     }
+    if selection is not None:
+        report["selection"] = selection
+    return report
 
 
 def _row(cells: Sequence[str]) -> str:
@@ -571,30 +687,62 @@ def _comparison_table(rows: Sequence[Mapping[str, Any]]) -> list[str]:
     return lines
 
 
+def _fmt_diff(r: Mapping[str, Any]) -> str:
+    return f"{r['mean_diff']:+.4f} [{r['ci_low']:+.4f}, {r['ci_high']:+.4f}]"
+
+
+def _scoreline_table(scorelines: Mapping[str, Any]) -> list[str]:
+    lines = [_row(["served matrix", "n", "scoreline log loss", "vs raw Poisson matrix", "max 1X2 gap to target"]), _row(["---"] * 5)]
+    for name, s in scorelines.items():
+        diff = _fmt_diff(s["vs_raw"]) if s["vs_raw"] else "reference"
+        gap = f"{s['max_marginal_gap']:.1e}" if s["max_marginal_gap"] is not None else "n/a"
+        lines.append(_row([LABELS[name], str(s["n"]), f"{s['mean_log_loss']:.4f}", diff, gap]))
+    return lines
+
+
+def _draw_table(metrics: Mapping[str, Mapping[str, Any]], models: Sequence[str]) -> list[str]:
+    observed = metrics[models[0]]["calibration"]
+    lines = [_row(["model", "mean P(H)", "mean P(D)", "mean P(A)"]), _row(["---"] * 4)]
+    lines.append(_row(["observed", *[f"{observed[c]['frequency']:.3f}" for c in CLASSES]]))
+    for name in models:
+        lines.append(_row([LABELS[name], *[f"{metrics[name]['calibration'][c]['mean_predicted']:.3f}" for c in CLASSES]]))
+    return lines
+
+
 def render_markdown(report: Mapping[str, Any]) -> str:
     cfg, data, pooled = report["config"], report["data"], report["pooled"]
+    models = cfg["models"]
     out = [
         f"# Soccer walk-forward validation, test years {cfg['first_test_year']} to {cfg['last_test_year']}",
         "",
         f"Source: {report['source']['url']} ({report['source']['license']}).",
-        f"{data['test_year_matches']} matches in the test years, {data['scored_in_backtest']} scored "
+        f"Predicted years {cfg['first_test_year']} to {cfg['last_test_year']}, reported years {cfg['report_years'][0]} to {cfg['report_years'][1]}, refit every {cfg['refit_days']} day(s).",
+        f"{data['test_year_matches']} matches in the reported years, {data['scored_in_backtest']} scored "
         f"({data['test_year_unsupported_excluded']} excluded: a team had fewer than {MIN_SUPPORTED_MATCHES} matches in the last {cfg['poisson_kwargs']['years_window']} years).",
         "",
         f"## Pooled, n={pooled['n']}",
         "",
         *_metrics_table(pooled["metrics"]),
         "",
+        "## Mean predicted 1X2 against observed, pooled",
+        "",
+        *_draw_table(pooled["metrics"], models),
+        "",
         "## Paired bootstrap, pooled (negative mean diff = model better; blocks = match dates)",
         "",
         *_comparison_table(pooled["comparisons"]),
         "",
+        "## Scoreline coherence, pooled (matrix rescaled to the served 1X2 by class ratios)",
+        "",
+        *_scoreline_table(pooled["scorelines"]),
+        "",
         "## By year (Brier / RPS / log loss)",
         "",
-        _row(["year", "n", *[LABELS[m] for m in MODELS]]),
-        _row(["---"] * (2 + len(MODELS))),
+        _row(["year", "n", *[LABELS[m] for m in models]]),
+        _row(["---"] * (2 + len(models))),
     ]
     for year, scope in report["by_year"].items():
-        cells = [f"{scope['metrics'][m]['brier']:.4f} / {scope['metrics'][m]['rps']:.4f} / {scope['metrics'][m]['log_loss']:.4f}" for m in MODELS]
+        cells = [f"{scope['metrics'][m]['brier']:.4f} / {scope['metrics'][m]['rps']:.4f} / {scope['metrics'][m]['log_loss']:.4f}" for m in models]
         out.append(_row([year, str(scope["n"]), *cells]))
     out += ["", f"## Per-year verdict on {PRIMARY_METRIC}", "", _row(["year", "model", "vs", "mean diff", "95% CI", "verdict"]), _row(["---"] * 6)]
     for year, scope in report["by_year"].items():
@@ -606,4 +754,19 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         out.append(
             _row([str(f["year"]), f"{f['rho']:.4f}", f"{f['temperature']:.3f}", f"{f['calibration_years'][0]}-{f['calibration_years'][-1]}", str(f["n_calibration_matches"]), f"{f['draw_prob_at_parity']:.3f}"])
         )
+    candidate_names = [m for m in models if m in CANDIDATE_NAMES]
+    if candidate_names:
+        out += ["", "## Candidate parameters per fold", "", _row(["year", "model", "home advantage (Elo)", "draw param", "scale", "blend weight on Elo"]), _row(["---"] * 6)]
+        for f in report["folds"]:
+            for name in candidate_names:
+                p = f["candidates"][name]
+                weight = "n/a" if p["blend_weight"] is None else f"{p['blend_weight']:.3f}"
+                out.append(_row([str(f["year"]), LABELS[name], f"{p['home_advantage']:.1f}", f"{p['draw_param']:.3f}", f"{p['scale']:.3f}", weight]))
+    selection = report.get("selection")
+    if selection:
+        out += ["", "## Candidate selection (selection years only)", "", _row(["model", "pooled Brier", "Brier minus best (95% CI)"]), _row(["---"] * 3)]
+        for name, brier in sorted(selection["pooled_brier"].items(), key=lambda kv: kv[1]):
+            diff = selection["versus_best"].get(name)
+            out.append(_row([LABELS[name], f"{brier:.4f}", "best" if diff is None else _fmt_diff(diff)]))
+        out += ["", f"Best by Brier: {LABELS[selection['best']]}. Chosen (simplest not significantly worse): **{LABELS[selection['chosen']]}**."]
     return "\n".join(out) + "\n"
