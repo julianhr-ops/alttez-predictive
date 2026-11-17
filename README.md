@@ -21,7 +21,7 @@ Every number below is copied from a validation report, and each report names the
 
 ### NBA, walk-forward, test seasons 2020-21 to 2025-26
 
-7,776 games, 7,764 with a closing line. Source is [docs/nba.md](docs/nba.md), reproduced with `python scripts/nba_validate.py`.
+7,776 games were played in the test seasons and 7,764 of them have a closing line. The table is scored on those 7,764 games so every row sees the same games. Source is [docs/nba.md](docs/nba.md), reproduced with `python scripts/nba_validate.py`.
 
 | model | Brier | log loss | accuracy | ECE |
 | --- | --- | --- | --- | --- |
@@ -32,7 +32,7 @@ Every number below is copied from a validation report, and each report names the
 | market close | 0.2067 | 0.5995 | 0.678 | 0.012 |
 | Elo + market blend | 0.2070 | 0.6004 | 0.679 | 0.010 |
 
-The paired bootstrap, by game date, pooled over the six test seasons, says MOV Elo beats the constant rate and vanilla Elo. It does not beat the market close in any season, and pooled log loss is +0.025 worse with a CI that excludes 0. The blend gives the Elo logit a coefficient of about zero and the market logit about 1.03, so it reproduces the market. Its Brier difference against the market is +0.0004 [-0.0000, +0.0008] and its log loss difference is +0.0009 [+0.0000, +0.0017].
+The paired bootstrap, by game date, pooled over the six test seasons, says MOV Elo beats the constant rate and vanilla Elo. Against vanilla Elo its log loss difference is -0.0055 [-0.0078, -0.0032], a gain of about 0.005. It does not beat the market close in any season. Pooled, its log loss is +0.0245 [+0.0202, +0.0288] worse than the market. The blend gives the Elo logit a coefficient of about zero and the market logit about 1.03, so it reproduces the market. Its Brier difference against the market is +0.0004 [-0.0000, +0.0008] and its log loss difference is +0.0009 [+0.0000, +0.0017].
 
 ### Soccer 1X2, walk-forward, test years 2018 to 2025
 
