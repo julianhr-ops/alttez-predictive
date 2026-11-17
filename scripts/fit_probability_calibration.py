@@ -73,7 +73,7 @@ def _split_holdout(triplets: np.ndarray, outcomes: list[str], frac: float, seed:
     order = rng.permutation(n)
     cut = max(1, int(round(n * (1.0 - frac))))
     tr_idx, va_idx = order[:cut], order[cut:]
-    if va_idx.size == 0:  # dataset minusculo: valida sobre train.
+    if va_idx.size == 0:
         va_idx = tr_idx
     tr_y = [outcomes[i] for i in tr_idx]
     va_y = [outcomes[i] for i in va_idx]
@@ -214,7 +214,6 @@ def _fit_isotonic_payload(triplets: np.ndarray, outcomes: list[str], args) -> di
     }
 
     if chosen == "isotonic":
-        # Reajusta sobre TODO el set para el artefacto final (mas senal).
         full_iso = fit_isotonic(triplets, outcomes, class_floor=args.class_floor)
         payload = full_iso.to_payload()
     else:

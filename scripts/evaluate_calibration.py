@@ -70,7 +70,7 @@ def load_closed_predictions(*, database_url: str | None, lookback_days: int) -> 
     params = {"lookback_start": (datetime.now(timezone.utc).date() - pd.Timedelta(days=lookback_days)).isoformat()}
     try:
         frame = read_dataframe(closed_predictions_query(include_raw=True), params=params, database_url=database_url)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         LOGGER.warning(
             "No se pudieron leer las probabilidades crudas (%s); aplica la migracion 014. "
             "Se usan solo las probabilidades almacenadas (ya calibradas).",

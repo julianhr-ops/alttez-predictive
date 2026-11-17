@@ -19,7 +19,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from alttez.evaluation import soccer_backtest as sb  # noqa: E402
+from alttez.evaluation import soccer_backtest as sb
 
 DEFAULT_CACHE_DIR = _REPO_ROOT / "artifacts" / "soccer"
 

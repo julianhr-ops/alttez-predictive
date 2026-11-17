@@ -41,18 +41,17 @@ import pandas as pd
 from scipy.optimize import minimize_scalar
 from scipy.stats import poisson
 
-# Permite ejecutar el script directamente (python scripts/fit_dixon_coles_rho.py).
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from alttez.api.settings import load_local_env  # noqa: E402
-from alttez.experiments.tournament_oracle import (  # noqa: E402
+from alttez.api.settings import load_local_env
+from alttez.experiments.tournament_oracle import (
     DEFAULT_DIXON_COLES_RHO,
     DIXON_COLES_RHO_MAX,
     DIXON_COLES_RHO_MIN,
 )
-from alttez.ingestion.international import InternationalLoader  # noqa: E402
+from alttez.ingestion.international import InternationalLoader
 
 DEFAULT_OUTPUT_PATH = _REPO_ROOT / "artifacts" / "dixon_coles" / "active.json"
 DEFAULT_MIN_MATCHES = 5
@@ -153,8 +152,6 @@ def dixon_coles_log_likelihood(rho: float, samples: np.ndarray) -> float:
         base = poisson.pmf(hg_i, lambda_h) * poisson.pmf(ag_i, lambda_a)
         tau = _tau(hg_i, ag_i, lambda_h, lambda_a, rho)
         joint = base * tau
-        # tau puede volverse <= 0 para rho extremos; penaliza para mantener la
-        # busqueda dentro de la region valida.
         if joint <= 0:
             return -np.inf
         total += float(np.log(joint))
