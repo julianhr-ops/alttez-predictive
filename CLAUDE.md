@@ -71,11 +71,11 @@ Data flows: **ingestion → features → inference (router) → reports/dashboar
 
 - **`alttez/evaluation/`** — the shared measurement code. `paired.py` has `paired_bootstrap_diff` and per-game losses, `baselines.py` the uniform, base-rate and Elo-only 1X2 baselines, `soccer_backtest.py` the walk-forward backtest run by `scripts/validate_soccer.py`. Any new model claim should be compared with a baseline through this package.
 
-- **`alttez/nba/`** — NBA predictions on free data. `data.py` (hoopR loaders, ESPN parser, cache), `model.py` (MOV Elo, market model, blend, calibrators), `evaluate.py` (walk-forward validation, `scripts/nba_validate.py`), `predict.py` (upcoming games, freshness gate), `store.py` (`public.nba_predictions`, insert once, grade later). Tests must not use the network. See `docs/nba.md`.
+- **`alttez/nba/`** — NBA predictions on free data. `data.py` (hoopR loaders, ESPN parser, cache), `model.py` (MOV Elo, market model, blend, calibrators), `evaluate.py` (walk-forward validation, `scripts/nba_validate.py`), `predict.py` (upcoming games, freshness gate), `store.py` (`public.nba_predictions`, key game/version/served model: Elo row first, blend row added if a line appears later, never rewritten, graded later). Tests must not use the network. See `docs/nba.md`.
 
 - **`alttez/api/`** — `db.py` (`get_engine`, SQLAlchemy/psycopg to `SUPABASE_DB_URL`), `settings.py` (`.env` loader), `migrations.py`.
 
-- **`sql/supabase/migrations/`** — numbered, forward-only migration chain (`001...015`). Adding schema means appending the next numbered file; `apply_supabase_migrations.py` validates ordering in CI.
+- **`sql/supabase/migrations/`** — numbered, forward-only migration chain (`001...016`). Adding schema means appending the next numbered file; `apply_supabase_migrations.py` validates ordering in CI.
 
 - **`scripts/`** — operational entry points (PowerShell `.ps1` orchestrators + Python CLIs for migrations, challenger cycle, model activation/rollback, briefs, smoke tests).
 

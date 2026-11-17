@@ -13,7 +13,7 @@ ALTTEZ produces win probabilities for international football (1X2 and scorelines
 - **Uncertainty on every comparison.** `alttez/evaluation/paired.py` resamples per-game loss differences, in blocks of game dates when games share a day, and reports a 95% interval. A difference counts only when the interval excludes 0.
 - **The legacy soccer model lost to plain Elo, and the fix was measured before it was served.** The audit found that the original Poisson champion is worse than an Elo-only baseline on Brier, RPS and log loss, pooled and in 7 of 8 test years, with a draw bias that one temperature cannot fix. The harness then scored eight candidate replacements. Selection used 2018 to 2022 only, and 2023 to 2025 were kept as an untouched final test. The chosen Elo ordinal rule beat the Poisson champion there by Brier -0.0728 [-0.0836, -0.0623] on 3,191 matches, and it is now served by default through `alttez/inference/serving_policy.py`. The Poisson score matrix is rescaled to the Elo 1X2 so scorelines stay coherent, and `ALTTEZ_SERVING_POLICY=off` restores plain Poisson. The same report says the rule is statistically equivalent to plain Elo, so the win is mostly "use Elo" ([docs/validation_soccer.md](docs/validation_soccer.md)).
 - **NBA Elo does not beat the closing line.** Elo beats the constant home rate and vanilla Elo, but it does not beat the market close in any test season. A blend of Elo and the market line only reproduces the line. So the served prediction defers to the market-based blend whenever a line exists, and uses calibrated Elo only for games with no line ([docs/nba.md](docs/nba.md)).
-- **Leakage and duplication fixed with tests.** The audit found and fixed a calibration fitted on one shape and applied to another, duplicate prediction rows that inflated the learning data, an Elo K factor that treated qualifiers as finals, and a registry failure that silently served the fallback ([docs/model-history.md](docs/model-history.md)). NBA predictions are keyed on game and model version, written while the game is scheduled and never rewritten after tip-off.
+- **Leakage and duplication fixed with tests.** The audit found and fixed a calibration fitted on one shape and applied to another, duplicate prediction rows that inflated the learning data, an Elo K factor that treated qualifiers as finals, and a registry failure that silently served the fallback ([docs/model-history.md](docs/model-history.md)). NBA predictions are keyed on game, model version and served model, written while the game is scheduled and never rewritten after tip-off. A line that appears after the first prediction adds a blend row beside the Elo row, and the scoreboard counts each game once.
 
 ## Results
 
@@ -86,7 +86,7 @@ flowchart LR
 ## Tech stack
 
 - Python 3.13 with pandas, NumPy, SciPy, scikit-learn, XGBoost and PyMC for the models, and Optuna for tuning.
-- PostgreSQL on Supabase through SQLAlchemy and psycopg, with 15 forward-only SQL migrations in `sql/supabase/migrations/`.
+- PostgreSQL on Supabase through SQLAlchemy and psycopg, with 16 forward-only SQL migrations in `sql/supabase/migrations/`.
 - Streamlit and Altair for the dashboard.
 - `unittest` for tests, Ruff for lint, and GitHub Actions for CI and the scheduled daily run.
 - PowerShell for the daily orchestrator, `scripts/run_daily_process.ps1`.
@@ -139,7 +139,7 @@ alttez/
   reports/      daily brief, tournament review, NBA digest, Telegram delivery
   training/     trainer, tuner, champion and challenger cycle
 scripts/        command-line entry points and the PowerShell daily orchestrator
-sql/supabase/   numbered migrations, 001 to 015
+sql/supabase/   numbered migrations, 001 to 016
 tests/          unittest suite and fixtures
 docs/           architecture, validation reports, model history, provider stack, notes in docs/ai
 storage/        tournament review state and World Cup 2026 configuration

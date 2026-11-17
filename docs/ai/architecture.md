@@ -70,7 +70,7 @@ soportada, metricas, artefacto y politica de promocion son controles separados.
 ## Persistencia
 
 `api/db.py` resuelve la URL de base. `api/migrations.py` descubre y aplica SQL. Las
-migraciones actuales van de `001` a `015`; verificar siempre el directorio porque
+migraciones actuales van de `001` a `016`; verificar siempre el directorio porque
 la cadena seguira creciendo.
 
 `operations/prediction_memory.py` guarda corridas y predicciones, cierra
@@ -81,8 +81,8 @@ evaluaciones, calcula monitoreo y administra versiones activas.
 `alttez/nba/data.py` descarga y cachea los datos gratuitos (hoopR y ESPN) sin red
 en las pruebas. `model.py` ajusta Elo con margen de victoria, el modelo de mercado y
 la mezcla; `evaluate.py` valida por temporada contra baselines; `predict.py` sirve
-las predicciones con una compuerta de datos frescos; `store.py` escribe una sola vez
-en `public.nba_predictions` y califica despues del partido. Politica de modelo
+las predicciones con una compuerta de datos frescos; `store.py` escribe cada fila una
+sola vez en `public.nba_predictions` (una por partido y modelo servido: Elo, y el mezclado si aparece una linea despues) y califica despues del partido. Politica de modelo
 servido y codigos de salida: `docs/nba.md`.
 
 ## Presentacion y entrega

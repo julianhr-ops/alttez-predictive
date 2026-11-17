@@ -85,7 +85,7 @@ Validation evidence is in [validation_soccer.md](validation_soccer.md). The hist
 
 ## NBA
 
-`alttez/nba/data.py` downloads the hoopR schedule and closing lines, caches them under `artifacts/nba/`, and parses the ESPN scoreboard. Tests never use the network. `model.py` fits the MOV Elo, the market model and the blend. `evaluate.py` runs the walk-forward validation. `predict.py` serves a prediction per upcoming game, and `store.py` writes it once to `public.nba_predictions` and grades it after the game.
+`alttez/nba/data.py` downloads the hoopR schedule and closing lines, caches them under `artifacts/nba/`, and parses the ESPN scoreboard. Tests never use the network. `model.py` fits the MOV Elo, the market model and the blend. `evaluate.py` runs the walk-forward validation. `predict.py` serves a prediction per upcoming game, and `store.py` writes each row once to `public.nba_predictions` (an Elo row, plus a blend row if a line appears later) and grades both after the game.
 
 The freshness gate, the served-model policy and the exit codes are in [nba.md](nba.md).
 
