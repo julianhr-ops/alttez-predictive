@@ -108,22 +108,25 @@ python -m pip install -r requirements.txt
 python -m unittest discover -s tests
 python scripts/nba_validate.py
 python scripts/nba_daily.py --dry-run
+python scripts/nba_daily.py --dry-run --html out.html
 python scripts/validate_soccer.py --help
 ```
 
 - `unittest discover` runs the offline test suite. Tests never use the network.
 - `nba_validate.py` downloads the hoopR files into `artifacts/nba/`, runs the NBA walk-forward validation, writes `artifacts/nba/validation.json` and prints the markdown report.
-- `nba_daily.py --dry-run` predicts the games on the ESPN scoreboard and prints the digest without opening a database. It refuses to predict and exits with code 3 when the data is stale.
+- `nba_daily.py --dry-run` predicts the games on the ESPN scoreboard and prints the digest without opening a database. It refuses to predict and exits with code 3 when the data is stale. Add `--html out.html` to also write the digest as a self-contained HTML page.
 - `validate_soccer.py` runs the soccer backtest. A full run takes tens of minutes, so start with `--help`.
 
 The database, the dashboard and the daily process need configuration. `.env.example` is the template, [docs/provider-stack.md](docs/provider-stack.md) covers the providers, and [docs/ai/workflows.md](docs/ai/workflows.md) covers the local workflows (in Spanish).
+
+To browse predictions, start the dashboard with `python -m streamlit run alttez/dashboard/app.py` and pick `NBA` in the sidebar. It needs `SUPABASE_DB_URL` for data and shows a no-database message with the dry-run command when the variable is missing.
 
 ## Project layout
 
 ```text
 alttez/
   api/          database engine, settings, migration runner
-  dashboard/    Streamlit application
+  dashboard/    Streamlit application, with the NBA view in nba_view.py
   evaluation/   baselines, paired bootstrap, metrics, soccer backtest
   experiments/  tournament oracle and World Cup research code
   features/     Elo, Poisson, Klement features, preprocessing
@@ -177,4 +180,4 @@ MIT, see [LICENSE.txt](LICENSE.txt). The code began as a reshaping of [ProphitBe
 
 ## Resumen en español
 
-ALTTEZ calcula probabilidades de victoria para fútbol internacional (1X2 y marcadores) y para partidos de la NBA usando solo datos públicos y gratuitos. Cada modelo se valida con el método walk-forward, contra modelos de referencia sobre los mismos partidos y con intervalos de confianza de bootstrap pareado. El repositorio conserva los resultados negativos. La auditoría mostró que el campeón Poisson de fútbol era peor que un Elo simple. Se evaluaron ocho reglas candidatas, se eligió una con los años 2018 a 2022 y se probó en 2023 a 2025, que no se usaron para elegir. La regla ganadora, un Elo ordinal con modelo de empates, mejora al campeón Poisson con una diferencia de Brier de -0.0728 [-0.0836, -0.0623] sobre 3,191 partidos, y hoy se sirve por defecto (`ALTTEZ_SERVING_POLICY=off` devuelve el Poisson original). Frente a un Elo simple la diferencia es estadísticamente equivalente. El Elo de la NBA no supera la línea de cierre del mercado, así que cuando existe una línea el modelo servido se apoya en el mercado. Para probarlo, instale Python 3.13 o superior, cree un entorno virtual, ejecute `pip install -r requirements.txt` y luego `python -m unittest discover -s tests`. Las cifras están en `docs/nba.md` y `docs/validation_soccer.md`, y la guía local en español está en `docs/ai/workflows.md`. Este proyecto es de investigación y no constituye asesoría de apuestas ni financiera.
+ALTTEZ calcula probabilidades de victoria para fútbol internacional (1X2 y marcadores) y para partidos de la NBA usando solo datos públicos y gratuitos. Cada modelo se valida con el método walk-forward, contra modelos de referencia sobre los mismos partidos y con intervalos de confianza de bootstrap pareado. El repositorio conserva los resultados negativos. La auditoría mostró que el campeón Poisson de fútbol era peor que un Elo simple. Se evaluaron ocho reglas candidatas, se eligió una con los años 2018 a 2022 y se probó en 2023 a 2025, que no se usaron para elegir. La regla ganadora, un Elo ordinal con modelo de empates, mejora al campeón Poisson con una diferencia de Brier de -0.0728 [-0.0836, -0.0623] sobre 3,191 partidos, y hoy se sirve por defecto (`ALTTEZ_SERVING_POLICY=off` devuelve el Poisson original). Frente a un Elo simple la diferencia es estadísticamente equivalente. El Elo de la NBA no supera la línea de cierre del mercado, así que cuando existe una línea el modelo servido se apoya en el mercado. Para probarlo, instale Python 3.13 o superior, cree un entorno virtual, ejecute `pip install -r requirements.txt` y luego `python -m unittest discover -s tests`. Para ver las predicciones NBA sin base de datos, ejecute `python scripts/nba_daily.py --dry-run --html out.html`, que genera un resumen HTML autocontenido. El panel (`python -m streamlit run alttez/dashboard/app.py`) tiene una opción NBA en la barra lateral. Necesita `SUPABASE_DB_URL` para mostrar datos y, sin ella, muestra un aviso claro. Las cifras están en `docs/nba.md` y `docs/validation_soccer.md`, y la guía local en español está en `docs/ai/workflows.md`. Este proyecto es de investigación y no constituye asesoría de apuestas ni financiera.
