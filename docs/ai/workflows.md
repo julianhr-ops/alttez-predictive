@@ -3,13 +3,13 @@
 ## Preparacion local
 
 ```bash
-python -m venv .venv
+python -m venv venv
 python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Activar antes el entorno (`source .venv/bin/activate` en Linux y macOS,
-`.venv\Scripts\Activate.ps1` en Windows). Se requiere Python 3.13 o superior.
+Activar antes el entorno (`source venv/bin/activate` en Linux y macOS,
+`venv\Scripts\Activate.ps1` en Windows). Se requiere Python 3.13 o superior.
 
 Completar solo las variables necesarias. `alttez.api.settings.load_local_env`
 carga `.env`. Nunca versionar ese archivo.

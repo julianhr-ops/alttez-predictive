@@ -10,7 +10,7 @@ Work happens on feature branches and a person merges into `main`. Verify with `g
 
 ## Environment & commands
 
-The code runs on Linux, macOS and Windows with Python 3.13 or newer (`requires-python` in `pyproject.toml`; CI uses 3.13 on Linux). Create a venv (`python -m venv .venv`), activate it, and run `pip install -r requirements.txt`. The commands below use the activated `python`; the `.ps1` orchestrators need PowerShell. `.env` is auto-loaded at runtime via `alttez.api.settings.load_local_env` — do not assume shell-exported vars.
+The code runs on Linux, macOS and Windows with Python 3.13 or newer (`requires-python` in `pyproject.toml`; CI uses 3.13 on Linux). Create a venv (`python -m venv venv`), activate it, and run `pip install -r requirements.txt`. The commands below use the activated `python`; the `.ps1` orchestrators need PowerShell. `.env` is auto-loaded at runtime via `alttez.api.settings.load_local_env` — do not assume shell-exported vars.
 
 ```powershell
 # Run all tests (this repo uses unittest, NOT pytest)
