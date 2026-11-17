@@ -1175,7 +1175,7 @@ def _sync_selected_date(target_date, reason: str = "manual") -> dict:
     try:
         with st.spinner("Sincronizando agenda internacional desde el stack live..."):
             result = ingest_live_matches_for_date(pd.to_datetime(target_date).date())
-    except Exception as exc:  # noqa: BLE001 - never let live sync crash the dashboard shell.
+    except Exception as exc:
         result = {
             "status": "error",
             "provider_used": None,
@@ -1298,7 +1298,7 @@ def _select_match_from_agenda(
                     tournament_mode=tournament_mode,
                 )
                 _clear_analysis_feedback()
-            except Exception as exc:  # noqa: BLE001 - keep dashboard responsive when a fixture lacks support.
+            except Exception as exc:
                 st.session_state.pop("analysis_result", None)
                 st.session_state["analysis_error"] = str(exc)
                 st.session_state["analysis_error_date"] = str(fecha_simulacion)
@@ -1698,7 +1698,7 @@ def main() -> None:
                 st.session_state.pop("world_cup_2026_error", None)
                 cargar_world_cup_2026_reporte.clear()
                 st.success("La simulacion del Mundial 2026 quedo actualizada y persistida en artifacts.")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 st.session_state["world_cup_2026_error"] = str(exc)
 
         sync_result = _current_sync_result(fecha_simulacion)
@@ -1714,7 +1714,7 @@ def main() -> None:
     if dashboard_view != "Simulacion Mundial 2026":
         try:
             agenda_df = cargar_agenda(str(fecha_simulacion))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             st.error(f"No se pudo leer la agenda diaria desde Supabase: {exc}")
             return
 

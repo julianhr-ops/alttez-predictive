@@ -26,10 +26,6 @@ DEFAULT_SCHEMA = "public"
 DEFAULT_POISSON_MODEL_VERSION = "poisson-champion-v2"
 DEFAULT_POISSON_MODEL_FAMILY = "poisson"
 DEFAULT_SUPPORTED_PRODUCTION_MODEL_FAMILIES = "poisson,xgboost"
-# Piso de probabilidad para el log loss almacenado. Un piso demasiado pequeno
-# (p.ej. 1e-9 -> -log = 20.7) infla artificialmente el log loss cuando una clase
-# recibe prob ~0, haciendo que la metrica de monitoreo reporte ~3.85 cuando el
-# log loss real (piso sano) es ~0.98. 1e-3 acota el castigo a -log(1e-3)=6.9.
 DEFAULT_EVALUATION_EPSILON = 1e-3
 
 
@@ -646,7 +642,7 @@ def load_calibration_overview(*, database_url: str | None = None, lookback_days:
     if artifact_path.exists():
         try:
             artifact_meta.update(json.loads(artifact_path.read_text(encoding="utf-8")))
-        except Exception:  # noqa: BLE001 - artefacto corrupto no debe romper el panel.
+        except Exception:
             pass
 
     empty = {"models": pd.DataFrame(), "global_ece": None, "artifact": artifact_meta, "samples": 0}
@@ -670,7 +666,7 @@ def load_calibration_overview(*, database_url: str | None = None, lookback_days:
             params=params,
             database_url=database_url,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         return empty
     df = select_latest_pre_kickoff(df)
 

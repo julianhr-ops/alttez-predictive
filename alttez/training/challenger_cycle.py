@@ -55,15 +55,10 @@ DEFAULT_REPORT_DIR = Path("artifacts/model-evals")
 DEFAULT_CHALLENGER_VERSION = "xgboost-challenger-v2"
 DEFAULT_EVALUATION_MATCHES = 250
 DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE = 0.01
-# Tolerancia para el RPS: el retador debe igualar o mejorar el RPS del champion
-# (mismo espiritu que el Brier, sin exigir margen arbitrario). Empeorar el RPS por
-# encima de este epsilon lo descalifica aunque el Brier nominal mejore.
 DEFAULT_PROMOTION_RPS_TOLERANCE = 1e-9
-# Partidos minimos del holdout comun para que una mejora pueda promover al retador.
 DEFAULT_MIN_PROMOTION_MATCHES = 200
 DEFAULT_CHAMPION_REFIT_INTERVAL = 25
 DEFAULT_MAX_GOALS = 7
-# Single source of truth lives in alttez.features.klement; aliased for compatibility.
 FEATURE_COLUMNS = MODEL_FEATURE_COLUMNS
 
 
@@ -156,8 +151,6 @@ def _score_prediction_row(
         "predicted_outcome": predicted_outcome,
         "actual_outcome": actual_outcome,
         "brier": brier_score_1x2(prob_home, prob_draw, prob_away, actual_outcome),
-        # RPS respeta la ordinalidad del 1X2 (H->D->A); complementa el Brier nominal
-        # y alimenta tanto la metrica agregada como la guardia de promocion.
         "rps": ranked_probability_score(prob_home, prob_draw, prob_away, actual_outcome),
         "prob_home": prob_home,
         "prob_draw": prob_draw,
@@ -218,8 +211,6 @@ def _summarize_probability_rows(
         "accuracy_1x2": float((eval_df["predicted_outcome"] == eval_df["actual_outcome"]).mean()),
         "exact_score_hit_rate": float(eval_df["exact_hit"].mean()),
         "expected_calibration_error": expected_calibration_error(eval_df),
-        # Perdida Brier por partido (orden del holdout) para la comparacion pareada
-        # retador-vs-champion. Es metadata interna, no una metrica.
         "brier_losses": [float(value) for value in brier_1x2_per_game(probability_matrix, eval_df["actual_outcome"])],
         **summarize_regulation_points(rows),
     }
@@ -339,7 +330,7 @@ def evaluate_lambda_blend(
     """
 
     if weight_grid is None:
-        weight_grid = [round(0.1 * i, 1) for i in range(11)]  # 0.0 .. 1.0
+        weight_grid = [round(0.1 * i, 1) for i in range(11)]
 
     best: dict[str, Any] | None = None
     for weight in weight_grid:
@@ -362,9 +353,6 @@ def evaluate_lambda_blend(
 
 DEFAULT_MIN_EARLY_STOPPING_SAMPLES = 50
 
-# Recencia para el ponderado del entrenamiento XGBoost. Default 365d para paridad
-# con PoissonEngine.recency_half_life_days (features/poisson.py): el campeon y el
-# retador decaen el pasado al mismo ritmo en vez de tratar todo el historico igual.
 DEFAULT_XGB_TIME_DECAY_HALFLIFE_DAYS = 365
 XGB_TIME_DECAY_HALFLIFE_ENV = "ALTTEZ_XGB_TIME_DECAY_HALFLIFE_DAYS"
 
@@ -417,8 +405,6 @@ def _split_training_and_validation(train_df: pd.DataFrame) -> tuple[pd.DataFrame
 
     validation_size = max(10, len(ordered) // 10)
     validation_size = min(validation_size, len(ordered) - 10)
-    # Snap to a date boundary so the validation set never shares a match-day with
-    # the training core (avoids intra-day leakage into eval_set).
     split_index = snap_split_index(ordered, len(ordered) - validation_size, "date")
     if split_index <= 0 or split_index >= len(ordered):
         return ordered, None
@@ -443,8 +429,7 @@ def _build_goal_regressor(use_early_stopping: bool = True) -> XGBRegressor:
         n_jobs=-1,
     )
     if use_early_stopping:
-        # XGBoost raises if early_stopping_rounds is set without an eval_set, so the
-        # flag is only added when a disjoint validation set is available.
+        # XGBoost 3.2 raises ValueError if early_stopping_rounds is set without an eval_set.
         params["early_stopping_rounds"] = 40
     return XGBRegressor(**params)
 
@@ -454,9 +439,6 @@ def _fit_goal_models(train_df: pd.DataFrame) -> dict[str, Any]:
     use_early_stopping = validation_df is not None
     x_train = train_core[FEATURE_COLUMNS].fillna(0.0)
 
-    # Ponderado por recencia: el corte (max fecha del nucleo) pesa ~1.0; el
-    # pasado decae con half-life. sample_weight se alinea por posicion con x_train
-    # (mismo orden de filas que train_core). El eval_set queda sin ponderar.
     half_life_days = _resolve_time_decay_half_life()
     reference_date = train_core["date"].max()
     sample_weight = _compute_time_decay_weights(train_core["date"], reference_date, half_life_days)
@@ -484,7 +466,6 @@ def _fit_goal_models(train_df: pd.DataFrame) -> dict[str, Any]:
         home_model.fit(x_train, train_core["home_score"], sample_weight=sample_weight, verbose=False)
         away_model.fit(x_train, train_core["away_score"], sample_weight=sample_weight, verbose=False)
 
-    # Average gain importance across both goal models, ranked, for auditability.
     home_imp = np.asarray(getattr(home_model, "feature_importances_", np.zeros(len(FEATURE_COLUMNS))), dtype=float)
     away_imp = np.asarray(getattr(away_model, "feature_importances_", np.zeros(len(FEATURE_COLUMNS))), dtype=float)
     mean_imp = (home_imp + away_imp) / 2.0
@@ -536,10 +517,6 @@ def _evaluate_challenger(
     *,
     rho: float,
 ) -> dict[str, Any]:
-    # Holdout features in challenger_df are already causal (each row's elo_*_before,
-    # recent form and knockout weight only depend on earlier matches), so we can score
-    # the whole window in a single vectorized pass instead of rebuilding the feature
-    # state per match. The lambda values are identical to a per-row rebuild.
     ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
     feature_columns = list(artifact_bundle.get("feature_columns") or FEATURE_COLUMNS)
     x_holdout = ordered_holdout[feature_columns].fillna(0.0)
@@ -627,8 +604,6 @@ def _promotion_decision(
         return False, reason, detail
     if float(challenger_metrics["log_loss"]) > float(champion_metrics["log_loss"]) + DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE:
         return False, "Challenger mejora Brier pero deteriora Log Loss materialmente.", detail
-    # El 1X2 es ordinal; un retador que mejora el Brier nominal pero degrada el RPS
-    # esta acertando peor en la *direccion* del resultado y no es elegible.
     if (
         challenger_rps is not None
         and champion_rps is not None
@@ -766,7 +741,6 @@ def run_challenger_cycle(
     challenger_df = _build_challenger_dataset(historical_df, database_url=database_url)
     challenger_df = challenger_df.sort_values("date").reset_index(drop=True)
     eval_size = min(evaluation_matches, max(60, len(challenger_df) // 20))
-    # Snap the split to a date boundary so a single match-day never straddles train/holdout.
     split_index = snap_split_index(challenger_df, len(challenger_df) - eval_size, "date")
     split_index = min(max(split_index, 1), len(challenger_df) - 1)
     train_df = challenger_df.iloc[:split_index].copy()
@@ -790,7 +764,6 @@ def run_challenger_cycle(
     challenger_metrics = _evaluate_challenger(challenger_artifact, holdout_df, rho=config.rho)
     challenger_metrics["feature_importance"] = challenger_artifact.get("feature_importance")
 
-    # Ensemble probe: does blending champion + challenger lambdas beat either alone?
     challenger_lambdas = _xgb_lambda_stream(challenger_artifact, holdout_df)
     ensemble_metrics = evaluate_lambda_blend(champion_lambdas, challenger_lambdas, holdout_df, rho=config.rho)
 
@@ -907,15 +880,12 @@ def run_challenger_cycle(
             }
             upsert_model_version_record(engine, model_versions_table, champion_row)
             upsert_model_version_record(engine, model_versions_table, challenger_row)
-            # Persist the binary into the durable store so any environment can hydrate it.
-            # Without this the artifact only ever exists on the ephemeral training host and
-            # inference silently falls back to Poisson at brief time.
             try:
                 from alttez.operations.artifact_store import upload_artifact
 
                 upload_artifact(challenger_row["version_key"], model_artifact_path, database_url=database_url)
                 report["artifact_uploaded"] = True
-            except Exception as exc:  # noqa: BLE001 - artifact upload must not break the registry write.
+            except Exception as exc:
                 report["artifact_upload_error"] = str(exc)
                 logging.warning("artifact_upload_failed version_key=%s detail=%s", challenger_row["version_key"], exc)
             if production_status == "active":
@@ -926,7 +896,7 @@ def run_challenger_cycle(
                     activation_mode=activation_mode,
                 )
             report["registry_persisted"] = True
-    except Exception as exc:  # noqa: BLE001 - challenger evaluation should still produce the artifact.
+    except Exception as exc:
         report["registry_error"] = str(exc)
 
     report["artifact_path"] = str(report_path)

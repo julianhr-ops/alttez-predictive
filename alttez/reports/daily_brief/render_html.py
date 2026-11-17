@@ -41,7 +41,6 @@ def _prob_value(raw: Any) -> float:
         value = float(raw)
     except (TypeError, ValueError):
         return 0.0
-    # Probabilities may arrive as 0-1 or already as 0-100.
     if value <= 1.0:
         value *= 100.0
     return round(value, 1)

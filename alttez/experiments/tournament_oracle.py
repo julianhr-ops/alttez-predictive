@@ -11,19 +11,11 @@ from alttez.evaluation.regulation_points import rank_regulation_predictions, reg
 from alttez.features.poisson import PoissonEngine
 
 
-# Typical Dixon-Coles low-score dependence parameter. Negative rho lifts the
-# probability of draws and low-scoring lines that the independent Poisson product
-# systematically underestimates. Used as the strict fallback whenever the fitted
-# artifact is unavailable, so inference always boots.
 DEFAULT_DIXON_COLES_RHO = -0.13
 
-# Sane bounds for a Dixon-Coles low-score dependence parameter. The fit script
-# optimizes within [-0.3, 0.0]; the loader rejects anything outside this range.
 DIXON_COLES_RHO_MIN = -0.3
 DIXON_COLES_RHO_MAX = 0.0
 
-# Active artifact written by scripts/fit_dixon_coles_rho.py. Resolved relative to
-# the repo root (this file lives at <root>/alttez/experiments/).
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DIXON_COLES_RHO_PATH = _REPO_ROOT / "artifacts" / "dixon_coles" / "active.json"
 

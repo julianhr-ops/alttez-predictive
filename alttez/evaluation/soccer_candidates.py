@@ -21,7 +21,6 @@ from alttez.features.elo_1x2 import KINDS, DrawModel, fit_blend_weight, fit_draw
 from alttez.inference.calibration import matrix_1x2, rescale_matrix_to_triplet
 
 CLASSES = ("H", "D", "A")
-# Years up to this one choose the candidate; later years are the untouched final test.
 SELECTION_LAST_YEAR = 2022
 # Declared from the 2018-2022 selection run (docs/validation_soccer.md), before 2023-2025 was scored.
 PRIMARY_CANDIDATE = "elo_ordinal"
