@@ -1,7 +1,9 @@
 import math
 import os
+from dataclasses import dataclass
 from typing import Dict
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -122,3 +124,62 @@ class EloEngine:
         df["elo_difference"] = df["elo_home_before"] - df["elo_away_before"]
 
         return df
+
+
+@dataclass(frozen=True, slots=True)
+class EloRun:
+    """Pre-match ratings of every row plus the ratings after the last row was applied.
+
+    ``ratings`` holds only teams that appeared in the rated matches, so membership says
+    whether a team has any rating at all.
+    """
+
+    home_before: np.ndarray
+    away_before: np.ndarray
+    ratings: dict[str, float]
+
+
+def rate_matches(matches: pd.DataFrame, *, engine: EloEngine | None = None) -> EloRun:
+    """Walk ``matches`` (sorted by date) and rate them with the tournament K and home advantage.
+
+    All matches on one date see the ratings as they stood at the start of that date, and
+    their updates are applied together afterwards, so a rating never reflects a match of
+    its own date or later. Needs ``date``, ``home_team``, ``away_team``, ``neutral``,
+    ``tournament``, ``home_score`` and ``away_score``. This is the single definition shared
+    by the walk-forward backtest and live serving.
+    """
+
+    elo = engine or EloEngine(mov_enabled=False)
+    if not matches["date"].is_monotonic_increasing:
+        raise ValueError("matches must be sorted by date")
+    home = matches["home_team"].to_numpy()
+    away = matches["away_team"].to_numpy()
+    neutral = matches["neutral"].fillna(False).to_numpy(bool)
+    tournament = matches["tournament"].to_numpy()
+    home_score = matches["home_score"].to_numpy()
+    away_score = matches["away_score"].to_numpy()
+    result = np.where(home_score > away_score, 1.0, np.where(home_score < away_score, 0.0, 0.5))
+    dates = matches["date"].to_numpy()
+
+    ratings: dict[str, float] = {}
+    home_before = np.empty(len(matches))
+    away_before = np.empty(len(matches))
+    start = 0
+    while start < len(matches):
+        stop = start
+        while stop < len(matches) and dates[stop] == dates[start]:
+            stop += 1
+        pending: list[tuple[str, float]] = []
+        for i in range(start, stop):
+            h = ratings.get(home[i], elo.base_rating)
+            a = ratings.get(away[i], elo.base_rating)
+            home_before[i], away_before[i] = h, a
+            h_eff = h + (0 if neutral[i] else HOME_ADVANTAGE_ELO)
+            expected_home = elo.get_expected_score(h_eff, a)
+            k = tournament_k_factor(tournament[i], elo.k_factor)
+            pending.append((home[i], elo.update_rating(0.0, expected_home, result[i], k)))
+            pending.append((away[i], elo.update_rating(0.0, 1 - expected_home, 1 - result[i], k)))
+        for team, delta in pending:
+            ratings[team] = ratings.get(team, elo.base_rating) + delta
+        start = stop
+    return EloRun(home_before=home_before, away_before=away_before, ratings=ratings)
