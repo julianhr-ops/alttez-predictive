@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   daily-process:
+    if: github.repository == 'julianhr-ops/alttez-predictive'
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -67,6 +68,14 @@ jobs:
           ALTTEZ_AUTO_PROMOTE_MODELS: ${{ secrets.ALTTEZ_AUTO_PROMOTE_MODELS || 'false' }}
           ALTTEZ_SUPPORTED_PRODUCTION_MODEL_FAMILIES: ${{ secrets.ALTTEZ_SUPPORTED_PRODUCTION_MODEL_FAMILIES || 'poisson,xgboost' }}
         run: |
+          if ($env:SUPABASE_DB_URL) {
+            $dbUri = [System.Uri]$env:SUPABASE_DB_URL
+            $dbUser = [System.Uri]::UnescapeDataString(($dbUri.UserInfo -split ':', 2)[0])
+            $projectRef = ($dbUser -split '\.', 2)[-1]
+            foreach ($value in @($dbUri.Host, $dbUser, $projectRef)) {
+              if ($value) { Write-Output "::add-mask::$value" }
+            }
+          }
           @"
           SUPABASE_DB_URL=$env:SUPABASE_DB_URL
           ALTTEZ_DATA_SOURCE=$env:ALTTEZ_DATA_SOURCE
@@ -106,33 +115,4 @@ jobs:
         run: |
           ./scripts/run_daily_process.ps1 -ApplyMigrations -WriteSmoke -Date ([DateTime]::UtcNow.ToString("yyyy-MM-dd"))
 
-      - name: Upload certification reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: alttez-certification-reports
-          path: artifacts/certification/*.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload daily brief reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: alttez-daily-brief
-          path: |
-            artifacts/reports/*.html
-            artifacts/reports/*.json
-            artifacts/tournament-reviews/*.html
-            artifacts/tournament-reviews/*.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload challenger reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: alttez-model-evals
-          path: artifacts/model-evals/*.json
-          if-no-files-found: ignore
-          retention-days: 14
+      # Reports can contain provider or database-derived details and are not uploaded.

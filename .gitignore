@@ -1,4 +1,15 @@
 .env
+.env.*
+!.env.example
+*.joblib
+*.pkl
+*.pem
+*.key
+*.parquet
+.idea/
+*.iml
+.vscode/
+.ruff_cache/
 __pycache__/
 *.pyc
 *.pyo
