@@ -170,6 +170,17 @@ class PredictionCommittee(BaseMatchPredictor):
         # Calibracion post-hoc del consenso (temperature scaling ajustado offline
         # sobre las predicciones cerradas del comite). Neutra si no hay artefacto.
         self.calibration = load_active_calibration()
+        fallback_members = [
+            member for member in self.members if getattr(member.predictor, "used_fallback", False)
+        ]
+        fallback_reason = (
+            "; ".join(
+                f"{member.role}: {getattr(member.predictor, 'fallback_reason', None) or 'motivo desconocido'}"
+                for member in fallback_members
+            )
+            if fallback_members
+            else None
+        )
         super().__init__(
             selection=ActiveModelSelection(
                 version_key=None,
@@ -177,7 +188,9 @@ class PredictionCommittee(BaseMatchPredictor):
                 model_family="committee",
                 artifact_path=None,
                 requested_production_status="active",
-            )
+            ),
+            used_fallback=bool(fallback_members),
+            fallback_reason=fallback_reason,
         )
 
     def get_team_profile(self, team: str) -> dict[str, float]:
@@ -297,8 +310,8 @@ class PredictionCommittee(BaseMatchPredictor):
             "model_family": self.model_family,
             "requested_model_version": self.requested_model_version,
             "requested_model_family": self.requested_model_family,
-            "used_fallback": False,
-            "fallback_reason": None,
+            "used_fallback": self.used_fallback,
+            "fallback_reason": self.fallback_reason,
             "profile_local": profile_local,
             "profile_visitante": profile_visitante,
             "prediction_supported": True,

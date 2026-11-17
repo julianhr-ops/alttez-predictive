@@ -838,37 +838,42 @@ def load_model_versions(*, database_url: str | None = None, limit: int = 20) -> 
         return pd.DataFrame()
 
 
-def load_active_model_record(*, database_url: str | None = None) -> dict[str, Any] | None:
-    try:
-        df = read_dataframe(
-            """
-            select
-                version_key,
-                model_version,
-                model_family,
-                training_cutoff,
-                trained_at,
-                status,
-                is_promotion_eligible,
-                production_status,
-                activation_mode,
-                activated_at,
-                promotion_reason,
-                artifact_path,
-                metrics_payload
-            from public.model_versions
-            where production_status = 'active'
-            order by coalesce(activated_at, trained_at) desc
-            limit 1
-            """,
-            database_url=database_url,
-        )
-    except Exception:
-        return None
-
+def fetch_active_model_record(*, database_url: str | None = None) -> dict[str, Any] | None:
+    """Registro activo de model_versions; None si no hay uno activo. Propaga los errores de lectura."""
+    df = read_dataframe(
+        """
+        select
+            version_key,
+            model_version,
+            model_family,
+            training_cutoff,
+            trained_at,
+            status,
+            is_promotion_eligible,
+            production_status,
+            activation_mode,
+            activated_at,
+            promotion_reason,
+            artifact_path,
+            metrics_payload
+        from public.model_versions
+        where production_status = 'active'
+        order by coalesce(activated_at, trained_at) desc
+        limit 1
+        """,
+        database_url=database_url,
+    )
     if df.empty:
         return None
     return df.iloc[0].to_dict()
+
+
+def load_active_model_record(*, database_url: str | None = None) -> dict[str, Any] | None:
+    try:
+        return fetch_active_model_record(database_url=database_url)
+    except Exception:
+        LOGGER.warning("No se pudo leer el modelo activo de model_versions.", exc_info=True)
+        return None
 
 
 def load_model_version_record(version_key: str, *, database_url: str | None = None) -> dict[str, Any] | None:

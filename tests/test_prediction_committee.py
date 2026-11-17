@@ -147,6 +147,35 @@ class TestPredictionCommittee(unittest.TestCase):
         self.assertTrue(prediction["discordance_warning"])
         self.assertIn("0 - 2", prediction["member_primary_scores"])
 
+    def test_committee_propagates_member_fallback(self) -> None:
+        champion = DummyPredictor(score=(1, 0), model_version="champion")
+        champion.used_fallback = True
+        champion.fallback_reason = "model registry unavailable: db down"
+        committee = PredictionCommittee(
+            [
+                CommitteeMember("champion", champion, 0.6),
+                CommitteeMember("poisson_baseline", DummyPredictor(score=(1, 0), model_version="poisson"), 0.4),
+            ]
+        )
+
+        prediction = committee.predict_match("United States", "Mexico")
+
+        self.assertTrue(committee.used_fallback)
+        self.assertTrue(prediction["used_fallback"])
+        self.assertIn("champion", prediction["fallback_reason"])
+        self.assertIn("db down", prediction["fallback_reason"])
+
+    def test_committee_without_fallback_members_reports_none(self) -> None:
+        committee = PredictionCommittee(
+            [CommitteeMember("champion", DummyPredictor(score=(1, 0), model_version="champion"), 1.0)]
+        )
+
+        prediction = committee.predict_match("United States", "Mexico")
+
+        self.assertFalse(prediction["used_fallback"])
+        self.assertIsNone(prediction["fallback_reason"])
+
+
 
 if __name__ == "__main__":
     unittest.main()

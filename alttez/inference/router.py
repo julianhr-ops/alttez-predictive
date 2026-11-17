@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -34,6 +35,29 @@ from alttez.features.poisson import PoissonEngine
 from alttez.features.bivariate_poisson import BivariatePoissonEngine, load_active_bivariate_params
 from alttez.features.hierarchical import HierarchicalBayesEngine, load_active_hierarchical_strengths
 from alttez.inference.calibration import load_single_predictor_calibration
+
+LOGGER = logging.getLogger(__name__)
+
+ARTIFACTS_DIR_ENV = "ALTTEZ_ARTIFACTS_DIR"
+DEFAULT_ARTIFACTS_DIR = "artifacts"
+
+
+class ArtifactPathError(ValueError):
+    """El artifact_path del registro apunta fuera del directorio de artefactos permitido."""
+
+
+def resolve_artifact_path(raw_path: str | Path, *, artifacts_dir: str | Path | None = None) -> Path:
+    """Resuelve `raw_path` y exige que quede dentro del directorio de artefactos.
+
+    joblib.load ejecuta codigo arbitrario al deserializar, asi que una ruta venida de
+    la base de datos no puede salirse de `artifacts/` (ni por `..` ni por rutas
+    absolutas ni por enlaces simbolicos): se compara la ruta ya resuelta.
+    """
+    base = Path(artifacts_dir or os.getenv(ARTIFACTS_DIR_ENV) or DEFAULT_ARTIFACTS_DIR).resolve()
+    resolved = Path(raw_path).resolve()
+    if not resolved.is_relative_to(base):
+        raise ArtifactPathError(f"artifact_path fuera del directorio de artefactos permitido ({base}): {raw_path}")
+    return resolved
 
 
 DEFAULT_POISSON_MODEL_VERSION = "poisson-champion-v2"
@@ -443,7 +467,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         super().__init__(selection=selection)
         if not selection.artifact_path:
             raise FileNotFoundError("El modelo activo XGBoost no declara artifact_path.")
-        artifact_path = Path(selection.artifact_path)
+        artifact_path = resolve_artifact_path(selection.artifact_path)
         if not artifact_path.exists() and selection.version_key:
             # The binary may not be on this host (ephemeral runner / fresh checkout).
             # Hydrate it from the durable store keyed by version_key before giving up.
@@ -452,7 +476,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
 
                 fetched = download_artifact(selection.version_key, artifact_path, database_url=database_url)
                 if fetched is not None:
-                    artifact_path = fetched
+                    artifact_path = resolve_artifact_path(fetched)
             except Exception:  # noqa: BLE001 - fall through to the explicit not-found error below.
                 pass
         if not artifact_path.exists():
@@ -825,17 +849,24 @@ def _selection_from_record(record: dict[str, Any] | None) -> ActiveModelSelectio
     )
 
 
-def _load_active_model_record_safe(*, database_url: str | None = None) -> dict[str, Any] | None:
-    # Keep inference bootable even if the model registry stack is temporarily unavailable.
-    try:
-        from alttez.operations.prediction_memory import load_active_model_record
-    except Exception:
-        return None
+@dataclass(frozen=True, slots=True)
+class ActiveRecordLookup:
+    """Resultado de consultar el registro de modelos: el registro, o el error que impidio leerlo."""
 
+    record: dict[str, Any] | None
+    error: str | None = None
+
+
+def _load_active_model_record_safe(*, database_url: str | None = None) -> ActiveRecordLookup:
+    # La inferencia sigue arrancando sin registro, pero el fallo es visible: se loguea y viaja en `error`.
     try:
-        return load_active_model_record(database_url=database_url)
-    except Exception:
-        return None
+        from alttez.operations.prediction_memory import fetch_active_model_record
+
+        return ActiveRecordLookup(record=fetch_active_model_record(database_url=database_url))
+    except Exception as exc:  # noqa: BLE001 - registry stack may be unavailable; reported, not hidden.
+        error = f"{type(exc).__name__}: {exc}"
+        LOGGER.warning("Model registry unavailable, serving Poisson fallback: %s", error)
+        return ActiveRecordLookup(record=None, error=error)
 
 
 def build_active_predictor(
@@ -850,7 +881,8 @@ def build_active_predictor(
     else:
         target_date_str = str(target_date)
 
-    selection = _selection_from_record(_load_active_model_record_safe(database_url=database_url))
+    lookup = _load_active_model_record_safe(database_url=database_url)
+    selection = _selection_from_record(lookup.record)
     family = selection.model_family.strip().lower()
 
     if family == "xgboost":
@@ -863,20 +895,28 @@ def build_active_predictor(
                 database_url=database_url,
             )
         except Exception as exc:  # noqa: BLE001 - production fallback should keep the pipeline alive.
+            reason = f"{type(exc).__name__}: {exc}"
+            LOGGER.warning(
+                "Active %s model %s failed to load, serving Poisson fallback: %s",
+                selection.model_family,
+                selection.model_version,
+                reason,
+            )
             return PoissonMatchPredictor(
                 historical_df,
                 target_date_str,
                 selection=selection,
                 poisson_kwargs=poisson_kwargs,
                 used_fallback=True,
-                fallback_reason=str(exc),
+                fallback_reason=reason,
             )
 
+    registry_failed = lookup.error is not None
     return PoissonMatchPredictor(
         historical_df,
         target_date_str,
         selection=selection,
         poisson_kwargs=poisson_kwargs,
-        used_fallback=False,
-        fallback_reason=None,
+        used_fallback=registry_failed,
+        fallback_reason=f"model registry unavailable: {lookup.error}" if registry_failed else None,
     )
