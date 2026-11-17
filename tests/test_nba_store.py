@@ -97,7 +97,7 @@ class RowMappingTests(unittest.TestCase):
 
 class InsertSemanticsTests(unittest.TestCase):
     def setUp(self):
-        self.engine = make_engine()
+        self.engine = make_engine(self)
 
     def _stored(self, game_id=1):
         with self.engine.connect() as connection:
@@ -145,7 +145,7 @@ class InsertSemanticsTests(unittest.TestCase):
 
 class GradingTests(unittest.TestCase):
     def setUp(self):
-        self.engine = make_engine()
+        self.engine = make_engine(self)
 
     def test_grade_outcome_math(self):
         win = store.grade_outcome(0.8, 110, 100)
