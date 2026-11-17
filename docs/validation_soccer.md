@@ -9,6 +9,7 @@ Code: `alttez/evaluation/soccer_backtest.py`, run with `scripts/validate_soccer.
 - It does beat the uniform and base-rate baselines, with CIs that exclude 0 on all three metrics.
 - **Temperature calibration changes nothing measurable.** Calibrated minus raw is 0.0000 Brier pooled, CI [-0.0007, +0.0007]. It helps in 2019 and 2021 (CI excludes 0), is inconclusive in the other six years, and never significantly hurts. The calibrated model is still significantly worse than Elo-only.
 - The dominant defect of the Poisson model is a class bias that a single temperature cannot fix. It predicts draws too often (mean 0.281 against an observed 0.233) and home and away wins too rarely.
+- **An Elo ordinal 1X2 with a fitted draw model, imposed on the Poisson score matrix, beats the champion on years held out from the choice** (2023 to 2025, Brier -0.0728 [-0.0836, -0.0623]). See the last two sections. It is statistically equivalent to the plain Elo-only baseline.
 
 ## Setup (what was actually run)
 
@@ -130,3 +131,42 @@ Selection result (4,420 matches, 2018 to 2022; negative = better than the best):
 | Elo Davidson + Poisson blend | 0.5223 | +0.0069 [+0.0048, +0.0091] |
 
 **Declared primary candidate: Elo ordinal** (`PRIMARY_CANDIDATE = "elo_ordinal"`). The blend and the fitted scale buy at most 0.0004 Brier, inside the noise, and the fitted blend weight on Elo is 0.92 to 1.00 in the 2018 to 2022 folds, so the Poisson 1X2 adds close to nothing. Selection-year context: Elo only (the existing baseline) 0.5153, Poisson raw 0.5779 on the same rows. Fitted Elo ordinal parameters in those folds: home advantage 92 to 100 Elo points, draw cut point 0.63 to 0.65.
+
+## Held-out final test, 2023 to 2025 (3,191 matches)
+
+Elo ordinal was declared in the commit before these years were scored (`git log` shows the order). Command: `python scripts/validate_soccer.py --refit-days 1 --raw-cache-dir artifacts/soccer/raw --report-years 2023 2025 --candidates elo_ordinal`.
+
+| model | Brier | RPS | log loss | accuracy | ECE H | ECE D | ECE A |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| uniform | 0.6667 | 0.2389 | 1.0986 | 0.467 | 0.134 | 0.100 | 0.034 |
+| base rate | 0.6381 | 0.2295 | 1.0569 | 0.467 | 0.014 | 0.006 | 0.007 |
+| Elo only (existing baseline) | 0.5142 | 0.1700 | 0.8714 | 0.599 | 0.025 | 0.024 | 0.021 |
+| Poisson raw (current champion) | 0.5855 | 0.2014 | 0.9812 | 0.522 | 0.020 | 0.050 | 0.039 |
+| Poisson + temperature | 0.5862 | 0.2015 | 0.9821 | 0.522 | 0.024 | 0.044 | 0.039 |
+| **Elo ordinal draw (primary)** | **0.5127** | **0.1694** | **0.8700** | 0.602 | 0.021 | 0.020 | 0.019 |
+
+Mean predicted against observed: observed 0.467 / 0.233 / 0.300 (H / D / A); Poisson raw 0.451 / 0.283 / 0.266; Elo ordinal 0.476 / 0.224 / 0.300. The draw over-prediction is gone (Elo ordinal slightly under-predicts draws, 0.224).
+
+Paired bootstrap, pooled 2023 to 2025 (primary minus baseline, lower is better, blocks = match dates):
+
+| vs | Brier | RPS | log loss |
+| --- | --- | --- | --- |
+| Poisson raw (champion) | -0.0728 [-0.0836, -0.0623] | -0.0320 [-0.0364, -0.0278] | -0.1113 [-0.1271, -0.0955] |
+| Elo only | -0.0015 [-0.0025, -0.0004] | -0.0006 [-0.0011, -0.0001] | -0.0014 [-0.0035, +0.0006] |
+| base rate | -0.1254 [-0.1377, -0.1134] | -0.0602 [-0.0659, -0.0545] | -0.1870 [-0.2056, -0.1688] |
+| uniform | -0.1540 [-0.1691, -0.1396] | -0.0695 [-0.0760, -0.0633] | -0.2287 [-0.2509, -0.2072] |
+
+By year, Brier of Elo ordinal against Poisson raw (CI): 2023 -0.0649 [-0.0829, -0.0458], 2024 -0.0685 [-0.0863, -0.0495], 2025 -0.0861 [-0.1036, -0.0685]. Against Elo only: 2023 -0.0016 [-0.0031, -0.0001], 2024 -0.0018 [-0.0038, +0.0003], 2025 -0.0009 [-0.0025, +0.0008].
+
+Scoreline coherence (3,168 matches whose score fits the 8 x 8 matrix, matrix rescaled to the served 1X2 by class ratios): scoreline log loss 2.9940 against 3.1046 for the raw Poisson matrix, difference -0.1106 [-0.1263, -0.0947]. The served matrix reproduces the target 1X2 to 2.2e-16 on every match.
+
+Fitted Elo ordinal parameters in the final folds: home advantage 88 to 95 Elo points, draw cut point 0.631 to 0.645.
+
+### Reading it
+
+- **The primary candidate beats the champion.** On held-out years the Brier CI against Poisson raw is entirely below 0 pooled and in each of 2023, 2024 and 2025, and the same holds for RPS and log loss. This clears the bar set before the run.
+- **Almost all of the gain comes from using Elo, not from the fitted draw model.** Against the existing Elo-only baseline the held-out edge is 0.0015 Brier. It is significant pooled on Brier and RPS and not on log loss, not significant in 2024 or 2025, and over all of 2018 to 2025 (which includes the selection years) it is -0.0003 [-0.0010, +0.0003]. Treat the two Elo rules as equivalent in accuracy. The fitted rule is preferred for serving because it is an explicit likelihood model whose draw rate is calibrated (0.230 against an observed 0.233 over 2018 to 2025), and because its probabilities come with a coherent score matrix.
+- **The Poisson blend adds nothing.** On the selection years the blend and the fitted scale were within 0.0004 Brier of each other and of the plain rule.
+- Pooled 2018 to 2025 numbers for the primary (Brier 0.5145, RPS 0.1705, log loss 0.8743 against Poisson raw 0.5811 / 0.1998 / 0.9760) mix selection and held-out years, so only the 2023 to 2025 table above is an untouched test.
+- Cadence: all numbers use `--refit-days 1`; development used the same cached refit-1 Poisson output, so there is no cadence gap between selection and final.
+- Not covered: matches the router's support gate rejects (a team with fewer than 5 matches in 4 years), and any team absent from the Elo history. Those keep the Poisson abstain/fallback path.

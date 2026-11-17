@@ -569,7 +569,7 @@ def reported_models(candidates: Sequence[str]) -> tuple[str, ...]:
 
 
 def reported_comparisons(candidates: Sequence[str]) -> tuple[tuple[str, str], ...]:
-    return (*COMPARISONS, *[(c, b) for c in candidates for b in ("poisson_raw", "elo_only", "base_rate")])
+    return (*COMPARISONS, *[(c, b) for c in candidates for b in ("poisson_raw", "elo_only", "base_rate", "uniform")])
 
 
 def run_backtest(
