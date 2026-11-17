@@ -37,14 +37,9 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CALIBRATION_PATH = Path("artifacts/calibration/active.json")
 CALIBRATION_PATH_ENV = "ALTTEZ_CALIBRATION_PATH"
-# Calibracion separada para el path de predictor unico (campeon directo, sin
-# pasar por el consenso del comite). La T de active.json se ajusto sobre el blend
-# del consenso; reusarla sobre un campeon ya calibrado lo sobre-suavizaria. Por eso
-# este path tiene su propio artefacto y su propia compuerta.
 DEFAULT_SINGLE_PREDICTOR_CALIBRATION_PATH = Path("artifacts/calibration/single_predictor.json")
 SINGLE_PREDICTOR_CALIBRATION_PATH_ENV = "ALTTEZ_SINGLE_PREDICTOR_CALIBRATION_PATH"
 SINGLE_PREDICTOR_CALIBRATION_ENABLED_ENV = "ALTTEZ_CALIBRATE_SINGLE_PREDICTOR"
-# Piso por clase aplicado a 1X2 en inferencia. 0.0 = neutro (sin piso).
 DEFAULT_CLASS_FLOOR = 0.0
 MIN_TEMPERATURE = 0.05
 
@@ -59,13 +54,11 @@ def temperature_scale(probabilities: np.ndarray, temperature: float) -> np.ndarr
     if temp == 1.0:
         scaled = array.copy()
     else:
-        # Trabaja en log-espacio para estabilidad: p^(1/T) = exp(log(p)/T).
         with np.errstate(divide="ignore"):
             log_p = np.where(array > 0, np.log(array), -np.inf)
         scaled = np.exp(log_p / temp)
     total = scaled.sum()
     if not np.isfinite(total) or total <= 0:
-        # Degenerado: devuelve uniforme antes que propagar NaN.
         return np.full(array.shape, 1.0 / array.size, dtype=float)
     return scaled / total
 
@@ -89,7 +82,6 @@ def apply_class_floor(triplet: np.ndarray, floor: float) -> np.ndarray:
     above_sum = normalized[~below].sum()
     remaining = 1.0 - reserved
     if remaining <= 0.0 or above_sum <= 0.0:
-        # Demasiadas clases bajo el piso: reparte uniforme.
         return np.full(array.shape, 1.0 / array.size)
     out = normalized.copy()
     out[below] = floor
@@ -184,23 +176,6 @@ class ProbabilityCalibration:
 NEUTRAL_CALIBRATION = ProbabilityCalibration()
 
 
-# --- Calibracion isotonica (alternativa no parametrica a temperature) --------
-#
-# Temperature scaling impone una unica curva monotona global (p^(1/T)); la
-# calibracion isotonica aprende una curva monotona libre por clase, mas flexible
-# cuando la mala calibracion no es uniforme entre clases.
-#
-# Enfoque: one-vs-rest. Para cada clase (H, D, A) se ajusta una IsotonicRegression
-# que mapea la prob cruda de esa clase -> prob calibrada (frecuencia empirica de
-# acierto). Luego se renormaliza el triplete a suma 1.
-#
-# Serializacion SIN picklear sklearn: la funcion escalonada de IsotonicRegression
-# queda definida por sus puntos de quiebre (X_thresholds_, y_thresholds_). Se
-# persisten esos pares (x, y) por clase y se reevalua con np.interp en carga y
-# prediccion. np.interp reproduce exactamente la interpolacion lineal por tramos
-# que usa IsotonicRegression.predict (out_of_bounds="clip" = extremos planos).
-
-
 def _isotonic_curve(raw: np.ndarray, hits: np.ndarray) -> tuple[list[float], list[float]]:
     """Ajusta una IsotonicRegression one-vs-rest y devuelve sus puntos (x, y).
 
@@ -214,7 +189,7 @@ def _isotonic_curve(raw: np.ndarray, hits: np.ndarray) -> tuple[list[float], lis
         return [], []
     try:
         from sklearn.isotonic import IsotonicRegression
-    except Exception as exc:  # noqa: BLE001 - sin sklearn caemos a identidad.
+    except Exception as exc:
         LOGGER.warning("isotonic_unavailable detail=%s", exc)
         return [], []
     iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
@@ -257,7 +232,6 @@ class IsotonicCalibration:
 
     @property
     def is_neutral(self) -> bool:
-        # Neutra cuando no hay curvas aprendidas (arreglos vacios) y sin piso.
         return (
             not self.home_x
             and not self.draw_x
@@ -373,12 +347,11 @@ def load_active_calibration(
         method = str(payload.get("method", "temperature")).strip().lower()
         if method == "isotonic":
             return IsotonicCalibration.from_payload(payload)
-        # Compatibilidad: sin "method" o "temperature" == comportamiento previo.
         return ProbabilityCalibration(
             temperature=float(payload.get("temperature", 1.0)),
             class_floor=float(payload.get("class_floor", DEFAULT_CLASS_FLOOR)),
         )
-    except Exception as exc:  # noqa: BLE001 - artefacto corrupto no debe tumbar inferencia.
+    except Exception as exc:
         LOGGER.warning("calibration_artifact_unreadable path=%s detail=%s", resolved, exc)
         return NEUTRAL_CALIBRATION
 
@@ -406,8 +379,6 @@ def load_single_predictor_calibration() -> ProbabilityCalibration:
     )
     return load_active_calibration(resolved)
 
-
-# --- Metricas de calibracion (para el arnes de evaluacion) -------------------
 
 _OUTCOME_INDEX = {"H": 0, "D": 1, "A": 2}
 
@@ -472,7 +443,6 @@ def fit_temperature(
 
     best_temp = float(min(search, key=loss_at))
 
-    # Refinamiento por seccion dorada alrededor del mejor punto de la rejilla.
     step = (search[1] - search[0]) if len(search) > 1 else 0.5
     low, high = max(MIN_TEMPERATURE, best_temp - step), best_temp + step
     phi = (np.sqrt(5) - 1) / 2

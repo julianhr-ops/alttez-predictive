@@ -15,8 +15,6 @@ from alttez.ingestion.seed_historical import normalize_name
 
 WORLD_CUP_2026_NAME = "FIFA World Cup 2026"
 KNOCKOUT_COMPETITION_CLASSES = {"world_cup", "continental"}
-# Single source of truth for the model feature contract. Both the challenger
-# trainer and the inference router import this so the two cannot drift apart.
 MODEL_FEATURE_COLUMNS = [
     "elo_difference",
     "elo_home_before",
@@ -36,7 +34,6 @@ MODEL_FEATURE_COLUMNS = [
     "away_continent_advantage",
     "continent_advantage_diff",
     "is_knockout",
-    # Tier-1 derived variables (scores + dates), all causal.
     "home_rest_days",
     "away_rest_days",
     "rest_days_diff",
@@ -56,7 +53,6 @@ MODEL_FEATURE_COLUMNS = [
     "h2h_draws",
     "h2h_win_balance",
     "h2h_sample_size",
-    # Tier-2 macro (static prior from public.teams; sparse → coverage flag).
     "gdp_per_capita_home",
     "gdp_per_capita_away",
     "gdp_per_capita_diff",
@@ -99,7 +95,6 @@ class KlementFeatureState:
     post_match_history: dict[str, list[tuple[pd.Timestamp, float]]]
     knockout_event_history: dict[str, list[tuple[pd.Timestamp, str]]]
     team_macro: dict[str, dict[str, Any]]
-    # Tier-1 causal state for rest/congestion/form/H2H features.
     team_match_dates: dict[str, list[pd.Timestamp]] = field(default_factory=dict)
     team_goals_history: dict[str, list[tuple[pd.Timestamp, int, int]]] = field(default_factory=dict)
     h2h_history: dict[tuple[str, str], list[tuple[pd.Timestamp, str, int, int]]] = field(default_factory=dict)
@@ -502,7 +497,6 @@ def build_klement_feature_state(
         home_knockout_weight.append(_count_knockout_events(home_team))
         away_knockout_weight.append(_count_knockout_events(away_team))
 
-        # Tier-1 causal features (computed from state holding only earlier matches).
         home_rest.append(_rest_days(team_match_dates.get(home_team, []), match_date))
         away_rest.append(_rest_days(team_match_dates.get(away_team, []), match_date))
         home_cong.append(_congestion(team_match_dates.get(home_team, []), match_date))
@@ -558,7 +552,6 @@ def build_klement_feature_state(
         post_match_history[home_team].append((match_date, new_home_elo))
         post_match_history[away_team].append((match_date, new_away_elo))
 
-        # Update Tier-1 state AFTER computing this row's features (preserves causality).
         home_goals = int(row.home_score)
         away_goals = int(row.away_score)
         team_match_dates[home_team].append(match_date)

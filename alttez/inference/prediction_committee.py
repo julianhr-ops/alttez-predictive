@@ -101,7 +101,7 @@ def load_latest_challenger_record(*, database_url: str | None = None) -> dict[st
             continue
         try:
             payload = joblib.load(artifact)
-        except Exception as exc:  # noqa: BLE001 - invalid challenger should not break committee construction.
+        except Exception as exc:
             LOGGER.debug(
                 "challenger_record_skipped_unloadable_artifact version_key=%s artifact_path=%s detail=%s",
                 record.get("version_key"),
@@ -167,7 +167,6 @@ class PredictionCommittee(BaseMatchPredictor):
         if not members:
             raise ValueError("PredictionCommittee requires at least one member.")
         self.members = _normalize_members(members)
-        # Decision de pesos (guardia de consenso / error inverso). None = pesos previos.
         self.weighting = weighting
         fallback_members = [
             member for member in self.members if getattr(member.predictor, "used_fallback", False)
@@ -191,9 +190,6 @@ class PredictionCommittee(BaseMatchPredictor):
             used_fallback=bool(fallback_members),
             fallback_reason=fallback_reason,
         )
-        # Calibracion post-hoc del consenso (temperature scaling ajustado offline
-        # sobre las predicciones cerradas del comite). Neutra si no hay artefacto.
-        # Se asigna DESPUES de super().__init__, que fija la calibracion del predictor unico.
         self.calibration = load_active_calibration()
 
     def get_team_profile(self, team: str) -> dict[str, float]:
@@ -224,7 +220,7 @@ class PredictionCommittee(BaseMatchPredictor):
                     max_goals=max_goals,
                     tournament_context=tournament_context,
                 )
-            except Exception as exc:  # noqa: BLE001 - one vote should not kill the committee.
+            except Exception as exc:
                 LOGGER.warning("committee_member_failed role=%s detail=%s", member.role, exc)
                 continue
 
@@ -282,11 +278,6 @@ class PredictionCommittee(BaseMatchPredictor):
         total_weight = sum(weight for weight, _ in matrices)
         consensus_matrix = sum((weight / total_weight) * matrix for weight, matrix in matrices)
         consensus_matrix = consensus_matrix / consensus_matrix.sum()
-        # Calibracion del consenso antes de derivar 1X2 y marcadores: coherente
-        # para ambos. Neutra (identidad) si no hay artefacto activo.
-        # NO se aplica cuando el comite defiere al campeon: la temperatura se
-        # ajusto sobre el consenso (blend) y sobre-suavizaria la salida de un
-        # campeon ya bien calibrado (p.ej. Poisson).
         deferred = bool(self.weighting and self.weighting.deferred_to_champion)
         calibration_active = (not deferred) and (not self.calibration.is_neutral)
         raw_1x2 = matrix_1x2(consensus_matrix)
@@ -407,9 +398,6 @@ def build_prediction_committee(
         ),
     ]
 
-    # Miembro jerarquico bayesiano: solo se anade si hay artefacto de fuerzas
-    # activo (ajuste offline via scripts/fit_hierarchical_bayes.py). Sin artefacto
-    # no aporta senal y se omite para no diluir el consenso.
     if not load_active_hierarchical_strengths().is_empty:
         try:
             members.append(
@@ -427,7 +415,7 @@ def build_prediction_committee(
                     DEFAULT_COMMITTEE_WEIGHTS["hierarchical"],
                 )
             )
-        except Exception as exc:  # noqa: BLE001 - committee can run without hierarchical.
+        except Exception as exc:
             LOGGER.warning("hierarchical_committee_load_failed detail=%s", exc)
 
     challenger_record = load_latest_challenger_record(database_url=database_url)
@@ -446,7 +434,7 @@ def build_prediction_committee(
                     DEFAULT_COMMITTEE_WEIGHTS["challenger"],
                 ),
             )
-        except Exception as exc:  # noqa: BLE001 - committee can run without challenger.
+        except Exception as exc:
             LOGGER.warning("challenger_committee_load_failed detail=%s", exc)
 
     weighting = _resolve_member_weights(members, database_url=database_url)
@@ -480,7 +468,7 @@ def _load_champion_paired_losses(
             member_version=champion_version,
             database_url=database_url,
         )
-    except Exception as exc:  # noqa: BLE001 - the guard degrades to "not evaluated", never blocks the committee.
+    except Exception as exc:
         LOGGER.warning("committee_guard_losses_unavailable detail=%s", exc)
         return None
 
@@ -499,8 +487,6 @@ def _resolve_member_weights(
     try:
         from alttez.operations.prediction_memory import load_prediction_learning_audit
 
-        # Ventana amplia: las evaluaciones cerradas pueden ser mas viejas que el
-        # default de 180 dias; necesitamos suficiente muestra para ponderar.
         audit = load_prediction_learning_audit(database_url=database_url, lookback_days=365)
         member_versions = {member.role: str(member.predictor.model_version) for member in members}
         return resolve_committee_weights(
@@ -510,6 +496,6 @@ def _resolve_member_weights(
             committee_version=committee_version,
             paired_losses=_load_champion_paired_losses(member_versions, committee_version, database_url),
         )
-    except Exception as exc:  # noqa: BLE001 - weighting is an optimization, never a hard dependency.
+    except Exception as exc:
         LOGGER.warning("committee_weighting_failed detail=%s", exc)
         return None

@@ -40,8 +40,6 @@ class EloEngine:
     def __init__(self, base_rating: float = 1500, k_factor: float = 30, mov_enabled: bool | None = None):
         self.base_rating = base_rating
         self.k_factor = k_factor
-        # Multiplicador margin-of-victory (estilo 538). Default OFF para no mover el
-        # campeon durante fase de grupos; se activa via env para retrain del retador.
         self.mov_enabled = _env_flag(ELO_MOV_ENABLED_ENV) if mov_enabled is None else bool(mov_enabled)
         self.ratings: Dict[str, float] = {}
 
@@ -98,7 +96,6 @@ class EloEngine:
             if away not in self.ratings:
                 self.ratings[away] = self.base_rating
 
-            # Guardar el ELO antes del partido para evitar data leakage.
             current_home_elo = self.ratings[home]
             current_away_elo = self.ratings[away]
 

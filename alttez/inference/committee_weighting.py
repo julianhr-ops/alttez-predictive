@@ -28,10 +28,6 @@ from typing import Any
 
 from alttez.evaluation.paired import paired_bootstrap_diff
 
-# Umbral bajo a proposito: en torneos el modelo activo acumula pocas
-# evaluaciones cerradas (ej. ~20). Exigir mas lo dejaria siempre en pesos por
-# defecto. 15 es el minimo para que la guardia/ponderacion pueda actuar con la
-# senal disponible, asumiendo el ruido de muestra pequena.
 DEFAULT_MIN_SAMPLES = 15
 DEFAULT_CHAMPION_FLOOR = 0.5
 CHAMPION_ROLE = "champion"
@@ -88,8 +84,6 @@ def resolve_committee_weights(
         if version in brier_by_version
     }
 
-    # 1) Guardia de consenso: solo sobre partidos identicos. Si el consenso es peor
-    # que el campeon con el IC pareado completamente sobre 0, defiere al campeon.
     guard_note = " Guardia de consenso no evaluada: faltan perdidas pareadas del consenso y el campeon."
     if CHAMPION_ROLE in roles and paired_losses is not None:
         consensus_losses, champion_losses = paired_losses
@@ -109,7 +103,6 @@ def resolve_committee_weights(
                 member_briers=member_briers,
             )
 
-    # 2) Pesos por error inverso entre miembros con metricas; resto usa default.
     if member_briers:
         scores = {
             role: (1.0 / member_briers[role]) if role in member_briers else max(default_weights.get(role, 0.0), 1e-6)
@@ -125,7 +118,6 @@ def resolve_committee_weights(
             member_briers=member_briers,
         )
 
-    # 3) Sin metricas suficientes: pesos por defecto.
     return WeightingDecision(
         weights=dict(default_weights),
         strategy="default",

@@ -99,7 +99,6 @@ DEFAULT_POISSON_KWARGS = {
     "recency_half_life_days": 365,
     "recent_form_matches": 6,
 }
-# Single source of truth lives in alttez.features.klement; aliased for compatibility.
 XGBOOST_FEATURE_COLUMNS = MODEL_FEATURE_COLUMNS
 DEFAULT_MAX_GOALS = 7
 
@@ -290,11 +289,8 @@ def _is_prediction_supported(profile_local: dict[str, float], profile_visitante:
     away_effective = float(profile_visitante.get("effective_matches", 0.0))
     threshold = _support_threshold()
     if threshold <= 0:
-        return True, None  # gating disabled
+        return True, None
 
-    # Stricter gating: BOTH teams must clear the minimum history and have effective
-    # (recency-weighted) support. This drops matchups that would only produce noise
-    # instead of letting a single well-covered team carry an unsupported prediction.
     if min(local_matches, away_matches) < threshold:
         return False, f"Historial insuficiente: se requieren >= {threshold} partidos por equipo."
     if min(local_effective, away_effective) <= 0:
@@ -327,8 +323,6 @@ class BaseMatchPredictor(ABC):
         self.model_family = selection.model_family
         self.used_fallback = used_fallback
         self.fallback_reason = fallback_reason
-        # Calibracion del predictor unico (separada del consenso del comite).
-        # NEUTRA salvo que ALTTEZ_CALIBRATE_SINGLE_PREDICTOR este encendido.
         self.calibration = load_single_predictor_calibration()
 
     def _calibrate_matrix(self, prob_matrix: np.ndarray) -> tuple[np.ndarray, tuple[float, float, float]]:
@@ -376,13 +370,11 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             kwargs.update(poisson_kwargs)
         self.engine = PoissonEngine(**kwargs)
         self.engine.fit(historical_df, target_date=target_date)
-        # ``serving`` None follows ALTTEZ_SERVING_POLICY (default ON); committee members that must
-        # stay raw Poisson pass False.
         self.serving_policy: ServingPolicy | None = None
         if serving_policy_enabled(serving):
             try:
                 self.serving_policy = build_serving_policy(historical_df, target_date)
-            except Exception as exc:  # noqa: BLE001 - a broken Elo build must degrade to Poisson, loudly.
+            except Exception as exc:
                 reason = f"serving policy {POLICY_ELO_ORDINAL} unavailable: {type(exc).__name__}: {exc}"
                 LOGGER.warning(reason)
                 self.used_fallback = True
@@ -399,7 +391,6 @@ class PoissonMatchPredictor(BaseMatchPredictor):
                 LOGGER.warning(reason)
                 matrix, _ = self._calibrate_matrix(prob_matrix)
                 return _ServedMatrix(matrix, raw_1x2, POLICY_POISSON, True, _join_reasons(self.fallback_reason, reason))
-            # The single-predictor calibration is fitted on Poisson output, so it is not applied to the Elo 1X2.
             return _ServedMatrix(served, raw_1x2, self.serving_policy.name, self.used_fallback, self.fallback_reason)
         matrix, _ = self._calibrate_matrix(prob_matrix)
         return _ServedMatrix(matrix, raw_1x2, POLICY_POISSON, self.used_fallback, self.fallback_reason)
@@ -463,8 +454,6 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             }
 
         lambda_h, lambda_a = self.engine.predict_xg(home_team, away_team, is_neutral=is_neutral)
-        # rho=None resuelve el rho Dixon-Coles ajustado por MLE (artifact activo),
-        # con fallback a DEFAULT_DIXON_COLES_RHO cuando no hay artefacto.
         prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=None)
         served = self._serve_matrix(prob_matrix, home_team, away_team, is_neutral)
         prob_matrix, raw_1x2 = served.matrix, served.raw_1x2
@@ -535,15 +524,13 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             raise FileNotFoundError("El modelo activo XGBoost no declara artifact_path.")
         artifact_path = resolve_artifact_path(selection.artifact_path)
         if not artifact_path.exists() and selection.version_key:
-            # The binary may not be on this host (ephemeral runner / fresh checkout).
-            # Hydrate it from the durable store keyed by version_key before giving up.
             try:
                 from alttez.operations.artifact_store import download_artifact
 
                 fetched = download_artifact(selection.version_key, artifact_path, database_url=database_url)
                 if fetched is not None:
                     artifact_path = resolve_artifact_path(fetched)
-            except Exception:  # noqa: BLE001 - fall through to the explicit not-found error below.
+            except Exception:
                 pass
         if not artifact_path.exists():
             raise FileNotFoundError(f"No existe el artefacto XGBoost activo: {artifact_path}")
@@ -926,12 +913,11 @@ class ActiveRecordLookup:
 
 
 def _load_active_model_record_safe(*, database_url: str | None = None) -> ActiveRecordLookup:
-    # La inferencia sigue arrancando sin registro, pero el fallo es visible: se loguea y viaja en `error`.
     try:
         from alttez.operations.prediction_memory import fetch_active_model_record
 
         return ActiveRecordLookup(record=fetch_active_model_record(database_url=database_url))
-    except Exception as exc:  # noqa: BLE001 - registry stack may be unavailable; reported, not hidden.
+    except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         LOGGER.warning("Model registry unavailable, serving Poisson fallback: %s", error)
         return ActiveRecordLookup(record=None, error=error)
@@ -962,7 +948,7 @@ def build_active_predictor(
                 poisson_kwargs=poisson_kwargs,
                 database_url=database_url,
             )
-        except Exception as exc:  # noqa: BLE001 - production fallback should keep the pipeline alive.
+        except Exception as exc:
             reason = f"{type(exc).__name__}: {exc}"
             LOGGER.warning(
                 "Active %s model %s failed to load, serving Poisson fallback: %s",
