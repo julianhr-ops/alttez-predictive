@@ -22,8 +22,6 @@ from alttez.ingestion.provider_healthcheck import run_healthcheck
 
 
 REQUIRED_ENV_KEYS = (
-    "ALTTEZ_API_FOOTBALL_KEY",
-    "ALTTEZ_FOOTBALL_DATA_KEY",
     "SUPABASE_DB_URL",
 )
 PLACEHOLDERS = {"", "replace-me", "your_api_key_here", "changeme"}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from datetime import timedelta
 
 import altair as alt
@@ -776,7 +777,7 @@ def _sync_error_label(value: str | None) -> str:
 def _render_status_pill(label: str, status: str | None) -> str:
     return (
         f'<span class="alttez-badge {_status_badge_class(status)}">'
-        f"{label}: {_match_status_badge(status) if label == 'Estado' else status or 'N/D'}"
+        f"{html.escape(str(label))}: {html.escape(str(_match_status_badge(status) if label == 'Estado' else status or 'N/D'))}"
         "</span>"
     )
 
@@ -953,9 +954,9 @@ def _render_recommendation_panel(result: dict) -> None:
         <div class="alttez-panel">
             <div class="alttez-section-title">Recomendacion ALTTEZ</div>
             <div class="alttez-section-copy">
-                Pronostico principal: <strong>{summary['primary_score']}</strong> con EV <strong>{summary['primary_ev']}</strong><br>
-                Mercado mas probable: <strong>{market_label}</strong> ({market_probability})<br>
-                Escenarios cercanos: {alternatives_text}
+                Pronostico principal: <strong>{html.escape(str(summary['primary_score']))}</strong> con EV <strong>{html.escape(str(summary['primary_ev']))}</strong><br>
+                Mercado mas probable: <strong>{html.escape(str(market_label))}</strong> ({html.escape(str(market_probability))})<br>
+                Escenarios cercanos: {html.escape(str(alternatives_text))}
             </div>
         </div>
         """,
@@ -1257,16 +1258,16 @@ def _select_match_from_agenda(
         support_status = _support_status(support_label)
         support_badge = (
             f'<span class="alttez-badge {_status_badge_class(support_status)}">'
-            f"{support_label}"
+            f"{html.escape(str(support_label))}"
             "</span>"
         )
 
         st.markdown(
             f"""
             <div class="alttez-match-card">
-                <div class="alttez-match-meta">{kickoff_label} | {tournament_meta}</div>
-                <div class="alttez-match-title">{row_dict['home_team']} vs {row_dict['away_team']}</div>
-                <div class="alttez-match-subtitle">{city} | {_match_status_badge(row_dict.get('status'))}</div>
+                <div class="alttez-match-meta">{html.escape(str(kickoff_label))} | {html.escape(str(tournament_meta))}</div>
+                <div class="alttez-match-title">{html.escape(str(row_dict['home_team']))} vs {html.escape(str(row_dict['away_team']))}</div>
+                <div class="alttez-match-subtitle">{html.escape(str(city))} | {html.escape(str(_match_status_badge(row_dict.get('status'))))}</div>
                 <div style="margin-top:0.65rem;">
                     {support_badge}
                 </div>
@@ -1322,20 +1323,20 @@ def _render_agenda_section(
     st.markdown(
         f"""
         <div class="alttez-panel">
-            <div class="alttez-section-title">{title}</div>
-            <div class="alttez-section-copy">{description}</div>
+            <div class="alttez-section-title">{html.escape(str(title))}</div>
+            <div class="alttez-section-copy">{html.escape(str(description))}</div>
             <div class="alttez-inline-stats">
                 <div class="alttez-inline-stat">
                     <div class="alttez-inline-stat-label">Partidos visibles</div>
-                    <div class="alttez-inline-stat-value">{match_count}</div>
+                    <div class="alttez-inline-stat-value">{html.escape(str(match_count))}</div>
                 </div>
                 <div class="alttez-inline-stat">
                     <div class="alttez-inline-stat-label">Formato activo</div>
-                    <div class="alttez-inline-stat-value">{fase_torneo}</div>
+                    <div class="alttez-inline-stat-value">{html.escape(str(fase_torneo))}</div>
                 </div>
                 <div class="alttez-inline-stat">
                     <div class="alttez-inline-stat-label">Contexto torneo</div>
-                    <div class="alttez-inline-stat-value">{tournament_mode}</div>
+                    <div class="alttez-inline-stat-value">{html.escape(str(tournament_mode))}</div>
                 </div>
             </div>
         </div>
@@ -1347,7 +1348,7 @@ def _render_agenda_section(
             f"""
             <div class="alttez-empty-state">
                 <div class="alttez-empty-title">Sin partidos analizables en este bloque</div>
-                <div class="alttez-empty-copy">{empty_message}</div>
+                <div class="alttez-empty-copy">{html.escape(str(empty_message))}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1401,22 +1402,22 @@ def _render_hero(fecha_simulacion, fase_torneo: str, agenda_df: pd.DataFrame, to
                     <div class="alttez-micro-grid">
                         <div class="alttez-micro-card">
                             <div class="alttez-micro-label">Partidos</div>
-                            <div class="alttez-micro-value">{len(agenda_df)}</div>
+                            <div class="alttez-micro-value">{html.escape(str(len(agenda_df)))}</div>
                             <div class="alttez-micro-sub">Agenda lista para analisis</div>
                         </div>
                         <div class="alttez-micro-card">
                             <div class="alttez-micro-label">Proveedor activo</div>
-                            <div class="alttez-micro-value">{provider_used}</div>
+                            <div class="alttez-micro-value">{html.escape(str(provider_used))}</div>
                             <div class="alttez-micro-sub">Ultima lectura del stack live</div>
                         </div>
                         <div class="alttez-micro-card">
                             <div class="alttez-micro-label">Lote certificado</div>
-                            <div class="alttez-micro-value">{certified_records}</div>
+                            <div class="alttez-micro-value">{html.escape(str(certified_records))}</div>
                             <div class="alttez-micro-sub">Registros auditados</div>
                         </div>
                         <div class="alttez-micro-card">
                             <div class="alttez-micro-label">Proveedores sondeados</div>
-                            <div class="alttez-micro-value">{len(attempted_providers)}</div>
+                            <div class="alttez-micro-value">{html.escape(str(len(attempted_providers)))}</div>
                             <div class="alttez-micro-sub">Cobertura operativa</div>
                         </div>
                     </div>
@@ -1424,26 +1425,26 @@ def _render_hero(fecha_simulacion, fase_torneo: str, agenda_df: pd.DataFrame, to
                 <div class="alttez-hero-aside">
                     <div class="alttez-hero-row">
                         <span class="alttez-hero-label">Fecha objetivo</span>
-                        <span class="alttez-hero-value">{fecha_simulacion}</span>
+                        <span class="alttez-hero-value">{html.escape(str(fecha_simulacion))}</span>
                     </div>
                     <div class="alttez-hero-row">
                         <span class="alttez-hero-label">Partidos detectados</span>
-                        <span class="alttez-hero-value">{len(agenda_df)}</span>
+                        <span class="alttez-hero-value">{html.escape(str(len(agenda_df)))}</span>
                     </div>
                     <div class="alttez-hero-row">
                         <span class="alttez-hero-label">Stack live</span>
-                        <span class="alttez-hero-value">{provider_used}</span>
+                        <span class="alttez-hero-value">{html.escape(str(provider_used))}</span>
                     </div>
                     <div class="alttez-hero-row">
                         <span class="alttez-hero-label">Modo de puntuacion</span>
-                        <span class="alttez-hero-value">{fase_torneo}</span>
+                        <span class="alttez-hero-value">{html.escape(str(fase_torneo))}</span>
                     </div>
                     <div class="alttez-hero-row">
                         <span class="alttez-hero-label">Contexto torneo</span>
-                        <span class="alttez-hero-value">{tournament_mode}</span>
+                        <span class="alttez-hero-value">{html.escape(str(tournament_mode))}</span>
                     </div>
                     <div class="alttez-section-copy">
-                        {status_label} con agenda lista para analisis y auditoria operativa en tiempo real.
+                        {html.escape(str(status_label))} con agenda lista para analisis y auditoria operativa en tiempo real.
                     </div>
                 </div>
             </div>
@@ -1459,10 +1460,10 @@ def _render_control_summary(ventana: int, prior_matches: int, recency_half_life_
         <div class="alttez-panel alttez-feature-callout">
             <div class="alttez-section-title">Blindaje del motor</div>
             <div class="alttez-feature-hint">
-                Ventana reciente: <strong>{ventana} anos</strong><br>
-                Suavizado por muestra: <strong>{prior_matches}</strong><br>
-                Vida media de recencia: <strong>{recency_half_life_days} dias</strong><br>
-                Maximo de goles simulados: <strong>{max_goles}</strong><br>
+                Ventana reciente: <strong>{html.escape(str(ventana))} anos</strong><br>
+                Suavizado por muestra: <strong>{html.escape(str(prior_matches))}</strong><br>
+                Vida media de recencia: <strong>{html.escape(str(recency_half_life_days))} dias</strong><br>
+                Maximo de goles simulados: <strong>{html.escape(str(max_goles))}</strong><br>
                 Equipos con menos de 5 partidos usan fuerza neutral por defecto.
             </div>
         </div>
@@ -1515,15 +1516,15 @@ def _render_world_cup_2026_dashboard(report: dict | None, fecha_simulacion: str,
             <div class="alttez-inline-stats">
                 <div class="alttez-inline-stat">
                     <div class="alttez-inline-stat-label">Fecha de corte</div>
-                    <div class="alttez-inline-stat-value">{fecha_simulacion}</div>
+                    <div class="alttez-inline-stat-value">{html.escape(str(fecha_simulacion))}</div>
                 </div>
                 <div class="alttez-inline-stat">
                     <div class="alttez-inline-stat-label">Iteraciones</div>
-                    <div class="alttez-inline-stat-value">{iterations}</div>
+                    <div class="alttez-inline-stat-value">{html.escape(str(iterations))}</div>
                 </div>
                 <div class="alttez-inline-stat">
                     <div class="alttez-inline-stat-label">Semilla</div>
-                    <div class="alttez-inline-stat-value">{random_seed}</div>
+                    <div class="alttez-inline-stat-value">{html.escape(str(random_seed))}</div>
                 </div>
             </div>
         </div>
@@ -1557,11 +1558,11 @@ def _render_world_cup_2026_dashboard(report: dict | None, fecha_simulacion: str,
         <div class="alttez-panel">
             <div class="alttez-section-title">Corrida mas reciente</div>
             <div class="alttez-section-copy">
-                Generada en: {report.get('generated_at', 'N/D')}<br>
-                Modelo: <strong>{report.get('model_version', 'N/D')}</strong> ({report.get('model_family', 'N/D')})<br>
+                Generada en: {html.escape(str(report.get('generated_at', 'N/D')))}<br>
+                Modelo: <strong>{html.escape(str(report.get('model_version', 'N/D')))}</strong> ({html.escape(str(report.get('model_family', 'N/D')))})<br>
                 Fallback operativo: {'Si' if report.get('used_fallback') else 'No'}<br>
-                Cache de predicciones: {report.get('prediction_cache_size', 0)} cruces<br>
-                Artefacto: {report.get('report_path') or 'world-cup-2026-latest.json'}
+                Cache de predicciones: {html.escape(str(report.get('prediction_cache_size', 0)))} cruces<br>
+                Artefacto: {html.escape(str(report.get('report_path') or 'world-cup-2026-latest.json'))}
             </div>
         </div>
         """,
@@ -1625,7 +1626,7 @@ def _render_world_cup_2026_dashboard(report: dict | None, fecha_simulacion: str,
                 st.markdown(
                     f"""
                     <div class="alttez-panel">
-                        <div class="alttez-section-title">Grupo {group_name}</div>
+                        <div class="alttez-section-title">Grupo {html.escape(str(group_name))}</div>
                         <div class="alttez-section-copy">
                             Snapshot de la ultima iteracion usada como referencia visual para la simulacion completa.
                         </div>
@@ -1922,12 +1923,12 @@ def main() -> None:
             st.markdown(
                 f"""
                 <div class="alttez-panel">
-                    <div class="alttez-section-title">{result['equipo_local']} vs {result['equipo_visitante']}</div>
+                    <div class="alttez-section-title">{html.escape(str(result['equipo_local']))} vs {html.escape(str(result['equipo_visitante']))}</div>
                     <div class="alttez-section-copy">
-                        {selected_match.get('tournament', 'Sin torneo')}<br>
-                        {_competition_class_label(selected_match.get('competition_class'))}
-                        {' | ' + str(selected_match.get('group_label')) if selected_match.get('group_label') else ''}<br>
-                        {_format_kickoff(selected_match.get('kickoff_at'))} | {selected_match.get('city') or 'Ciudad pendiente'}
+                        {html.escape(str(selected_match.get('tournament', 'Sin torneo')))}<br>
+                        {html.escape(str(_competition_class_label(selected_match.get('competition_class'))))}
+                        {html.escape(' | ' + str(selected_match.get('group_label'))) if selected_match.get('group_label') else ''}<br>
+                        {html.escape(str(_format_kickoff(selected_match.get('kickoff_at'))))} | {html.escape(str(selected_match.get('city') or 'Ciudad pendiente'))}
                     </div>
                     <div style="margin-top:0.85rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
                         {_render_status_pill('Estado', selected_match.get('status'))}
