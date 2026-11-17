@@ -235,7 +235,7 @@ def summarize_regulation_points(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "regulation_points_avg": float(sum(points) / len(points)),
         "regulation_points_pct_of_max": float(sum(points) / total_max) if total_max > 0 else 0.0,
         "regulation_full_hit_rate": float(
-            sum(1 for point_value, max_value in zip(points, max_points) if point_value == max_value) / len(points)
+            sum(1 for point_value, max_value in zip(points, max_points, strict=False) if point_value == max_value) / len(points)
         ),
         "regulation_zero_rate": float(sum(1 for point_value in points if point_value == 0) / len(points)),
         "regulation_points_distribution": dict(sorted(distribution.items())),

@@ -25,7 +25,6 @@ import pandas as pd
 from alttez.api.settings import load_local_env
 from alttez.inference.calibration import (
     DEFAULT_CALIBRATION_PATH,
-    IsotonicCalibration,
     ProbabilityCalibration,
     expected_calibration_error,
     fit_isotonic,

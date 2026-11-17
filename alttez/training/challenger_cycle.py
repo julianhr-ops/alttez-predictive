@@ -188,7 +188,7 @@ def expected_calibration_error(eval_df: pd.DataFrame, *, n_bins: int = 10) -> fl
 
     bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
     ece = 0.0
-    for lower, upper in zip(bin_edges[:-1], bin_edges[1:]):
+    for lower, upper in zip(bin_edges[:-1], bin_edges[1:], strict=False):
         in_bin = (confidence > lower) & (confidence <= upper)
         bin_size = int(in_bin.sum())
         if bin_size == 0:
@@ -276,7 +276,7 @@ def _xgb_lambda_stream(artifact_bundle: dict[str, Any], holdout_df: pd.DataFrame
     models = artifact_bundle["models"]
     lambdas_home = np.maximum(np.asarray(models["home_goals"].predict(x_holdout), dtype=float), 0.05)
     lambdas_away = np.maximum(np.asarray(models["away_goals"].predict(x_holdout), dtype=float), 0.05)
-    return [(float(h), float(a)) for h, a in zip(lambdas_home, lambdas_away)]
+    return [(float(h), float(a)) for h, a in zip(lambdas_home, lambdas_away, strict=False)]
 
 
 def _score_lambda_stream(
@@ -290,7 +290,7 @@ def _score_lambda_stream(
 ) -> dict[str, Any]:
     ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
     rows = []
-    for (lambda_home, lambda_away), row in zip(lambdas, ordered_holdout.itertuples(index=False)):
+    for (lambda_home, lambda_away), row in zip(lambdas, ordered_holdout.itertuples(index=False), strict=False):
         prob_matrix = build_probability_matrix(lambda_home, lambda_away, max_goals=DEFAULT_MAX_GOALS, rho=rho)
         rows.append(
             _score_prediction_row(
@@ -345,7 +345,7 @@ def evaluate_lambda_blend(
     for weight in weight_grid:
         blended = [
             (weight * ch_h + (1.0 - weight) * cp_h, weight * ch_a + (1.0 - weight) * cp_a)
-            for (cp_h, cp_a), (ch_h, ch_a) in zip(champion_lambdas, challenger_lambdas)
+            for (cp_h, cp_a), (ch_h, ch_a) in zip(champion_lambdas, challenger_lambdas, strict=False)
         ]
         summary = _score_lambda_stream(
             blended,
@@ -490,7 +490,7 @@ def _fit_goal_models(train_df: pd.DataFrame) -> dict[str, Any]:
     mean_imp = (home_imp + away_imp) / 2.0
     feature_importance = dict(
         sorted(
-            ((col, float(val)) for col, val in zip(FEATURE_COLUMNS, mean_imp)),
+            ((col, float(val)) for col, val in zip(FEATURE_COLUMNS, mean_imp, strict=False)),
             key=lambda item: item[1],
             reverse=True,
         )
@@ -654,9 +654,9 @@ def _baseline_comparison(
 
     ordered_train = train_df.sort_values("date").reset_index(drop=True)
     ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
-    train_outcomes = [_outcome_label(int(h), int(a)) for h, a in zip(ordered_train["home_score"], ordered_train["away_score"])]
+    train_outcomes = [_outcome_label(int(h), int(a)) for h, a in zip(ordered_train["home_score"], ordered_train["away_score"], strict=False)]
     holdout_outcomes = [
-        _outcome_label(int(h), int(a)) for h, a in zip(ordered_holdout["home_score"], ordered_holdout["away_score"])
+        _outcome_label(int(h), int(a)) for h, a in zip(ordered_holdout["home_score"], ordered_holdout["away_score"], strict=False)
     ]
     probabilities = baseline_probabilities(
         train_outcomes,

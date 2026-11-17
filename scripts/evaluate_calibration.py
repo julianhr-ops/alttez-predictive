@@ -83,7 +83,7 @@ def load_closed_predictions(*, database_url: str | None, lookback_days: int) -> 
 def _brier(triplets: np.ndarray, outcomes: list[str]) -> float:
     index = {"H": 0, "D": 1, "A": 2}
     errors = []
-    for row, outcome in zip(triplets, outcomes):
+    for row, outcome in zip(triplets, outcomes, strict=False):
         target = np.zeros(3)
         idx = index.get(outcome)
         if idx is None:
@@ -98,7 +98,7 @@ def _accuracy(triplets: np.ndarray, outcomes: list[str]) -> float:
     index = {"H": 0, "D": 1, "A": 2}
     hits = [
         1.0 if int(np.argmax(row)) == index.get(outcome, -1) else 0.0
-        for row, outcome in zip(triplets, outcomes)
+        for row, outcome in zip(triplets, outcomes, strict=False)
     ]
     return float(np.mean(hits)) if hits else 0.0
 

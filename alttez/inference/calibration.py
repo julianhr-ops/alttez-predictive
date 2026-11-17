@@ -138,7 +138,7 @@ def rescale_matrix_to_triplet(matrix: np.ndarray, target: tuple[float, float, fl
     wanted = wanted / wanted_total
     factors = np.divide(wanted, raw, out=np.zeros_like(raw), where=raw > 0)
     out = array.copy()
-    for mask, factor in zip(masks, factors):
+    for mask, factor in zip(masks, factors, strict=False):
         out[mask] *= factor
     return out
 
@@ -416,7 +416,7 @@ def log_loss(triplets: np.ndarray, outcomes: list[str], *, epsilon: float = 1e-3
     """Log loss multiclase con piso epsilon. Menor es mejor; uniforme ~1.0986."""
     probs = np.clip(np.asarray(triplets, dtype=float), epsilon, 1.0)
     losses = []
-    for row, outcome in zip(probs, outcomes):
+    for row, outcome in zip(probs, outcomes, strict=False):
         idx = _OUTCOME_INDEX.get(outcome)
         if idx is None:
             continue

@@ -39,7 +39,7 @@ def _log_likelihood(
 ) -> float:
     """Suma de log P(marcador) bajo el DI-BP. Marcadores fuera de rango se ignoran."""
     total = 0.0
-    for (lambda_h, lambda_a), (home, away) in zip(lambdas, scores):
+    for (lambda_h, lambda_a), (home, away) in zip(lambdas, scores, strict=False):
         if home > max_goals or away > max_goals:
             continue
         matrix = engine.build_matrix(lambda_h, lambda_a, max_goals=max_goals)

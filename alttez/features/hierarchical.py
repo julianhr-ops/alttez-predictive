@@ -176,7 +176,7 @@ def fit_hierarchical_model(
     not_neutral = (~neutral).astype(float)
     n_teams = len(teams)
 
-    with pm.Model() as model:
+    with pm.Model():
         mu = pm.Normal("mu", mu=0.0, sigma=1.0)
         gamma = pm.Normal("gamma", mu=0.3, sigma=0.1)
         sigma_att = pm.HalfNormal("sigma_att", sigma=1.0)

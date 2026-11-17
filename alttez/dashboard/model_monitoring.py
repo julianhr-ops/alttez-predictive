@@ -62,7 +62,7 @@ def murphy_decomposition(
     edges = np.linspace(0.0, 1.0, bins + 1)
     reliability = 0.0
     resolution = 0.0
-    for low, high in zip(edges[:-1], edges[1:]):
+    for low, high in zip(edges[:-1], edges[1:], strict=False):
         if low == 0.0:
             mask = (confidences >= low) & (confidences <= high)
         else:

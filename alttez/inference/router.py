@@ -20,7 +20,6 @@ from alttez.evaluation.regulation_points import (
     scoreline_scenarios_for_prediction,
 )
 from alttez.experiments.tournament_oracle import (
-    DEFAULT_DIXON_COLES_RHO,
     build_probability_matrix,
     optimize_prediction,
     validate_points_optimal_recommendations,

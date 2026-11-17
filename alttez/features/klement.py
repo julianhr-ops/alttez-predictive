@@ -495,7 +495,7 @@ def build_klement_feature_state(
 
         window_start = match_date - pd.Timedelta(days=365 * knockout_window_years)
 
-        def _count_knockout_events(team_name: str) -> float:
+        def _count_knockout_events(team_name: str, window_start=window_start, match_date=match_date) -> float:
             event_count = sum(1 for event_date, _ in knockout_events.get(team_name, []) if window_start <= event_date < match_date)
             return float(math.log1p(event_count))
 

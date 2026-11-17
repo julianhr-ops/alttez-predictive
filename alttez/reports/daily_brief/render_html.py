@@ -217,9 +217,6 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 market_prob=html.escape(_fmt_pct(match.get("best_market_probability"))),
                 prediction=html.escape(match.get("primary_score") or "N/D"),
                 score_prob=html.escape(_fmt_pct(match.get("primary_score_probability"))),
-                raw_score=html.escape(
-                    f"{safe_text(match.get('most_likely_score'), 'N/D')} ({_fmt_pct(match.get('most_likely_score_probability'))})"
-                ),
                 ev_score=html.escape(safe_text(match.get("ev_optimal_score"), "N/D")),
                 ev=html.escape(_fmt_float(match.get("primary_ev"), digits=3)),
                 avg_confidence=html.escape(

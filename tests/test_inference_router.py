@@ -286,11 +286,11 @@ class TestSinglePredictorCalibration(unittest.TestCase):
         self.assertLess(cal_max, base_max)
         sides = ("home", "draw", "away")
         raw = [float(cal_pred[f"raw_prob_{side}"]) for side in sides]
-        for side, raw_value in zip(sides, raw):
+        for side, raw_value in zip(sides, raw, strict=False):
             self.assertAlmostEqual(raw_value, float(base_pred[f"prob_{side}"]), places=6)
             self.assertAlmostEqual(float(base_pred[f"raw_prob_{side}"]), float(base_pred[f"prob_{side}"]), places=6)
         calibrated = [float(cal_pred[f"prob_{side}"]) for side in sides]
-        for expected, actual in zip(temperature_scale(np.array(raw), 4.0), calibrated):
+        for expected, actual in zip(temperature_scale(np.array(raw), 4.0), calibrated, strict=False):
             self.assertAlmostEqual(float(expected), actual, places=6)
         # Sigue siendo distribucion valida.
         self.assertAlmostEqual(
