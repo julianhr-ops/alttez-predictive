@@ -12,6 +12,9 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+HOME_ADVANTAGE_ELO = 100
+
+
 def tournament_k_factor(tournament: str | None, base_k: float) -> float:
     """K del ELO segun la importancia del torneo.
 
@@ -97,7 +100,7 @@ class EloEngine:
             current_home_elo = self.ratings[home]
             current_away_elo = self.ratings[away]
 
-            home_advantage = 100 if not row["neutral"] else 0
+            home_advantage = HOME_ADVANTAGE_ELO if not row["neutral"] else 0
             home_eff = current_home_elo + home_advantage
 
             expected_home = self.get_expected_score(home_eff, current_away_elo)
