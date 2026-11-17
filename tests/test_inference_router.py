@@ -84,6 +84,7 @@ def _historical_df() -> pd.DataFrame:
         ("2026-04-19", "Mexico", "Brazil", 1, 1, True),
     ]
     frame = pd.DataFrame(rows, columns=["date", "home_team", "away_team", "home_score", "away_score", "neutral"])
+    frame["tournament"] = "Friendly"
     frame["date"] = pd.to_datetime(frame["date"])
     return frame
 
@@ -257,7 +258,7 @@ class TestSinglePredictorCalibration(unittest.TestCase):
 
         with patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(None)):
             # Baseline sin calibracion (compuerta apagada).
-            with patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}, clear=False):
+            with patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0", "ALTTEZ_SERVING_POLICY": "off"}, clear=False):
                 os.environ.pop("ALTTEZ_CALIBRATE_SINGLE_PREDICTOR", None)
                 base_pred = build_active_predictor(_historical_df(), "2026-05-27").predict_match(
                     "Mexico", "USA", is_neutral=True
@@ -272,6 +273,7 @@ class TestSinglePredictorCalibration(unittest.TestCase):
                     os.environ,
                     {
                         "ALTTEZ_MIN_SUPPORTED_MATCHES": "0",
+                        "ALTTEZ_SERVING_POLICY": "off",
                         "ALTTEZ_CALIBRATE_SINGLE_PREDICTOR": "true",
                         "ALTTEZ_SINGLE_PREDICTOR_CALIBRATION_PATH": str(artifact),
                     },

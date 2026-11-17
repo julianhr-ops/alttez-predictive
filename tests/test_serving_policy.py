@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import os
+import unittest
+from unittest.mock import patch
+
+import numpy as np
+import pandas as pd
+
+from alttez.evaluation import soccer_backtest as sb
+from alttez.evaluation.soccer_candidates import CANDIDATES, PRIMARY_CANDIDATE, fit_candidate
+from alttez.features.elo import rate_matches
+from alttez.inference.calibration import matrix_1x2
+from alttez.inference.router import (
+    ActiveModelSelection,
+    ActiveRecordLookup,
+    BivariatePoissonMatchPredictor,
+    build_active_predictor,
+)
+from alttez.inference.serving_policy import (
+    POLICY_ELO_ORDINAL,
+    POLICY_POISSON,
+    SERVING_POLICY_ENV,
+    SERVING_WINDOW_YEARS,
+    EloUnavailableError,
+    ServingPolicy,
+    build_serving_policy,
+    serving_policy_enabled,
+)
+from tests.test_inference_router import _historical_df
+from tests.test_soccer_backtest import synthetic_matches
+
+SIDES = ("home", "draw", "away")
+
+
+def _score_matrix(shape: int = 8) -> np.ndarray:
+    """A fixed, strictly positive score matrix that is not symmetric."""
+    rng = np.random.default_rng(3)
+    matrix = rng.random((shape, shape)) ** 3
+    return matrix / matrix.sum()
+
+
+def _live_predictor(**environ: str):
+    with patch.dict(os.environ, environ):
+        return build_active_predictor(_historical_df(), "2026-05-27")
+
+
+class EnabledSwitchTests(unittest.TestCase):
+    def test_default_is_on(self) -> None:
+        self.assertTrue(serving_policy_enabled(env={}))
+
+    def test_env_turns_it_off_and_on(self) -> None:
+        self.assertFalse(serving_policy_enabled(env={SERVING_POLICY_ENV: "off"}))
+        self.assertFalse(serving_policy_enabled(env={SERVING_POLICY_ENV: POLICY_POISSON}))
+        self.assertTrue(serving_policy_enabled(env={SERVING_POLICY_ENV: POLICY_ELO_ORDINAL}))
+
+    def test_explicit_argument_beats_the_environment(self) -> None:
+        self.assertFalse(serving_policy_enabled(False, env={SERVING_POLICY_ENV: "on"}))
+
+    def test_unknown_value_is_rejected_not_ignored(self) -> None:
+        with self.assertRaises(ValueError):
+            serving_policy_enabled(env={SERVING_POLICY_ENV: "elo-ish"})
+
+
+class MatchesTheValidatedRuleTests(unittest.TestCase):
+    def test_window_and_rule_are_the_ones_that_were_validated(self) -> None:
+        self.assertEqual(SERVING_WINDOW_YEARS, sb.WINDOW_YEARS)
+        spec = next(candidate for candidate in CANDIDATES if candidate.name == PRIMARY_CANDIDATE)
+        self.assertEqual((spec.kind, spec.fit_scale, spec.blend), ("ordinal", False, False))
+
+    def test_live_policy_equals_the_backtest_fit_at_the_same_date(self) -> None:
+        frame = synthetic_matches()
+        year = 2016
+        policy = build_serving_policy(frame, f"{year}-01-01")
+
+        with_elo = sb.add_pre_match_elo(frame)
+        spec = next(candidate for candidate in CANDIDATES if candidate.name == PRIMARY_CANDIDATE)
+        expected = fit_candidate(spec, sb._window(with_elo, year, sb.WINDOW_YEARS)).draw_model
+
+        self.assertAlmostEqual(policy.draw_model.home_advantage, expected.home_advantage, places=9)
+        self.assertAlmostEqual(policy.draw_model.draw_param, expected.draw_param, places=9)
+        before = frame[frame["date"] < pd.Timestamp(year=year, month=1, day=1)].reset_index(drop=True)
+        self.assertEqual(dict(policy.ratings), rate_matches(before).ratings)
+
+
+class NoLeakageTests(unittest.TestCase):
+    def test_matches_on_or_after_the_target_date_change_nothing(self) -> None:
+        frame = synthetic_matches()
+        target = pd.Timestamp("2016-06-30")
+        baseline = build_serving_policy(frame, target)
+
+        altered = frame.copy()
+        altered.loc[altered["date"] >= target, ["home_score", "away_score"]] = [9, 0]
+        policy = build_serving_policy(altered, target)
+
+        self.assertEqual(dict(policy.ratings), dict(baseline.ratings))
+        self.assertEqual(policy.draw_model, baseline.draw_model)
+
+    def test_a_match_on_the_target_date_itself_is_excluded(self) -> None:
+        frame = synthetic_matches()
+        target = frame.loc[frame["date"].dt.year == 2016, "date"].iloc[5]
+        without_day = frame[frame["date"] < target]
+        self.assertEqual(dict(build_serving_policy(frame, target).ratings), dict(build_serving_policy(without_day, target).ratings))
+
+
+class ServedMatrixTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.policy = build_serving_policy(synthetic_matches(), "2017-01-01")
+        self.team_a, self.team_b = sorted(self.policy.ratings)[:2]
+
+    def test_target_is_a_probability_triplet(self) -> None:
+        for neutral in (False, True):
+            target = self.policy.target_1x2(self.team_a, self.team_b, neutral)
+            self.assertAlmostEqual(sum(target), 1.0, places=12)
+            self.assertTrue(all(0.0 < p < 1.0 for p in target))
+
+    def test_matrix_marginals_equal_the_served_1x2(self) -> None:
+        matrix = _score_matrix()
+        for neutral in (False, True):
+            target = self.policy.target_1x2(self.team_a, self.team_b, neutral)
+            served = self.policy.serve(matrix, self.team_a, self.team_b, neutral)
+            self.assertAlmostEqual(float(served.sum()), 1.0, places=12)
+            for got, want in zip(matrix_1x2(served), target, strict=True):
+                self.assertAlmostEqual(got, want, delta=1e-9)
+
+    def test_scoreline_shape_is_kept_within_each_class(self) -> None:
+        matrix = _score_matrix()
+        served = self.policy.serve(matrix, self.team_a, self.team_b, False)
+        home_wins = np.tril_indices_from(matrix, k=-1)
+        np.testing.assert_allclose(served[home_wins] / served[home_wins].sum(), matrix[home_wins] / matrix[home_wins].sum(), atol=1e-12)
+
+    def test_a_team_without_a_rating_is_loud(self) -> None:
+        with self.assertRaises(EloUnavailableError):
+            self.policy.serve(_score_matrix(), self.team_a, "Atlantis", False)
+
+
+class RouterIntegrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(None)))
+        self.enterContext(patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}))
+        os.environ.pop(SERVING_POLICY_ENV, None)
+
+    def test_served_probabilities_are_the_elo_1x2_and_raw_poisson_is_kept(self) -> None:
+        served = _live_predictor()
+        off = _live_predictor(**{SERVING_POLICY_ENV: "off"})
+        prediction = served.predict_match("Mexico", "Brazil", is_neutral=True)
+        poisson = off.predict_match("Mexico", "Brazil", is_neutral=True)
+
+        target = served.serving_policy.target_1x2("Mexico", "Brazil", True)
+        self.assertEqual(prediction["serving_policy"], POLICY_ELO_ORDINAL)
+        self.assertFalse(prediction["used_fallback"])
+        for side, want in zip(SIDES, target, strict=True):
+            self.assertAlmostEqual(float(prediction[f"prob_{side}"]), want, delta=1e-9)
+            self.assertAlmostEqual(float(prediction[f"raw_prob_{side}"]), float(poisson[f"prob_{side}"]), places=9)
+        for got, want in zip(matrix_1x2(prediction["prob_matrix"]), target, strict=True):
+            self.assertAlmostEqual(got, want, delta=1e-9)
+        self.assertAlmostEqual(float(prediction["lambda_h"]), float(poisson["lambda_h"]), places=9)
+
+    def test_policy_off_serves_plain_poisson(self) -> None:
+        prediction = _live_predictor(**{SERVING_POLICY_ENV: "off"}).predict_match("Mexico", "Brazil", is_neutral=True)
+
+        self.assertEqual(prediction["serving_policy"], POLICY_POISSON)
+        self.assertFalse(prediction["used_fallback"])
+        for side in SIDES:
+            self.assertAlmostEqual(float(prediction[f"raw_prob_{side}"]), float(prediction[f"prob_{side}"]), places=9)
+
+    def test_missing_elo_falls_back_to_poisson_loudly(self) -> None:
+        predictor = _live_predictor()
+        predictor.serving_policy = ServingPolicy(POLICY_ELO_ORDINAL, predictor.serving_policy.draw_model, {"Mexico": 1500.0})
+
+        with self.assertLogs("alttez.inference.router", level="WARNING"):
+            prediction = predictor.predict_match("Mexico", "Brazil", is_neutral=True)
+
+        self.assertTrue(prediction["prediction_supported"])
+        self.assertTrue(prediction["used_fallback"])
+        self.assertIn("Brazil", prediction["fallback_reason"])
+        self.assertEqual(prediction["serving_policy"], POLICY_POISSON)
+        for side in SIDES:
+            self.assertAlmostEqual(float(prediction[f"raw_prob_{side}"]), float(prediction[f"prob_{side}"]), places=9)
+
+    def test_a_broken_elo_build_is_a_run_level_fallback(self) -> None:
+        history = _historical_df().drop(columns=["tournament"])
+        with self.assertLogs("alttez.inference.router", level="WARNING"):
+            predictor = build_active_predictor(history, "2026-05-27")
+            prediction = predictor.predict_match("Mexico", "Brazil", is_neutral=True)
+
+        self.assertTrue(predictor.used_fallback)
+        self.assertIn("serving policy", predictor.fallback_reason)
+        self.assertTrue(prediction["used_fallback"])
+        self.assertEqual(prediction["serving_policy"], POLICY_POISSON)
+
+    def test_committee_member_baselines_stay_raw_poisson(self) -> None:
+        selection = ActiveModelSelection(
+            version_key=None,
+            model_version="bivariate-test",
+            model_family="bivariate_poisson",
+            artifact_path=None,
+            requested_production_status="committee",
+        )
+        member = BivariatePoissonMatchPredictor(_historical_df(), "2026-05-27", selection=selection)
+        self.assertIsNone(member.poisson_baseline.serving_policy)
+
+
+if __name__ == "__main__":
+    unittest.main()

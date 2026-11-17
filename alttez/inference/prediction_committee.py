@@ -386,6 +386,7 @@ def build_prediction_committee(
                     artifact_path=None,
                     requested_production_status="committee",
                 ),
+                serving=False,
             ),
             DEFAULT_COMMITTEE_WEIGHTS["poisson_baseline"],
         ),

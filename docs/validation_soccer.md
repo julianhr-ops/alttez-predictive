@@ -164,9 +164,20 @@ Fitted Elo ordinal parameters in the final folds: home advantage 88 to 95 Elo po
 
 ### Reading it
 
-- **The primary candidate beats the champion.** On held-out years the Brier CI against Poisson raw is entirely below 0 pooled and in each of 2023, 2024 and 2025, and the same holds for RPS and log loss. This clears the bar set before the run.
+- **The primary candidate beats the champion.** On held-out years the Brier CI against Poisson raw is entirely below 0 pooled and in each of 2023, 2024 and 2025. RPS and log loss are entirely below 0 pooled (per-year RPS and log loss are in the JSON report). This clears the bar set before the run.
 - **Almost all of the gain comes from using Elo, not from the fitted draw model.** Against the existing Elo-only baseline the held-out edge is 0.0015 Brier. It is significant pooled on Brier and RPS and not on log loss, not significant in 2024 or 2025, and over all of 2018 to 2025 (which includes the selection years) it is -0.0003 [-0.0010, +0.0003]. Treat the two Elo rules as equivalent in accuracy. The fitted rule is preferred for serving because it is an explicit likelihood model whose draw rate is calibrated (0.230 against an observed 0.233 over 2018 to 2025), and because its probabilities come with a coherent score matrix.
 - **The Poisson blend adds nothing.** On the selection years the blend and the fitted scale were within 0.0004 Brier of each other and of the plain rule.
 - Pooled 2018 to 2025 numbers for the primary (Brier 0.5145, RPS 0.1705, log loss 0.8743 against Poisson raw 0.5811 / 0.1998 / 0.9760) mix selection and held-out years, so only the 2023 to 2025 table above is an untouched test.
 - Cadence: all numbers use `--refit-days 1`; development used the same cached refit-1 Poisson output, so there is no cadence gap between selection and final.
 - Not covered: matches the router's support gate rejects (a team with fewer than 5 matches in 4 years), and any team absent from the Elo history. Those keep the Poisson abstain/fallback path.
+
+## Live serving
+
+The held-out result cleared the bar, so the single predictor serves it (`alttez/inference/serving_policy.py`, wired in `PoissonMatchPredictor`). Default ON; `ALTTEZ_SERVING_POLICY=off` restores plain Poisson.
+
+- Ratings come from `rate_matches` over stored matches dated strictly before the target date, the same walk as the backtest. The ordinal draw model is fitted on the matches from 1 January four calendar years before the target year up to the target date. A test pins that this equals the backtest fit at the same date.
+- The served matrix is the Poisson score matrix rescaled by class ratios to the Elo 1X2, so `prob_home/draw/away`, the recommendations and the scoreline all come from it. Marginals match the target 1X2 to 1e-9 (tested).
+- The payload carries `serving_policy` (`elo_ordinal_rescale` or `poisson`) and keeps `raw_prob_home/draw/away` as the raw Poisson 1X2, so the calibration pipeline still reads raw Poisson. The single-predictor temperature calibration is not applied on top of the Elo 1X2 (it was fitted on Poisson output).
+- Loud fallback: a team without an Elo rating serves Poisson for that match with `used_fallback=True` and a `fallback_reason`; a failure building the ratings sets the run-level flags the same way.
+- The committee's `poisson_baseline` and `bivariate` members and the XGBoost baseline stay raw Poisson. The champion stays the production-served model and `challenger_cycle` is untouched; it scores the Poisson engine offline and does not read served output.
+- The support gate is unchanged: matches the Poisson gate abstains on still abstain.

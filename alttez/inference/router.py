@@ -34,6 +34,30 @@ from alttez.features.poisson import PoissonEngine
 from alttez.features.bivariate_poisson import BivariatePoissonEngine, load_active_bivariate_params
 from alttez.features.hierarchical import HierarchicalBayesEngine, load_active_hierarchical_strengths
 from alttez.inference.calibration import load_single_predictor_calibration, matrix_1x2
+from alttez.inference.serving_policy import (
+    POLICY_ELO_ORDINAL,
+    POLICY_POISSON,
+    EloUnavailableError,
+    ServingPolicy,
+    build_serving_policy,
+    serving_policy_enabled,
+)
+
+
+def _join_reasons(*reasons: str | None) -> str | None:
+    joined = "; ".join(reason for reason in reasons if reason)
+    return joined or None
+
+
+@dataclass(frozen=True, slots=True)
+class _ServedMatrix:
+    matrix: np.ndarray
+    raw_1x2: tuple[float, float, float]
+    policy: str
+    used_fallback: bool
+    fallback_reason: str | None
+
+
 
 
 def _raw_probability_fields(raw_1x2: tuple[float, float, float]) -> dict[str, float]:
@@ -342,6 +366,7 @@ class PoissonMatchPredictor(BaseMatchPredictor):
         poisson_kwargs: dict[str, Any] | None = None,
         used_fallback: bool = False,
         fallback_reason: str | None = None,
+        serving: bool | None = None,
     ) -> None:
         super().__init__(selection=selection, used_fallback=used_fallback, fallback_reason=fallback_reason)
         self.model_version = DEFAULT_POISSON_MODEL_VERSION if used_fallback else selection.model_version
@@ -351,6 +376,33 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             kwargs.update(poisson_kwargs)
         self.engine = PoissonEngine(**kwargs)
         self.engine.fit(historical_df, target_date=target_date)
+        # ``serving`` None follows ALTTEZ_SERVING_POLICY (default ON); committee members that must
+        # stay raw Poisson pass False.
+        self.serving_policy: ServingPolicy | None = None
+        if serving_policy_enabled(serving):
+            try:
+                self.serving_policy = build_serving_policy(historical_df, target_date)
+            except Exception as exc:  # noqa: BLE001 - a broken Elo build must degrade to Poisson, loudly.
+                reason = f"serving policy {POLICY_ELO_ORDINAL} unavailable: {type(exc).__name__}: {exc}"
+                LOGGER.warning(reason)
+                self.used_fallback = True
+                self.fallback_reason = _join_reasons(self.fallback_reason, reason)
+
+    def _serve_matrix(self, prob_matrix: np.ndarray, home_team: str, away_team: str, is_neutral: bool) -> _ServedMatrix:
+        """Apply the serving policy; the raw Poisson 1X2 is kept either way for the calibration pipeline."""
+        raw_1x2 = matrix_1x2(prob_matrix)
+        if self.serving_policy is not None:
+            try:
+                served = self.serving_policy.serve(prob_matrix, home_team, away_team, is_neutral)
+            except EloUnavailableError as exc:
+                reason = f"serving policy {self.serving_policy.name} unavailable for {home_team} vs {away_team}: {exc}"
+                LOGGER.warning(reason)
+                matrix, _ = self._calibrate_matrix(prob_matrix)
+                return _ServedMatrix(matrix, raw_1x2, POLICY_POISSON, True, _join_reasons(self.fallback_reason, reason))
+            # The single-predictor calibration is fitted on Poisson output, so it is not applied to the Elo 1X2.
+            return _ServedMatrix(served, raw_1x2, self.serving_policy.name, self.used_fallback, self.fallback_reason)
+        matrix, _ = self._calibrate_matrix(prob_matrix)
+        return _ServedMatrix(matrix, raw_1x2, POLICY_POISSON, self.used_fallback, self.fallback_reason)
 
     def get_team_profile(self, team: str) -> dict[str, float]:
         return self.engine.get_team_profile(canonical_team_name(team))
@@ -380,6 +432,7 @@ class PoissonMatchPredictor(BaseMatchPredictor):
                 "requested_model_family": self.requested_model_family,
                 "used_fallback": self.used_fallback,
                 "fallback_reason": self.fallback_reason,
+                "serving_policy": POLICY_POISSON if self.serving_policy is None else self.serving_policy.name,
                 "profile_local": profile_local,
                 "profile_visitante": profile_visitante,
                 "prediction_supported": False,
@@ -413,7 +466,8 @@ class PoissonMatchPredictor(BaseMatchPredictor):
         # rho=None resuelve el rho Dixon-Coles ajustado por MLE (artifact activo),
         # con fallback a DEFAULT_DIXON_COLES_RHO cuando no hay artefacto.
         prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=None)
-        prob_matrix, raw_1x2 = self._calibrate_matrix(prob_matrix)
+        served = self._serve_matrix(prob_matrix, home_team, away_team, is_neutral)
+        prob_matrix, raw_1x2 = served.matrix, served.raw_1x2
         recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
         score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
@@ -432,8 +486,9 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             "model_family": self.model_family,
             "requested_model_version": self.requested_model_version,
             "requested_model_family": self.requested_model_family,
-            "used_fallback": self.used_fallback,
-            "fallback_reason": self.fallback_reason,
+            "used_fallback": served.used_fallback,
+            "fallback_reason": served.fallback_reason,
+            "serving_policy": served.policy,
             "profile_local": profile_local,
             "profile_visitante": profile_visitante,
             "prediction_supported": True,
@@ -515,6 +570,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
                 requested_production_status=selection.requested_production_status,
             ),
             poisson_kwargs=poisson_kwargs,
+            serving=False,
         )
         self.recent_state = _build_recent_form_state(self.historical_df)
         _, self.klement_state = build_klement_feature_state(self.historical_df, database_url=database_url)
@@ -659,7 +715,7 @@ class BivariatePoissonMatchPredictor(BaseMatchPredictor):
         super().__init__(selection=selection)
         self.model_family = "bivariate_poisson"
         self.poisson_baseline = PoissonMatchPredictor(
-            historical_df, target_date, selection=selection, poisson_kwargs=poisson_kwargs
+            historical_df, target_date, selection=selection, poisson_kwargs=poisson_kwargs, serving=False
         )
         params = load_active_bivariate_params()
         self.engine = BivariatePoissonEngine(
