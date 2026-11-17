@@ -7,7 +7,6 @@
 | Historico internacional | Supabase o fallback local | Entrenamiento y perfiles |
 | Agenda/resultados live | Stack de proveedores | Prediccion diaria y cierre |
 | Configuracion Mundial 2026 | `storage/world_cup_2026/` | Simulacion |
-| Graficos de paises | `storage/graphics/countries/` | Presentacion |
 | Artefactos de modelos | Local/Supabase segun servicio | Inferencia versionada |
 | Reportes y auditorias | `artifacts/` | Salidas regenerables |
 
