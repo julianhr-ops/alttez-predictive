@@ -21,7 +21,7 @@ On the 29 deduplicated matches the model had a clear class bias. It predicted 27
 
 The larger limit was the number of labelled matches. Tournament results were not being ingested, so only 29 matches could be scored. A multi-source results backfill (football-data.org for the World Cup, the ESPN scoreboard for friendlies) lifted the evaluated predictions from 20 to 287, and from 34 to 137 with a stored probability. The backfill now runs as a non-fatal stage of the daily process (`scripts/backfill_match_results.py`).
 
-With 137 labelled matches, three post-hoc corrections were tried with leave-one-out validation: a three-weight calibration, temperature scaling and a draw boost. All three made the Brier score worse (0.566 before, 0.569, 0.589 and 0.583 after). The stored probabilities were already close to the base rates, so the deficit was resolution, not calibration. Overall Brier was 0.634 and accuracy 46.7%. World Cup matches scored 0.630, close to the 0.667 of a uniform guess.
+With 137 labelled matches, three post-hoc corrections were tried with leave-one-out validation, namely a three-weight calibration, temperature scaling and a draw boost. All three made the Brier score worse (0.566 before, 0.569, 0.589 and 0.583 after). The stored probabilities were already close to the base rates, so the deficit was resolution, not calibration. Overall Brier was 0.634 and accuracy 46.7%. World Cup matches scored 0.630, close to the 0.667 of a uniform guess.
 
 That sample was small, had no baselines and no uncertainty estimates. The next step was to measure properly.
 
@@ -52,4 +52,4 @@ These follow from the validation report and are not tested yet.
 - A Poisson model whose expected goals use Elo, or an Elo-based 1X2 for the matches the Poisson model abstains on, are the first candidates to run through the same harness.
 - A class-specific correction such as the isotonic option targets the draw bias. A single temperature cannot.
 - Neutral venues. The home label is nominal there, and 2,494 of the 7,829 test-year matches were neutral.
-- Not evaluated: XGBoost, the hierarchical and bivariate Poisson models, the committee consensus and the tournament simulation.
+- XGBoost, the hierarchical and bivariate Poisson models, the committee consensus and the tournament simulation have not been evaluated.
