@@ -21,7 +21,9 @@ script and by `fetch_espn_scoreboard`; tests are offline.
 - Platt and isotonic calibration of the Elo-only output.
 - All hyperparameters, calibrators, `sd` and blend coefficients are fitted per test season on earlier seasons only (grid scored on the last five training seasons).
 
-## Result (walk-forward, test seasons 2020-21 to 2025-26, 7,776 games, 7,764 with a closing line)
+## Result (walk-forward, test seasons 2020-21 to 2025-26)
+
+7,776 games were played in the test seasons and 7,764 have a closing line. The table is scored on those 7,764 games, so every row sees the same games.
 
 | model | Brier | log loss | accuracy | ECE |
 | --- | --- | --- | --- | --- |
@@ -32,7 +34,7 @@ script and by `fetch_espn_scoreboard`; tests are offline.
 | market close | 0.2067 | 0.5995 | 0.678 | 0.012 |
 | Elo + market blend | 0.2070 | 0.6004 | 0.679 | 0.010 |
 
-Paired bootstrap by game date, 95% CI, pooled over the six test seasons: MOV Elo (with or without Platt) beats the constant rate (also in every season individually) and vanilla Elo (pooled; season by season the log-loss CI excludes 0 in 3 of 6 seasons for Elo and 4 of 6 for Elo + Platt, and the gain is about 0.005). It does not beat the market close in any season (pooled log loss +0.025 worse, CI excludes 0). The blend gives the Elo logit a coefficient of about zero and the market logit about 1.03, so it reproduces the market: Brier difference vs market +0.0004 [-0.0000, +0.0008], log loss +0.0009 [+0.0000, +0.0017]. Elo adds no measurable information to the closing line; its value is covering games that have no line yet.
+Paired bootstrap by game date, 95% CI, pooled over the six test seasons: MOV Elo (with or without Platt) beats the constant rate (also in every season individually) and vanilla Elo (pooled, log loss -0.0055 [-0.0078, -0.0032] for MOV Elo; season by season the log-loss CI excludes 0 in 3 of 6 seasons for Elo and 4 of 6 for Elo + Platt, and the gain is about 0.005). It does not beat the market close in any season (pooled log loss +0.0245 [+0.0202, +0.0288] worse for MOV Elo, +0.0243 [+0.0200, +0.0286] for Elo + Platt). The blend gives the Elo logit a coefficient of about zero and the market logit about 1.03, so it reproduces the market: Brier difference vs market +0.0004 [-0.0000, +0.0008], log loss +0.0009 [+0.0000, +0.0017]. Elo adds no measurable information to the closing line; its value is covering games that have no line yet.
 
 ## Operation (daily)
 
@@ -48,3 +50,9 @@ Order inside one run: refresh hoopR (a failed refresh falls back to the cache an
 - **Live scoreboard.** Graded rows give served vs market Brier and accuracy on the same games. The paired bootstrap interval (by game date) is shown only from 30 lined games.
 - **Known limit.** The blend coefficients are fitted on odds-API closing lines in hoopR; live lines are ESPN's provider (usually DraftKings), recorded in `market_source`. Compare the live scoreboard with the validation table before trusting the blend more than the line.
 - **Exit codes.** 0 ok, 1 digest delivery failed, 2 data or database error, 3 `stale_data`. With `--dry-run` and no `--database-url` the database is never opened; with no URL and no `--dry-run` the run prints only. The agent never applies migration 015; the engineer runs it.
+
+## Attribution and disclaimer
+
+- Schedule and closing-line data come from [sportsdataverse/hoopR-nba-data](https://github.com/sportsdataverse/hoopR-nba-data), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The repository does not redistribute the files. The scripts download them at run time and cache them under `artifacts/nba/`. ALTTEZ changes the data by dropping non-NBA franchise ids and duplicate rows, converting tip-off times to US dates, and normalising the sign of the spread (see Data above).
+- Upcoming games and the DraftKings line come from ESPN's unofficial public scoreboard JSON, used for personal and educational purposes. The line belongs to a third party. ALTTEZ has no affiliation with the NBA, ESPN, DraftKings, or any bookmaker.
+- The output is a statistical research result. It is not betting or financial advice.

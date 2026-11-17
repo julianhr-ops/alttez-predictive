@@ -9,7 +9,8 @@
 | `alttez/features/` | Features, ELO, Poisson, jerarquicos y preprocesamiento |
 | `alttez/inference/` | Router, comite, calibracion y simulacion Mundial 2026 |
 | `alttez/training/` | Entrenamiento, tuning y ciclo champion/challenger |
-| `alttez/evaluation/` | Metricas y reglas de puntuacion |
+| `alttez/evaluation/` | Metricas, baselines, bootstrap pareado, backtest walk-forward de futbol y reglas de puntuacion |
+| `alttez/nba/` | Pipeline NBA: datos, modelos Elo y mercado, validacion, prediccion y almacenamiento |
 | `alttez/operations/` | Memoria, registro, artefactos, expansion y alertas |
 | `alttez/reports/` | Brief diario, Mundial 2026 y entregas |
 | `alttez/dashboard/` | Aplicacion Streamlit y monitoreo |
@@ -69,11 +70,20 @@ soportada, metricas, artefacto y politica de promocion son controles separados.
 ## Persistencia
 
 `api/db.py` resuelve la URL de base. `api/migrations.py` descubre y aplica SQL. Las
-migraciones actuales van de `001` a `012`; verificar siempre el directorio porque
+migraciones actuales van de `001` a `015`; verificar siempre el directorio porque
 la cadena seguira creciendo.
 
 `operations/prediction_memory.py` guarda corridas y predicciones, cierra
 evaluaciones, calcula monitoreo y administra versiones activas.
+
+## NBA
+
+`alttez/nba/data.py` descarga y cachea los datos gratuitos (hoopR y ESPN) sin red
+en las pruebas. `model.py` ajusta Elo con margen de victoria, el modelo de mercado y
+la mezcla; `evaluate.py` valida por temporada contra baselines; `predict.py` sirve
+las predicciones con una compuerta de datos frescos; `store.py` escribe una sola vez
+en `public.nba_predictions` y califica despues del partido. Politica de modelo
+servido y codigos de salida: `docs/nba.md`.
 
 ## Presentacion y entrega
 

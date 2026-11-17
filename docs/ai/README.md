@@ -18,7 +18,8 @@ sin tener que reconstruir la arquitectura en cada sesion.
 ## Resumen ejecutivo
 
 ALTTEZ es un motor de prediccion de partidos de futbol orientado a selecciones y
-torneos. Obtiene agenda y resultados desde una cadena de proveedores, normaliza e
+torneos, con un pipeline separado para partidos de la NBA (`alttez/nba/`).
+Cada modelo se mide contra baselines con bootstrap pareado. Obtiene agenda y resultados desde una cadena de proveedores, normaliza e
 ingiere datos, construye features ELO/Poisson/Klement, produce probabilidades 1X2 y
 marcadores, evalua modelos, conserva memoria de predicciones y genera reportes
 diarios. Una aplicacion Streamlit presenta analisis y monitoreo.
@@ -49,6 +50,9 @@ historico -> entrenamiento challenger -> evaluacion/gobierno
 | Esquema SQL | `sql/supabase/migrations/` |
 | Contratos de ingestion | `alttez/ingestion/contracts.py` |
 | Contrato de pruebas | `tests/` y `unittest` |
+| Medicion y baselines | `alttez/evaluation/`, `docs/validation_soccer.md`, `docs/nba.md` |
+| NBA | `alttez/nba/`, `docs/nba.md` |
+| Vista general | `docs/architecture.md` (diagrama Mermaid) |
 
 ## Limites de esta documentacion
 

@@ -1,68 +1,56 @@
-# ALTTEZ Provider Stack
+# Provider stack
 
-ALTTEZ now uses a provider stack instead of relying on a single football data source.
+ALTTEZ reads soccer fixtures and results through an ordered chain of providers. A provider that is not configured is skipped, and the next one is tried. No single API is required.
 
-## Priority
+## Provider order
 
-The default order is controlled by `ALTTEZ_PROVIDER_STACK`:
+Two stacks exist, each with its own environment variable.
 
-1. `api_football`
-2. `football_data_org`
-3. `statsbomb_open`
-4. `local_json`
+| Stack | Variable | Default in code | Value in `.env.example` and the daily workflow |
+| --- | --- | --- | --- |
+| Raw ingestion (`provider_stack.py`) | `ALTTEZ_PROVIDER_STACK` | `api_football`, `football_data_org`, `statsbomb_open`, `local_json` | `espn`, `football_data_org`, `statsbomb_open`, `local_json` |
+| Live daily agenda (`live_matches.py`) | `ALTTEZ_LIVE_PROVIDER_STACK` | `espn`, `football_data_org`, `local_json` | `espn`, `football_data_org`, `local_json` |
 
-## Purpose of each provider
+The code default for the raw stack lists `api_football` first. Set `ALTTEZ_PROVIDER_STACK` to the `.env.example` value to put the keyless ESPN feed first.
 
-- `api_football`: primary operational fixture feed
-- `football_data_org`: structured fallback for fixtures and scores
-- `statsbomb_open`: richer historical analytical layer from a local dataset mirror
-- `local_json`: manual fallback for testing and emergency ingestion
+## Providers
+
+| Provider | Needs | Role |
+| --- | --- | --- |
+| `espn` | no key | Unofficial public scoreboard JSON. Primary live agenda and results, including friendlies. Enabled unless `ALTTEZ_ESPN_ENABLED=false`. |
+| `football_data_org` | `ALTTEZ_FOOTBALL_DATA_KEY` | Structured fixtures and scores for the competitions in `ALTTEZ_FOOTBALL_DATA_LIVE_COMPETITIONS`. |
+| `api_football` | `ALTTEZ_API_FOOTBALL_KEY` | Optional paid feed. The scheduled workflow does not include it in its stacks. |
+| `statsbomb_open` | `ALTTEZ_STATSBOMB_OPEN_ROOT` | Event-level historical data from a local clone of StatsBomb Open Data. |
+| `local_json` | `ALTTEZ_LOCAL_JSON_PATH` | Manual fallback for tests and emergency ingestion. |
+
+ESPN and the DraftKings odds it relays are third-party data. ALTTEZ has no affiliation with ESPN, DraftKings, or any league. The ESPN endpoints are unofficial and can change or disappear without notice.
 
 ## Environment variables
 
-See `.env.example` for the full template.
+`.env.example` is the full template. The variables for providers are `ALTTEZ_PROVIDER_STACK`, `ALTTEZ_LIVE_PROVIDER_STACK`, `ALTTEZ_ESPN_ENABLED`, `ALTTEZ_ESPN_LEAGUES`, `ALTTEZ_ESPN_BASE_URL`, `ALTTEZ_API_FOOTBALL_KEY`, `ALTTEZ_FOOTBALL_DATA_KEY`, `ALTTEZ_STATSBOMB_OPEN_ROOT`, and `ALTTEZ_LOCAL_JSON_PATH`. Never commit a real key.
 
-Core keys:
+## Check which providers are configured
 
-- `ALTTEZ_PROVIDER_STACK`
-- `ALTTEZ_API_FOOTBALL_KEY`
-- `ALTTEZ_FOOTBALL_DATA_KEY`
-- `ALTTEZ_STATSBOMB_OPEN_ROOT`
-- `ALTTEZ_LOCAL_JSON_PATH`
-
-## Healthcheck
-
-To see which providers are configured:
-
-```powershell
-venv\Scripts\python.exe -m alttez.ingestion.provider_healthcheck
+```bash
+python -m alttez.ingestion.provider_healthcheck --json
 ```
 
-JSON output:
+The output lists each provider with `configured`, `detail`, and its position in the stack. With `ALTTEZ_PROVIDER_STACK` unset, the report marks `espn` as an unknown provider because it checks the code default for the raw stack, which has no `espn` entry.
 
-```powershell
-venv\Scripts\python.exe -m alttez.ingestion.provider_healthcheck --json
+If you change `.env`, restart Streamlit and any other long-running process. A running process keeps the old values.
+
+## Fetch without writing
+
+```bash
+python -m alttez.ingestion.provider_stack --dry-run
+python -m alttez.ingestion.provider_stack --provider-order espn --dry-run
 ```
 
-If you update `.env`, restart Streamlit or any long-lived process before trusting the next sync attempt. The live dashboard now surfaces provider diagnostics, but a stale process can still hold old environment values until restart.
+The first command uses the configured order and skips every provider that has no configuration. The second overrides the order and queries only ESPN. Neither writes to the database.
 
-## Dry-run fetch
+## StatsBomb Open Data layout
 
-Run the provider stack without writing to Supabase:
-
-```powershell
-venv\Scripts\python.exe -m alttez.ingestion.provider_stack --dry-run
-```
-
-Provider override example:
-
-```powershell
-venv\Scripts\python.exe -m alttez.ingestion.provider_stack --provider-order api_football,football_data_org --dry-run
-```
-
-## Notes on StatsBomb Open Data
-
-The StatsBomb provider expects a local folder compatible with the public repository structure:
+The `statsbomb_open` provider expects a local clone that keeps the public repository layout.
 
 ```text
 <root>
@@ -72,8 +60,4 @@ The StatsBomb provider expects a local folder compatible with the public reposit
         <season_id>.json
 ```
 
-Configure it with:
-
-```text
-ALTTEZ_STATSBOMB_OPEN_ROOT=C:\path\to\statsbomb-open-data
-```
+Set the clone path with `ALTTEZ_STATSBOMB_OPEN_ROOT`. StatsBomb Open Data requires attribution when you use it. Download scripts are in `scripts/download_statsbomb_open_data.ps1` and `scripts/check_statsbomb_download.ps1`.
