@@ -6,10 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from alttez.experiments.tournament_oracle import optimize_prediction
 from alttez.features.klement import MODEL_FEATURE_COLUMNS
+from alttez.inference.calibration import temperature_scale
 from alttez.inference.router import (
     XGBOOST_FEATURE_COLUMNS,
     ActiveRecordLookup,
@@ -282,6 +284,14 @@ class TestSinglePredictorCalibration(unittest.TestCase):
 
         # T=4 aplana el 1X2 agregado: la clase mas probable pierde masa.
         self.assertLess(cal_max, base_max)
+        sides = ("home", "draw", "away")
+        raw = [float(cal_pred[f"raw_prob_{side}"]) for side in sides]
+        for side, raw_value in zip(sides, raw):
+            self.assertAlmostEqual(raw_value, float(base_pred[f"prob_{side}"]), places=6)
+            self.assertAlmostEqual(float(base_pred[f"raw_prob_{side}"]), float(base_pred[f"prob_{side}"]), places=6)
+        calibrated = [float(cal_pred[f"prob_{side}"]) for side in sides]
+        for expected, actual in zip(temperature_scale(np.array(raw), 4.0), calibrated):
+            self.assertAlmostEqual(float(expected), actual, places=6)
         # Sigue siendo distribucion valida.
         self.assertAlmostEqual(
             float(cal_pred["prob_home"]) + float(cal_pred["prob_draw"]) + float(cal_pred["prob_away"]),

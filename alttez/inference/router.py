@@ -34,7 +34,12 @@ from alttez.ingestion.live_matches import canonical_team_name
 from alttez.features.poisson import PoissonEngine
 from alttez.features.bivariate_poisson import BivariatePoissonEngine, load_active_bivariate_params
 from alttez.features.hierarchical import HierarchicalBayesEngine, load_active_hierarchical_strengths
-from alttez.inference.calibration import load_single_predictor_calibration
+from alttez.inference.calibration import load_single_predictor_calibration, matrix_1x2
+
+
+def _raw_probability_fields(raw_1x2: tuple[float, float, float]) -> dict[str, float]:
+    return {"raw_prob_home": raw_1x2[0], "raw_prob_draw": raw_1x2[1], "raw_prob_away": raw_1x2[2]}
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -303,6 +308,13 @@ class BaseMatchPredictor(ABC):
         # NEUTRA salvo que ALTTEZ_CALIBRATE_SINGLE_PREDICTOR este encendido.
         self.calibration = load_single_predictor_calibration()
 
+    def _calibrate_matrix(self, prob_matrix: np.ndarray) -> tuple[np.ndarray, tuple[float, float, float]]:
+        """Calibra la matriz (si la calibracion esta activa) y devuelve tambien su 1X2 crudo, previo a calibrar."""
+        raw_1x2 = matrix_1x2(prob_matrix)
+        if not self.calibration.is_neutral:
+            prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
+        return prob_matrix, raw_1x2
+
     @abstractmethod
     def get_team_profile(self, team: str) -> dict[str, float]:
         raise NotImplementedError
@@ -402,8 +414,7 @@ class PoissonMatchPredictor(BaseMatchPredictor):
         # rho=None resuelve el rho Dixon-Coles ajustado por MLE (artifact activo),
         # con fallback a DEFAULT_DIXON_COLES_RHO cuando no hay artefacto.
         prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=None)
-        if not self.calibration.is_neutral:
-            prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
+        prob_matrix, raw_1x2 = self._calibrate_matrix(prob_matrix)
         recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
         score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
@@ -435,6 +446,7 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             "prob_home": result_probabilities.get(f"Victoria {home_team}"),
             "prob_draw": result_probabilities.get("Empate"),
             "prob_away": result_probabilities.get(f"Victoria {away_team}"),
+            **_raw_probability_fields(raw_1x2),
             "result_summary": result_summary,
             "recommendations": recommendations,
             "primary_score": score_decision["primary_score"],
@@ -567,8 +579,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             lambda_h = max(float(self.models["home_goals"].predict(feature_df)[0]), 0.05)
             lambda_a = max(float(self.models["away_goals"].predict(feature_df)[0]), 0.05)
             prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=None)
-            if not self.calibration.is_neutral:
-                prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
+            prob_matrix, raw_1x2 = self._calibrate_matrix(prob_matrix)
             recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
             recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
             score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
@@ -584,6 +595,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             baseline["prob_home"] = result_probabilities.get(f"Victoria {home_team}")
             baseline["prob_draw"] = result_probabilities.get("Empate")
             baseline["prob_away"] = result_probabilities.get(f"Victoria {away_team}")
+            baseline.update(_raw_probability_fields(raw_1x2))
             baseline["result_summary"] = result_summary
             baseline["recommendations"] = recommendations
             baseline["primary_score"] = score_decision["primary_score"]
@@ -604,11 +616,11 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             probability_map.setdefault("H", 0.0)
             probability_map.setdefault("D", 0.0)
             probability_map.setdefault("A", 0.0)
+            raw_1x2 = (probability_map["H"], probability_map["D"], probability_map["A"])
             if not self.calibration.is_neutral:
-                cal_h, cal_d, cal_a = self.calibration.calibrate_triplet(
-                    probability_map["H"], probability_map["D"], probability_map["A"]
+                probability_map["H"], probability_map["D"], probability_map["A"] = self.calibration.calibrate_triplet(
+                    *raw_1x2
                 )
-                probability_map["H"], probability_map["D"], probability_map["A"] = cal_h, cal_d, cal_a
             market_rows = [
                 {"Mercado": f"Victoria {home_team}", "Probabilidad": probability_map["H"]},
                 {"Mercado": "Empate", "Probabilidad": probability_map["D"]},
@@ -617,6 +629,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             baseline["prob_home"] = probability_map["H"]
             baseline["prob_draw"] = probability_map["D"]
             baseline["prob_away"] = probability_map["A"]
+            baseline.update(_raw_probability_fields(raw_1x2))
             baseline["result_summary"] = pd.DataFrame(market_rows)
 
         best_market = max(market_rows, key=lambda row: float(row["Probabilidad"]))
@@ -685,8 +698,7 @@ class BivariatePoissonMatchPredictor(BaseMatchPredictor):
         lambda_h = float(baseline["lambda_h"])
         lambda_a = float(baseline["lambda_a"])
         prob_matrix = self.engine.build_matrix(lambda_h, lambda_a, max_goals=max_goals)
-        if not self.calibration.is_neutral:
-            prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
+        prob_matrix, raw_1x2 = self._calibrate_matrix(prob_matrix)
         recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
         score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
@@ -701,6 +713,7 @@ class BivariatePoissonMatchPredictor(BaseMatchPredictor):
         baseline["prob_home"] = result_probabilities.get(f"Victoria {home_team}")
         baseline["prob_draw"] = result_probabilities.get("Empate")
         baseline["prob_away"] = result_probabilities.get(f"Victoria {away_team}")
+        baseline.update(_raw_probability_fields(raw_1x2))
         baseline["result_summary"] = result_summary
         baseline["recommendations"] = recommendations
         baseline["primary_score"] = score_decision["primary_score"]
@@ -784,8 +797,7 @@ class HierarchicalMatchPredictor(BaseMatchPredictor):
 
         lambda_h, lambda_a = self.engine.expected_goals(home_team, away_team, is_neutral=is_neutral)
         prob_matrix = self.engine.build_matrix(home_team, away_team, is_neutral=is_neutral, max_goals=max_goals)
-        if not self.calibration.is_neutral:
-            prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
+        prob_matrix, raw_1x2 = self._calibrate_matrix(prob_matrix)
         recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
         score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
@@ -812,6 +824,7 @@ class HierarchicalMatchPredictor(BaseMatchPredictor):
             "prob_home": result_probabilities.get(f"Victoria {home_team}"),
             "prob_draw": result_probabilities.get("Empate"),
             "prob_away": result_probabilities.get(f"Victoria {away_team}"),
+            **_raw_probability_fields(raw_1x2),
             "result_summary": result_summary,
             "recommendations": recommendations,
             "primary_score": score_decision["primary_score"],

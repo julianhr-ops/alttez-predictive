@@ -312,6 +312,9 @@ def _build_match_brief(row_dict: dict[str, Any], predictor: BaseMatchPredictor, 
             "prob_home": prediction.get("prob_home"),
             "prob_draw": prediction.get("prob_draw"),
             "prob_away": prediction.get("prob_away"),
+            "raw_prob_home": prediction.get("raw_prob_home"),
+            "raw_prob_draw": prediction.get("raw_prob_draw"),
+            "raw_prob_away": prediction.get("raw_prob_away"),
             "decision_tier": _decision_tier(support_label, avg_confidence, best_market_probability),
             "alternatives": prediction.get("recommendations", pd.DataFrame()).iloc[1:4].to_dict(orient="records")
             if isinstance(prediction.get("recommendations"), pd.DataFrame)

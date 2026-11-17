@@ -109,6 +109,30 @@ def _avg_confidence(match_payload: dict[str, Any]) -> float:
     ) / 2.0
 
 
+RAW_PROBABILITY_COLUMNS = (
+    "raw_predicted_home_win_prob",
+    "raw_predicted_draw_prob",
+    "raw_predicted_away_win_prob",
+)
+
+
+def _optional_float(value: Any) -> float | None:
+    return float(value) if value is not None else None
+
+
+def _restrict_to_table_columns(rows: list[dict[str, Any]], table: Table) -> list[dict[str, Any]]:
+    """Descarta columnas que la tabla aun no tiene (migracion 014 sin aplicar) avisando en WARNING."""
+    known = set(table.c.keys())
+    unknown = sorted({key for row in rows for key in row if key not in known})
+    if not unknown:
+        return rows
+    LOGGER.warning(
+        "match_predictions no tiene las columnas %s; aplica la migracion 014. Se persiste sin ellas.",
+        ", ".join(unknown),
+    )
+    return [{key: value for key, value in row.items() if key in known} for row in rows]
+
+
 def _filter_match_prediction_row(match_payload: dict[str, Any], run_row_id: Any, run_id: str, model_version: str, model_family: str) -> dict[str, Any]:
     return {
         "prediction_run_id": run_row_id,
@@ -126,6 +150,9 @@ def _filter_match_prediction_row(match_payload: dict[str, Any], run_row_id: Any,
         "predicted_home_win_prob": float(match_payload.get("prob_home") or 0.0),
         "predicted_draw_prob": float(match_payload.get("prob_draw") or 0.0),
         "predicted_away_win_prob": float(match_payload.get("prob_away") or 0.0),
+        "raw_predicted_home_win_prob": _optional_float(match_payload.get("raw_prob_home")),
+        "raw_predicted_draw_prob": _optional_float(match_payload.get("raw_prob_draw")),
+        "raw_predicted_away_win_prob": _optional_float(match_payload.get("raw_prob_away")),
         "predicted_scoreline": match_payload.get("primary_score"),
         "predicted_lambda_home": float(match_payload.get("lambda_h")) if match_payload.get("lambda_h") is not None else None,
         "predicted_lambda_away": float(match_payload.get("lambda_a")) if match_payload.get("lambda_a") is not None else None,
@@ -231,6 +258,7 @@ def persist_daily_predictions(
             )
 
         if rows:
+            rows = _restrict_to_table_columns(rows, predictions_table)
             stmt = insert(predictions_table).values(rows)
             update_map = {
                 key: getattr(stmt.excluded, key)
