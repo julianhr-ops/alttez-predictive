@@ -55,7 +55,7 @@ Predictions (2)
 Skipped (1)
 - XXX @ YYY (id 3): no rating for team id(s) [99]
 
-Live scoreboard (graded games so far)
+Live scoreboard (graded games so far, one served row per game)
 - served: n=3, Brier 0.2300, accuracy 66.7%
 - same games with a market line (n=2): served Brier 0.2650, accuracy 50.0%; market Brier 0.4850, accuracy 50.0%
 - served minus market Brier: no interval until n >= 30
@@ -71,6 +71,17 @@ Schedule and betting-line data: sportsdataverse/hoopR-nba-data (CC BY 4.0)."""
         self.assertIn("paired bootstrap by game date", text)
         self.assertIn("95% CI [", text)
         self.assertNotIn("no interval", text)
+
+    def test_upgraded_game_counts_once_and_shows_the_two_models_side_by_side(self):
+        elo = graded(1, 0.6, None, True)
+        blend = replace(graded(1, 0.8, 0.7, True), created_at=TIPOFF)
+        text = build_nba_digest(
+            DigestInput(
+                today=date(2026, 11, 17), run=None, graded_this_run=2, unresolved=0, summary=store.summarise_graded([elo, blend])
+            )
+        )
+        self.assertIn("- served: n=1, Brier 0.0400, accuracy 100.0%", text)
+        self.assertIn("- games first predicted without a line, then upgraded (n=1): elo+platt Brier 0.1600, blend Brier 0.0400", text)
 
     def test_empty_scoreboard_and_empty_run(self):
         empty = predict.PredictionRun((), (), date(2026, 11, 16), (1994, 2026), 100)

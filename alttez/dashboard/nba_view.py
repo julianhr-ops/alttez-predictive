@@ -1,5 +1,6 @@
 """NBA predictions and their graded, paired market comparison."""
 
+from collections.abc import Iterable
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 
@@ -8,7 +9,11 @@ import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
 from alttez.api.db import get_engine
-from alttez.nba.store import COLUMNS, DateWindow, load_graded_summary, load_ungraded
+from alttez.nba.store import COLUMNS, DateWindow, NbaPredictionRow, load_graded_summary, load_ungraded, served_rows
+
+
+def rows_frame(rows: Iterable[NbaPredictionRow]) -> pd.DataFrame:
+    return pd.DataFrame([asdict(row) for row in rows], columns=COLUMNS)
 
 
 def upcoming_games(frame: pd.DataFrame, now: datetime) -> pd.DataFrame:
@@ -60,17 +65,17 @@ def render_nba_view() -> None:
         return
     today = datetime.now(UTC).date()
     try:
-        upcoming = load_ungraded(engine, DateWindow(date(2000, 1, 1), date.max))
-        history = load_graded_summary(engine, DateWindow(date(2000, 1, 1), today)).rows
+        upcoming = served_rows(load_ungraded(engine, DateWindow(date(2000, 1, 1), date.max)))
+        summary = load_graded_summary(engine, DateWindow(date(2000, 1, 1), today))
     except SQLAlchemyError:
-        st.error("No se pudieron leer las predicciones NBA. Revisa la conexión y la migración 015.")
+        st.error("No se pudieron leer las predicciones NBA. Revisa la conexión y las migraciones 015 y 016.")
         return
     finally:
         engine.dispose()
 
-    scheduled = upcoming_games(pd.DataFrame([asdict(row) for row in upcoming], columns=COLUMNS), datetime.now(UTC))
-    graded = graded_history(pd.DataFrame([asdict(row) for row in history], columns=COLUMNS))
-    stats = scoreboard(graded)
+    scheduled = upcoming_games(rows_frame(upcoming), datetime.now(UTC))
+    graded = graded_history(rows_frame(summary.all_rows))
+    stats = scoreboard(graded_history(rows_frame(summary.rows)))
     st.subheader("Hoy y próximos partidos")
     if scheduled.empty:
         st.info("No hay predicciones programadas disponibles.")
@@ -88,4 +93,4 @@ def render_nba_view() -> None:
             st.caption("No hay partidos calificados con línea y probabilidad de mercado.")
         st.subheader("Historial calificado")
         st.dataframe(graded[["game_date", "away_team_id", "home_team_id", "away_score", "home_score", "p_home_served", "served_model", "outcome", "hit", "brier", "model_version"]], hide_index=True)
-    st.caption("Cómo leerlo: la probabilidad es de victoria local; un Brier menor es mejor. Elo no supera la línea de cierre.")
+    st.caption("Cómo leerlo: la probabilidad es de victoria local; un Brier menor es mejor. El marcador cuenta cada partido una vez, con la fila del blend si existe y si no con Elo. El historial muestra todas las filas. Elo no supera la línea de cierre.")

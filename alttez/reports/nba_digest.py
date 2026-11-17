@@ -59,7 +59,7 @@ def _prediction_lines(run: PredictionRun) -> list[str]:
 
 
 def _scoreboard_lines(summary: GradedSummary) -> list[str]:
-    lines = ["Live scoreboard (graded games so far)"]
+    lines = ["Live scoreboard (graded games so far, one served row per game)"]
     if summary.n == 0:
         return lines + ["- no graded predictions yet"]
     lines.append(
@@ -73,6 +73,14 @@ def _scoreboard_lines(summary: GradedSummary) -> list[str]:
         f"{_percent(summary.served_accuracy(market_games_only=True))}; "
         f"market Brier {summary.market_brier():.4f}, accuracy {_percent(summary.market_accuracy())}"
     )
+    pairs = summary.upgraded_pairs
+    if pairs:
+        elo_brier = float(np.mean([elo.brier for elo, _ in pairs]))
+        blend_brier = float(np.mean([blend.brier for _, blend in pairs]))
+        lines.append(
+            f"- games first predicted without a line, then upgraded (n={len(pairs)}): "
+            f"elo+platt Brier {elo_brier:.4f}, blend Brier {blend_brier:.4f}"
+        )
     if summary.n_market < MIN_GAMES_FOR_INTERVAL:
         lines.append(f"- served minus market Brier: no interval until n >= {MIN_GAMES_FOR_INTERVAL}")
         return lines

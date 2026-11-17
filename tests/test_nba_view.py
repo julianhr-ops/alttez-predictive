@@ -7,8 +7,9 @@ from unittest import mock
 
 import pandas as pd
 
-from alttez.dashboard.nba_view import graded_history, scoreboard, upcoming_games
+from alttez.dashboard.nba_view import graded_history, rows_frame, scoreboard, upcoming_games
 from alttez.nba import store
+from alttez.nba.store import ServedModel
 from scripts import nba_daily
 from tests.nba_sqlite import make_engine
 from tests.test_nba_store import NOW, TIPOFF, make_row
@@ -19,8 +20,8 @@ class NbaViewTests(unittest.TestCase):
         engine = make_engine(self)
         for row in (make_row(1, p_served=0.8), make_row(2, p_served=0.6, market=None), make_row(3)):
             store.insert_prediction_if_absent(engine, row, now=NOW)
-        store.grade_prediction(engine, 1, "nba-elo-v1", 110, 100, 0.8, now=TIPOFF)
-        store.grade_prediction(engine, 2, "nba-elo-v1", 100, 110, 0.6, now=TIPOFF)
+        store.grade_prediction(engine, 1, "nba-elo-v1", ServedModel.BLEND, 110, 100, 0.8, now=TIPOFF)
+        store.grade_prediction(engine, 2, "nba-elo-v1", ServedModel.ELO_PLATT, 100, 110, 0.6, now=TIPOFF)
         window = store.DateWindow(date(2026, 11, 1), date(2026, 11, 30))
         pending = pd.DataFrame([asdict(r) for r in store.load_ungraded(engine, window)])
         upcoming = upcoming_games(pending, NOW)
@@ -36,6 +37,23 @@ class NbaViewTests(unittest.TestCase):
         self.assertAlmostEqual(result["paired_brier"], 0.04)
         self.assertAlmostEqual(result["market_brier"], 0.35 ** 2)
         self.assertEqual(set(history["outcome"]), {"Home", "Away"})
+
+    def test_view_lists_and_scores_an_upgraded_game_once(self):
+        engine = make_engine(self)
+        later = NOW + timedelta(hours=6)
+        store.insert_prediction_if_absent(engine, make_row(1, p_served=0.6, market=None), now=NOW)
+        store.insert_prediction_if_absent(engine, make_row(1, p_served=0.8, created_at=later), now=later)
+        window = store.DateWindow(date(2026, 11, 1), date(2026, 11, 30))
+        scheduled = upcoming_games(rows_frame(store.served_rows(store.load_ungraded(engine, window))), NOW)
+        self.assertEqual(list(scheduled["source"]), ["Market blend"])
+        for served in (ServedModel.ELO_PLATT, ServedModel.BLEND):
+            p = 0.6 if served is ServedModel.ELO_PLATT else 0.8
+            store.grade_prediction(engine, 1, "nba-elo-v1", served, 110, 100, p, now=TIPOFF)
+        summary = store.load_graded_summary(engine, window)
+        self.assertEqual(len(graded_history(rows_frame(summary.all_rows))), 2)
+        result = scoreboard(graded_history(rows_frame(summary.rows)))
+        self.assertEqual((result["n"], result["market_n"]), (1, 1))
+        self.assertAlmostEqual(result["brier"], 0.04)
 
     def test_empty_and_no_market(self):
         self.assertEqual(scoreboard(pd.DataFrame())["n"], 0)
