@@ -1,16 +1,16 @@
 """Resolucion de pesos del comite de prediccion (Fase 2).
 
 El comite combina campeon + retador + baseline Poisson promediando sus matrices
-de marcadores. Pero un promedio NO garantiza mejorar a sus miembros: en los datos
-historicos el consenso (Brier 0.696) rinde peor que el propio campeon (0.608). Sin
-una guardia, el comite degrada al mejor modelo disponible.
+de marcadores. Pero un promedio NO garantiza mejorar a sus miembros. Sin una
+guardia, el comite puede degradar al mejor modelo disponible.
 
 Dos mecanismos, en orden:
 
-  1. Guardia de consenso (dura): si el consenso historico es peor que el campeon
-     por encima de un margen, el comite DEFIERE al campeon (peso 1 al campeon,
-     0 al resto). Espeja la regla de gobernanza: Brier decide. Garantiza que el
-     comite nunca entregue algo peor que su mejor miembro conocido.
+  1. Guardia de consenso (dura): si el consenso es peor que el campeon medido sobre
+     LOS MISMOS partidos (diferencia Brier por partido, bootstrap pareado con IC
+     completamente sobre 0), el comite DEFIERE al campeon (peso 1 al campeon, 0 al
+     resto). Comparar Briers agregados de versiones evaluadas sobre partidos
+     distintos no es una comparacion valida y ya no se usa.
 
   2. Pesos por error inverso (suave): cuando no se defiere, cada miembro se pondera
      por 1/Brier reciente (con piso de campeon), de modo que un retador debil pierde
@@ -22,8 +22,11 @@ Funciones puras y testeables segun la politica anti-monolitica.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
+
+from alttez.evaluation.paired import paired_bootstrap_diff
 
 # Umbral bajo a proposito: en torneos el modelo activo acumula pocas
 # evaluaciones cerradas (ej. ~20). Exigir mas lo dejaria siempre en pesos por
@@ -31,7 +34,6 @@ from typing import Any
 # senal disponible, asumiendo el ruido de muestra pequena.
 DEFAULT_MIN_SAMPLES = 15
 DEFAULT_CHAMPION_FLOOR = 0.5
-DEFAULT_REGRESSION_MARGIN = 0.03
 CHAMPION_ROLE = "champion"
 
 
@@ -65,15 +67,18 @@ def resolve_committee_weights(
     default_weights: dict[str, float],
     *,
     committee_version: str,
+    paired_losses: tuple[Sequence[float], Sequence[float]] | None = None,
     min_samples: int = DEFAULT_MIN_SAMPLES,
     champion_floor: float = DEFAULT_CHAMPION_FLOOR,
-    regression_margin: float = DEFAULT_REGRESSION_MARGIN,
 ) -> WeightingDecision:
     """Decide los pesos por rol del comite a partir de las metricas recientes.
 
     member_versions: rol -> model_version de cada miembro presente.
     audit_models: salida de load_prediction_learning_audit()["models"].
     default_weights: pesos fijos previos (fallback).
+    paired_losses: ``(perdidas_consenso, perdidas_campeon)`` por partido sobre LOS
+        MISMOS partidos. Sin ellas la guardia de consenso no se evalua.
+    committee_version: version bajo la que se registra el consenso (solo informativa).
     """
     roles = list(member_versions.keys())
     brier_by_version = _brier_lookup(audit_models, min_samples=min_samples)
@@ -83,29 +88,26 @@ def resolve_committee_weights(
         if version in brier_by_version
     }
 
-    champion_version = member_versions.get(CHAMPION_ROLE)
-    champion_brier = brier_by_version.get(champion_version) if champion_version else None
-    consensus_brier = brier_by_version.get(committee_version)
-
-    # 1) Guardia de consenso: si el consenso historico es peor que el campeon,
-    # defiere al campeon. Solo si ambos tienen metricas comparables.
-    if (
-        CHAMPION_ROLE in roles
-        and champion_brier is not None
-        and consensus_brier is not None
-        and consensus_brier > champion_brier + regression_margin
-    ):
-        weights = {role: (1.0 if role == CHAMPION_ROLE else 0.0) for role in roles}
-        return WeightingDecision(
-            weights=weights,
-            deferred_to_champion=True,
-            strategy="champion_guard",
-            reason=(
-                f"Consenso historico (Brier {consensus_brier:.4f}) peor que el campeon "
-                f"({champion_brier:.4f}); se defiere al campeon."
-            ),
-            member_briers=member_briers,
-        )
+    # 1) Guardia de consenso: solo sobre partidos identicos. Si el consenso es peor
+    # que el campeon con el IC pareado completamente sobre 0, defiere al campeon.
+    guard_note = " Guardia de consenso no evaluada: faltan perdidas pareadas del consenso y el campeon."
+    if CHAMPION_ROLE in roles and paired_losses is not None:
+        consensus_losses, champion_losses = paired_losses
+        paired = paired_bootstrap_diff(consensus_losses, champion_losses)
+        guard_note = ""
+        if paired.n >= min_samples and paired.b_better:
+            weights = {role: (1.0 if role == CHAMPION_ROLE else 0.0) for role in roles}
+            return WeightingDecision(
+                weights=weights,
+                deferred_to_champion=True,
+                strategy="champion_guard",
+                reason=(
+                    f"Consenso peor que el campeon en {paired.n} partidos comunes "
+                    f"(diferencia Brier {paired.mean_diff:+.4f}, IC [{paired.ci_low:+.4f}, {paired.ci_high:+.4f}]); "
+                    "se defiere al campeon."
+                ),
+                member_briers=member_briers,
+            )
 
     # 2) Pesos por error inverso entre miembros con metricas; resto usa default.
     if member_briers:
@@ -119,7 +121,7 @@ def resolve_committee_weights(
         return WeightingDecision(
             weights=weights,
             strategy="inverse_brier",
-            reason="Pesos por error inverso (1/Brier) con piso de campeon.",
+            reason="Pesos por error inverso (1/Brier) con piso de campeon." + guard_note,
             member_briers=member_briers,
         )
 
@@ -127,7 +129,7 @@ def resolve_committee_weights(
     return WeightingDecision(
         weights=dict(default_weights),
         strategy="default",
-        reason="Metricas insuficientes; pesos por defecto.",
+        reason="Metricas insuficientes; pesos por defecto." + guard_note,
         member_briers=member_briers,
     )
 
