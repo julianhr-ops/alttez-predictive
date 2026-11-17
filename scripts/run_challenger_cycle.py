@@ -22,6 +22,44 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _paired_line(label: str, paired: dict) -> str:
+    return (
+        f"{label}: mean_diff={paired['mean_diff']:+.4f} "
+        f"ci=[{paired['ci_low']:+.4f}, {paired['ci_high']:+.4f}] n={paired['n']}"
+    )
+
+
+def summary_lines(result: dict) -> list[str]:
+    lines = [f"challenger_artifact_path={result['artifact_path']}"]
+    if result.get("production_config_error"):
+        lines.append(f"CYCLE_REFUSED production_config_error={result['production_config_error']}")
+    else:
+        config = result["production_config"]
+        lines.append(
+            f"production_champion={config['model_version']} rho={config['rho']} poisson_kwargs={config['poisson_kwargs']}"
+        )
+        if result.get("model_artifact_path"):
+            lines.append(f"challenger_model_artifact_path={result['model_artifact_path']}")
+        lines.append(f"champion_brier={result['champion']['brier_score']:.6f}")
+        lines.append(f"challenger_brier={result['challenger']['brier_score']:.6f}")
+        lines.append(_paired_line("challenger_minus_champion_brier", result["paired_comparison"]))
+        lines.append(f"min_promotion_matches={result['min_promotion_matches']}")
+        for name, baseline in result["baselines"].items():
+            lines.append(f"baseline_{name}_brier={baseline['brier_score']:.6f}")
+            lines.append(_paired_line(f"  champion_minus_{name}", baseline["champion_vs_baseline"]))
+            lines.append(_paired_line(f"  challenger_minus_{name}", baseline["challenger_vs_baseline"]))
+        ensemble = result.get("ensemble") or {}
+        if ensemble:
+            lines.append(f"ensemble_brier={ensemble.get('brier_score', float('nan')):.6f}")
+            lines.append(f"ensemble_blend_weight={ensemble.get('blend_weight')}")
+    lines.append(f"promotion_decision={result['promotion_decision']}")
+    lines.append(f"promotion_reason={result['promotion_reason']}")
+    lines.append(f"production_status={result['production_status']}")
+    lines.append(f"activation_mode={result['activation_mode']}")
+    lines.append(f"governance_reason={result['governance_reason']}")
+    return lines
+
+
 def main() -> int:
     load_local_env(override=True)
     args = parse_args()
@@ -31,20 +69,8 @@ def main() -> int:
         report_dir=args.report_dir,
         evaluation_matches=args.evaluation_matches,
     )
-    print(f"challenger_artifact_path={result['artifact_path']}")
-    if result.get("model_artifact_path"):
-        print(f"challenger_model_artifact_path={result['model_artifact_path']}")
-    print(f"champion_brier={result['champion']['brier_score']:.6f}")
-    print(f"challenger_brier={result['challenger']['brier_score']:.6f}")
-    ensemble = result.get("ensemble") or {}
-    if ensemble:
-        print(f"ensemble_brier={ensemble.get('brier_score', float('nan')):.6f}")
-        print(f"ensemble_blend_weight={ensemble.get('blend_weight')}")
-    print(f"promotion_decision={result['promotion_decision']}")
-    print(f"promotion_reason={result['promotion_reason']}")
-    print(f"production_status={result['production_status']}")
-    print(f"activation_mode={result['activation_mode']}")
-    print(f"governance_reason={result['governance_reason']}")
+    for line in summary_lines(result):
+        print(line)
     return 0
 
 

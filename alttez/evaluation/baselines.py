@@ -88,3 +88,21 @@ def elo_only_probabilities(elo_diff, *, draw_prob_at_parity: float, neutral=None
     expected = _expected_score(_effective_difference(elo_diff, neutral))
     draw = draw_prob_at_parity * 4.0 * expected * (1.0 - expected)
     return np.column_stack((expected - draw / 2.0, draw, 1.0 - expected - draw / 2.0))
+
+
+def baseline_probabilities(
+    train_outcomes: Sequence[str],
+    train_elo_diff,
+    train_neutral,
+    holdout_elo_diff,
+    holdout_neutral,
+) -> dict[str, np.ndarray]:
+    """All three baselines for a holdout window, fitted on the training window only."""
+
+    n = len(np.asarray(holdout_elo_diff))
+    draw_prob = fit_draw_prob_at_parity(train_elo_diff, train_outcomes, train_neutral)
+    return {
+        "uniform": uniform_probabilities(n),
+        "base_rate": base_rate_probabilities(train_outcomes, n),
+        "elo_only": elo_only_probabilities(holdout_elo_diff, draw_prob_at_parity=draw_prob, neutral=holdout_neutral),
+    }

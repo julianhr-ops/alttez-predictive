@@ -196,10 +196,12 @@ Manual challenger cycle:
 venv\Scripts\python.exe scripts\run_challenger_cycle.py --date 2026-05-26
 ```
 
-The challenger cycle now applies a formal governance rule:
+The challenger cycle applies a formal governance rule:
 
-- `Brier Score` decides eligibility
-- `Log Loss` acts as a guardrail
+- the champion is rebuilt with the production configuration (active model record, the router's Poisson settings and the fitted Dixon-Coles rho); if that configuration cannot be loaded the cycle reports `production_config_error` and promotes nothing
+- champion and challenger are compared on the identical holdout matches with a paired bootstrap of the per-match `Brier Score` difference; the challenger is eligible only if the whole confidence interval is below 0 and the holdout has at least 200 matches
+- `Log Loss` and `RPS` act as guardrails
+- the report also scores champion and challenger against uniform, base-rate and Elo-only baselines on the same matches
 - `production_status` shows whether the challenger is only `eligible`, still `shadow`, or truly `active`
 - auto-promotion stays off by default unless `ALTTEZ_AUTO_PROMOTE_MODELS=true`
 

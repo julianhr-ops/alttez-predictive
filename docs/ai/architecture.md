@@ -56,8 +56,9 @@ marcadores se apoyan en `experiments/tournament_oracle.py` y
 
 ## Entrenamiento y gobierno
 
-`training/challenger_cycle.py` arma datos, entrena el retador, evalua contra el
-incumbente y produce una decision de gobierno. La promocion automatica permanece
+`training/challenger_cycle.py` arma datos, entrena el retador, lo compara con el
+champion de produccion sobre los mismos partidos (bootstrap pareado) y produce una
+decision de gobierno. La promocion automatica permanece
 desactivada salvo configuracion explicita. Las versiones se registran mediante
 `operations/prediction_memory.py`; los binarios se manejan mediante
 `operations/artifact_store.py`.
