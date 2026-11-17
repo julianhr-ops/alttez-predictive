@@ -79,7 +79,7 @@ flowchart LR
 
 `alttez/ingestion/provider_stack.py` builds an ordered chain of providers, each behind the `MatchProvider` contract in `providers/base.py`. Raw rows land in `raw_matches_api`, are certified in batches, and become canonical matches. `alttez/features/klement.py` holds the only feature schema (`MODEL_FEATURE_COLUMNS`) that training and inference share.
 
-`alttez/inference/router.py` resolves the active model from `public.model_versions`. If the registry or the artifact is unavailable, it serves the Poisson champion and records `used_fallback` and `fallback_reason`. `prediction_committee.py` combines the champion, the challenger and the Poisson baseline. `alttez/training/challenger_cycle.py` promotes a challenger only when its paired Brier difference against the production champion has a 95% interval below 0.
+`alttez/inference/router.py` resolves the active model from `public.model_versions`. If the registry or the artifact is unavailable, it serves the Poisson champion and records `used_fallback` and `fallback_reason`. `prediction_committee.py` combines the champion, the challenger and the Poisson baseline. `alttez/training/challenger_cycle.py` marks a challenger eligible only when the paired Brier difference against the production champion has a 95% interval below 0 on at least 200 identical matches. Automatic promotion stays off unless `ALTTEZ_AUTO_PROMOTE_MODELS` is true.
 
 Validation evidence is in [validation_soccer.md](validation_soccer.md). The history of the defects it exposed is in [model-history.md](model-history.md).
 
