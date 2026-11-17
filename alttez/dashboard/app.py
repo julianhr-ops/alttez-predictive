@@ -1639,6 +1639,16 @@ def _render_world_cup_2026_dashboard(report: dict | None, fecha_simulacion: str,
 
 
 def main() -> None:
+    with st.sidebar:
+        dashboard_view = st.radio(
+            "Vista", ["Predicciones diarias", "Simulacion Mundial 2026", "Rendimiento del modelo", "NBA"]
+        )
+    if dashboard_view == "NBA":
+        from alttez.dashboard.nba_view import render_nba_view
+
+        render_nba_view()
+        return
+
     try:
         with st.spinner("Sincronizando base historica internacional..."):
             df_historico = cargar_datos()
@@ -1651,7 +1661,6 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Centro de control")
-        dashboard_view = st.radio("Vista", ["Predicciones diarias", "Simulacion Mundial 2026", "Rendimiento del modelo"])
         fecha_simulacion = st.date_input("Fecha de agenda", value=default_date)
         fase_torneo = st.radio("Formato de puntuacion", ["Fase de Grupos", "Eliminacion Directa"])
         tournament_mode = st.selectbox(

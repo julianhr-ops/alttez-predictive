@@ -1,16 +1,17 @@
 """Daily NBA stage: refresh data, grade finished predictions, predict upcoming games, print a digest.
 
-    python scripts/nba_daily.py [--date YYYY-MM-DD] [--database-url URL] [--dry-run] [--deliver]
+    python scripts/nba_daily.py [--date YYYY-MM-DD] [--database-url URL] [--dry-run] [--deliver] [--html PATH]
 
-Without a database URL, or with ``--dry-run``, nothing is written: predictions and the
-digest are only printed. ``--dry-run`` opens the database (for reads) only when
-``--database-url`` is given explicitly. Exit codes: 0 ok, 1 delivery failed, 2 data or
-database error, 3 ``stale_data`` (the hoopR schedule lags a season in progress).
+Without a database URL, or with ``--dry-run``, nothing is written to the database.
+The digest is printed and can optionally be saved as HTML. ``--dry-run`` opens the
+database (for reads) only when ``--database-url`` is given explicitly. Exit codes:
+0 ok, 1 delivery failed, 2 data or database error, 3 ``stale_data``.
 """
 
 from __future__ import annotations
 
 import argparse
+import html
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -150,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--database-url", default=None)
     parser.add_argument("--dry-run", action="store_true", help="never write to the database")
     parser.add_argument("--deliver", action="store_true", help="send the digest through the Telegram sender")
+    parser.add_argument("--html", type=Path, help="write a self-contained HTML digest")
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     args = parser.parse_args(argv)
 
@@ -157,6 +159,18 @@ def main(argv: list[str] | None = None) -> int:
     if code != 0:
         return code
     print(text)
+    if args.html:
+        page = (
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>NBA digest</title><style>"
+            "body{font-family:system-ui,sans-serif;max-width:70rem;margin:2rem auto;padding:0 1rem;"
+            "background:#111827;color:#f9fafb}pre{white-space:pre-wrap;overflow-wrap:anywhere;"
+            "line-height:1.6;background:#1f2937;padding:1.5rem;border-radius:.6rem}"
+            "</style></head><body><h1>NBA digest</h1><pre>"
+            f"{html.escape(text)}</pre></body></html>"
+        )
+        args.html.write_text(page, encoding="utf-8")
     if args.deliver:
         delivered, error = deliver_digest(text)
         if not delivered:
