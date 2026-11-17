@@ -7,6 +7,20 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: alttez_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d alttez_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout
@@ -29,6 +43,9 @@ jobs:
 
       - name: Validate migration chain
         run: python scripts/apply_supabase_migrations.py
+
+      - name: Apply migrations to PostgreSQL
+        run: python scripts/apply_supabase_migrations.py --apply --database-url 'postgresql://postgres:postgres@localhost:5432/alttez_ci?sslmode=disable'
 
   lint:
     runs-on: ubuntu-latest
