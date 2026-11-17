@@ -77,7 +77,6 @@ class TestTemperatureScale(unittest.TestCase):
     def test_high_temperature_softens_toward_uniform(self) -> None:
         probs = np.array([0.8, 0.15, 0.05])
         softened = temperature_scale(probs, 3.0)
-        # Max class drops, min class rises; still sums to 1.
         self.assertLess(softened[0], probs[0])
         self.assertGreater(softened[2], probs[2])
         self.assertAlmostEqual(float(softened.sum()), 1.0, places=9)
@@ -123,13 +122,12 @@ class TestProbabilityCalibration(unittest.TestCase):
 
 class TestFitTemperature(unittest.TestCase):
     def test_overconfident_data_fits_temperature_above_one(self) -> None:
-        # Confident-but-often-wrong probabilities -> needs softening (T > 1).
         rng = np.random.default_rng(0)
         triplets, outcomes = [], []
         for _ in range(300):
             if rng.random() < 0.5:
-                triplets.append([0.85, 0.10, 0.05])  # confident home
-                outcomes.append("H" if rng.random() < 0.55 else "A")  # but only 55% right
+                triplets.append([0.85, 0.10, 0.05])
+                outcomes.append("H" if rng.random() < 0.55 else "A")
             else:
                 triplets.append([0.05, 0.10, 0.85])
                 outcomes.append("A" if rng.random() < 0.55 else "H")
@@ -147,7 +145,6 @@ class TestMetrics(unittest.TestCase):
         self.assertAlmostEqual(log_loss(triplets, outcomes), np.log(3), places=4)
 
     def test_ece_perfect_calibration_is_low(self) -> None:
-        # Always 100% on the realized class -> zero calibration gap.
         triplets = np.array([[1.0, 0.0, 0.0]] * 5)
         self.assertAlmostEqual(expected_calibration_error(triplets, ["H"] * 5), 0.0, places=6)
 
@@ -161,7 +158,6 @@ def _miscalibrated_dataset(n: int = 800, seed: int = 7):
         base = [0.05, 0.05, 0.05]
         base[which] = 0.90
         triplets.append(base)
-        # Solo acierta 55% de las veces -> sobreconfianza marcada.
         if rng.random() < 0.55:
             outcomes.append("HDA"[which])
         else:
@@ -175,7 +171,6 @@ class TestIsotonicCalibration(unittest.TestCase):
         cal = IsotonicCalibration()
         self.assertTrue(cal.is_neutral)
         h, d, a = cal.calibrate_triplet(0.7, 0.2, 0.1)
-        # Neutra normaliza pero no deforma (ya suma 1).
         self.assertAlmostEqual(h + d + a, 1.0, places=9)
         self.assertAlmostEqual(h, 0.7, places=9)
 
@@ -209,14 +204,12 @@ class TestIsotonicCalibration(unittest.TestCase):
     def test_serialization_round_trips_via_arrays(self) -> None:
         cal = fit_isotonic(*_miscalibrated_dataset())
         payload = cal.to_payload()
-        # El payload solo contiene arreglos (sin objetos sklearn) y es JSON-serializable.
         text = json.dumps(payload)
         self.assertIn("curves", payload)
         for klass in ("home", "draw", "away"):
             self.assertIsInstance(payload["curves"][klass]["x"], list)
             self.assertIsInstance(payload["curves"][klass]["y"], list)
         restored = IsotonicCalibration.from_payload(json.loads(text))
-        # Predicciones identicas tras round-trip.
         for row in (np.array([0.9, 0.05, 0.05]), np.array([0.2, 0.3, 0.5])):
             np.testing.assert_allclose(
                 cal.calibrate_triplet(*row), restored.calibrate_triplet(*row), atol=1e-12

@@ -143,7 +143,6 @@ class TestBaselineComparison(unittest.TestCase):
         for entry in report.values():
             self.assertEqual(entry["champion_vs_baseline"]["n"], len(holdout))
             self.assertEqual(entry["challenger_vs_baseline"]["n"], len(holdout))
-        # Uniform 1X2 has a constant Brier of 2/3 whatever the outcome.
         self.assertAlmostEqual(report["uniform"]["brier_score"], 2.0 / 3.0)
         self.assertTrue(report["uniform"]["champion_vs_baseline"]["a_better"])
 
@@ -200,7 +199,6 @@ class TestRunChallengerCycle(unittest.TestCase):
         self.assertEqual(report["champion"]["model_version"], DEFAULT_POISSON_MODEL_VERSION)
         self.assertEqual(report["paired_comparison"]["n"], report["evaluation_matches"])
         self.assertEqual(set(report["baselines"]), {"uniform", "base_rate", "elo_only"})
-        # 60 matches in the holdout is below the promotion sample floor.
         self.assertFalse(report["promotion_decision"])
         self.assertIn("Muestra insuficiente", report["promotion_reason"])
         self.assertEqual(written["baselines"].keys(), report["baselines"].keys())

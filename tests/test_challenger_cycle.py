@@ -103,7 +103,6 @@ class TestChallengerCycle(unittest.TestCase):
         self.assertEqual(detail["paired_brier"]["n"], 300)
 
     def test_promotion_rejects_better_mean_when_ci_crosses_zero(self) -> None:
-        # The challenger is better on average, but by far less than the per-match noise.
         noise = np.random.default_rng(3).normal(0.0, 0.2, 300)
         champion_losses = _noisy_losses(0.62, 300)
         challenger_losses = champion_losses + (noise - noise.mean()) - 0.002
@@ -189,7 +188,6 @@ class TestChallengerCycle(unittest.TestCase):
         self.assertEqual((status, mode), ("eligible", "manual"))
 
     def test_feature_columns_include_gdp_with_coverage_flag(self) -> None:
-        # GDP restored as a static macro prior, paired with a coverage flag.
         self.assertIn("gdp_per_capita_diff", FEATURE_COLUMNS)
         self.assertIn("gdp_coverage", FEATURE_COLUMNS)
 
@@ -277,9 +275,7 @@ class TestChallengerCycle(unittest.TestCase):
         self.assertIsInstance(metrics["exact_score_hit_rate"], float)
         self.assertGreaterEqual(metrics["accuracy_1x2"], 0.0)
         self.assertLessEqual(metrics["accuracy_1x2"], 1.0)
-        # No 1X2 probability mass is lost: brier stays in a valid range.
         self.assertGreaterEqual(metrics["brier_score"], 0.0)
-        # Calibration metric is reported and in range.
         self.assertIn("expected_calibration_error", metrics)
         self.assertGreaterEqual(metrics["expected_calibration_error"], 0.0)
         self.assertLessEqual(metrics["expected_calibration_error"], 1.0)
@@ -303,7 +299,6 @@ class TestChallengerCycle(unittest.TestCase):
 
         batch_metrics = _evaluate_challenger(artifact, holdout_df, rho=DEFAULT_DIXON_COLES_RHO)
 
-        # Reference: predict each row independently and rebuild its matrix.
         ordered = holdout_df.sort_values("date").reset_index(drop=True)
         reference_brier = []
         for _, row in ordered.iterrows():
@@ -344,7 +339,6 @@ class TestChallengerCycle(unittest.TestCase):
 
         self.assertEqual(blend["model_family"], "ensemble")
         self.assertIn(blend["blend_weight"], [round(0.1 * i, 1) for i in range(11)])
-        # Grid includes w=0 (champion) and w=1 (challenger); best blend cannot be worse.
         self.assertLessEqual(blend["brier_score"], champion_only["brier_score"] + 1e-9)
         self.assertLessEqual(blend["brier_score"], challenger_only["brier_score"] + 1e-9)
 
@@ -358,7 +352,6 @@ class TestChallengerCycle(unittest.TestCase):
         medium = _feature_df(120)
         core_train, validation_df = _split_training_and_validation(medium)
         self.assertIsNotNone(validation_df)
-        # No date appears on both sides of the split (disjoint, date-aligned).
         train_dates = set(core_train["date"])
         validation_dates = set(validation_df["date"])
         self.assertEqual(train_dates & validation_dates, set())
@@ -369,7 +362,6 @@ class TestChallengerCycle(unittest.TestCase):
         small = _feature_df(20)
         fitted = _fit_goal_models(small)
         self.assertEqual(fitted["validation_samples"], 0)
-        # No early_stopping_rounds means the regressor used all estimators.
         self.assertIsNone(fitted["home_goals"].get_params().get("early_stopping_rounds"))
         self.assertIn("home_goals", fitted)
         self.assertIn("away_goals", fitted)
@@ -381,12 +373,9 @@ class TestChallengerCycle(unittest.TestCase):
     def test_time_decay_weights_decrease_into_the_past(self) -> None:
         dates = pd.Series(pd.to_datetime(["2024-01-01", "2024-07-01", "2025-01-01"]))
         weights = _compute_time_decay_weights(dates, pd.Timestamp("2025-01-01"), 365.0)
-        # Estrictamente crecientes hacia el presente.
         self.assertLess(weights[0], weights[1])
         self.assertLess(weights[1], weights[2])
-        # El partido en la fecha de corte pesa ~1.0.
         self.assertAlmostEqual(weights[2], 1.0)
-        # Exactamente un half-life atras -> ~0.5.
         self.assertAlmostEqual(weights[0], 0.5, places=2)
 
     def test_time_decay_weights_neutral_when_half_life_non_positive(self) -> None:

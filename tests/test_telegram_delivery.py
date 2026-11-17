@@ -33,7 +33,6 @@ class TestChunkMessages(unittest.TestCase):
         self.assertGreater(len(chunks), 1)
         for chunk in chunks:
             self.assertLessEqual(len(chunk), 900)
-        # No content lost (modulo the join separators).
         rejoined = "".join(chunk.replace("\n", "") for chunk in chunks)
         original = text.replace("\n", "")
         self.assertEqual(rejoined, original)
@@ -47,7 +46,6 @@ class TestChunkMessages(unittest.TestCase):
 
 class TestSendRetry(unittest.TestCase):
     def setUp(self) -> None:
-        # No real backoff sleeps; keep tests instant.
         sleep_patch = mock.patch.object(td.time, "sleep", lambda *_: None)
         sleep_patch.start()
         self.addCleanup(sleep_patch.stop)
@@ -66,7 +64,7 @@ class TestSendRetry(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertIsNone(error_message)
-        self.assertEqual(calls["n"], 2)  # one retry
+        self.assertEqual(calls["n"], 2)
 
     def test_gives_up_after_max_attempts(self) -> None:
         with mock.patch.object(td, "delivery_max_attempts", return_value=3):
@@ -80,7 +78,7 @@ class TestSendRetry(unittest.TestCase):
         with mock.patch.object(td.request, "urlopen", return_value=_FakeResponse(400)) as opener:
             ok, error_message = send_message("token", "chat", "hola")
         self.assertFalse(ok)
-        self.assertEqual(opener.call_count, 1)  # 400 is permanent, no retry
+        self.assertEqual(opener.call_count, 1)
 
     def test_daily_brief_retries_timeout_and_sends_attachments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -29,7 +29,6 @@ from alttez.training.challenger_cycle import FEATURE_COLUMNS as CHALLENGER_FEATU
 
 class TestFeatureColumnContract(unittest.TestCase):
     def test_single_source_of_feature_columns(self) -> None:
-        # Trainer and router must share the exact same object so they cannot drift.
         self.assertIs(CHALLENGER_FEATURE_COLUMNS, MODEL_FEATURE_COLUMNS)
         self.assertIs(XGBOOST_FEATURE_COLUMNS, MODEL_FEATURE_COLUMNS)
 
@@ -39,7 +38,6 @@ class TestPredictionGating(unittest.TestCase):
         strong = {"matches": 10.0, "effective_matches": 8.0}
         weak = {"matches": 2.0, "effective_matches": 1.0}
         with patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "5"}):
-            # One weak team is no longer carried by the strong one.
             self.assertFalse(_is_prediction_supported(strong, weak)[0])
             self.assertFalse(_is_prediction_supported(weak, strong)[0])
             self.assertTrue(_is_prediction_supported(strong, strong)[0])
@@ -257,7 +255,6 @@ class TestSinglePredictorCalibration(unittest.TestCase):
         import tempfile
 
         with patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(None)):
-            # Baseline sin calibracion (compuerta apagada).
             with patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0", "ALTTEZ_SERVING_POLICY": "off"}, clear=False):
                 os.environ.pop("ALTTEZ_CALIBRATE_SINGLE_PREDICTOR", None)
                 base_pred = build_active_predictor(_historical_df(), "2026-05-27").predict_match(
@@ -265,7 +262,6 @@ class TestSinglePredictorCalibration(unittest.TestCase):
                 )
             base_max = self._max_prob(base_pred)
 
-            # Con calibracion T>1 (aplana) y artefacto separado.
             with tempfile.TemporaryDirectory() as tmp:
                 artifact = Path(tmp) / "single_predictor.json"
                 artifact.write_text(json.dumps({"temperature": 4.0, "class_floor": 0.0}), encoding="utf-8")
@@ -284,7 +280,6 @@ class TestSinglePredictorCalibration(unittest.TestCase):
                     )
             cal_max = self._max_prob(cal_pred)
 
-        # T=4 aplana el 1X2 agregado: la clase mas probable pierde masa.
         self.assertLess(cal_max, base_max)
         sides = ("home", "draw", "away")
         raw = [float(cal_pred[f"raw_prob_{side}"]) for side in sides]
@@ -294,7 +289,6 @@ class TestSinglePredictorCalibration(unittest.TestCase):
         calibrated = [float(cal_pred[f"prob_{side}"]) for side in sides]
         for expected, actual in zip(temperature_scale(np.array(raw), 4.0), calibrated, strict=False):
             self.assertAlmostEqual(float(expected), actual, places=6)
-        # Sigue siendo distribucion valida.
         self.assertAlmostEqual(
             float(cal_pred["prob_home"]) + float(cal_pred["prob_draw"]) + float(cal_pred["prob_away"]),
             1.0,

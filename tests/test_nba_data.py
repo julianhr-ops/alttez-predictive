@@ -40,8 +40,8 @@ class NormaliseScheduleTests(unittest.TestCase):
             [
                 _junk_row(id=900_000_001, home_id=31),  # all-star team
                 _junk_row(id=900_000_002, home_score=0, away_score=0),  # lockout 0-0
-                _junk_row(id=900_000_003, home_score=101, away_score=101),  # tie
-                _junk_row(id=900_000_004, status_type_completed=False, status_type_state="post"),  # postponed
+                _junk_row(id=900_000_003, home_score=101, away_score=101),
+                _junk_row(id=900_000_004, status_type_completed=False, status_type_state="post"),
                 _junk_row(id=900_000_005, season_type=1),  # preseason
             ]
         )

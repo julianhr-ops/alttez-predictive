@@ -195,7 +195,6 @@ class MetricTests(unittest.TestCase):
         probs = np.array([[0.2, 0.5, 0.3], [0.2, 0.5, 0.3], [0.8, 0.1, 0.1], [0.8, 0.1, 0.1]])
         outcomes = ["H", "D", "H", "H"]
         home = sb.class_calibration(probs, outcomes)["H"]
-        # bin 2: two games predicted 0.2, one home win -> |0.2 - 0.5|; bin 8: two at 0.8, both wins -> |0.8 - 1|
         self.assertAlmostEqual(home["ece"], (2 * 0.3 + 2 * 0.2) / 4)
         self.assertAlmostEqual(home["frequency"], 0.75)
         self.assertAlmostEqual(home["mean_predicted"], 0.5)

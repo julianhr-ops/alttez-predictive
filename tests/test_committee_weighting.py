@@ -28,7 +28,6 @@ def _noisy(center: float, n: int, seed: int = 1) -> np.ndarray:
 
 class TestConsensusGuard(unittest.TestCase):
     def test_aggregate_briers_over_different_match_sets_never_trigger_the_guard(self) -> None:
-        # Champion scored on 182 matches and the consensus on 85 others: not comparable.
         decision = resolve_committee_weights(
             MEMBERS,
             _audit(("poisson-champion-v2", 182, 0.608), ("xgb-v2", 40, 0.616), ("committee-consensus-v1", 85, 0.696)),
@@ -106,7 +105,7 @@ class TestInverseBrier(unittest.TestCase):
             _audit(("champ", 100, 0.50), ("chall", 100, 0.70)),
             {"champion": 0.5, "challenger": 0.5},
             committee_version="committee-consensus-v1",
-            champion_floor=0.0,  # isolate inverse-brier effect
+            champion_floor=0.0,
         )
         self.assertEqual(decision.strategy, "inverse_brier")
         self.assertGreater(decision.weights["champion"], decision.weights["challenger"])
@@ -115,7 +114,7 @@ class TestInverseBrier(unittest.TestCase):
     def test_champion_floor_enforced(self) -> None:
         decision = resolve_committee_weights(
             {"champion": "champ", "challenger": "chall"},
-            _audit(("champ", 100, 0.90), ("chall", 100, 0.30)),  # challenger much better
+            _audit(("champ", 100, 0.90), ("chall", 100, 0.30)),
             DEFAULTS,
             committee_version="committee-consensus-v1",
             champion_floor=0.5,
@@ -125,7 +124,7 @@ class TestInverseBrier(unittest.TestCase):
     def test_insufficient_samples_falls_to_default(self) -> None:
         decision = resolve_committee_weights(
             {"champion": "champ", "challenger": "chall"},
-            _audit(("champ", 5, 0.50), ("chall", 3, 0.70)),  # below min_samples
+            _audit(("champ", 5, 0.50), ("chall", 3, 0.70)),
             DEFAULTS,
             committee_version="committee-consensus-v1",
         )
@@ -138,7 +137,6 @@ class TestChampionFloor(unittest.TestCase):
         out = _enforce_champion_floor({"champion": 0.2, "challenger": 0.5, "poisson_baseline": 0.3}, champion_floor=0.5)
         self.assertAlmostEqual(out["champion"], 0.5, places=6)
         self.assertAlmostEqual(sum(out.values()), 1.0, places=6)
-        # Others keep their relative proportions within the remaining 0.5.
         self.assertAlmostEqual(out["challenger"] / out["poisson_baseline"], 0.5 / 0.3, places=6)
 
 
