@@ -29,7 +29,7 @@ create table public.nba_predictions (
     home_win boolean,
     brier real,
     graded_at timestamp,
-    primary key (game_id, model_version)
+    primary key (game_id, model_version, served_model)
 )
 """
 
