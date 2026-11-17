@@ -5,6 +5,9 @@ on:
     - cron: "0 2 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: alttez-daily-process
   cancel-in-progress: false
@@ -15,7 +18,6 @@ jobs:
     timeout-minutes: 90
 
     env:
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       ALTTEZ_DATA_SOURCE: auto
       ALTTEZ_SUPABASE_VIEW: public.international_results_compat
       ALTTEZ_ALLOW_LOCAL_FALLBACK: "true"
@@ -25,27 +27,14 @@ jobs:
       ALTTEZ_ESPN_ENABLED: "true"
       ALTTEZ_ESPN_LEAGUES: fifa.world,fifa.friendly
       ALTTEZ_ESPN_BASE_URL: https://site.api.espn.com/apis/site/v2/sports/soccer
-      ALTTEZ_API_FOOTBALL_KEY: ${{ secrets.ALTTEZ_API_FOOTBALL_KEY }}
       ALTTEZ_API_FOOTBALL_BASE_URL: https://v3.football.api-sports.io
-      ALTTEZ_FOOTBALL_DATA_KEY: ${{ secrets.ALTTEZ_FOOTBALL_DATA_KEY }}
       ALTTEZ_FOOTBALL_DATA_BASE_URL: https://api.football-data.org/v4
       ALTTEZ_FOOTBALL_DATA_LIVE_COMPETITIONS: WC,EC
       ALTTEZ_STATSBOMB_OPEN_ROOT: ""
       ALTTEZ_LOCAL_JSON_PATH: artifacts/provider-fallback.json
-      ALTTEZ_ALERT_WEBHOOK_URL: ${{ secrets.ALTTEZ_ALERT_WEBHOOK_URL }}
       ALTTEZ_ALERT_WEBHOOK_TIMEOUT_SECONDS: "8"
-      ALTTEZ_ALERTS_TELEGRAM_ENABLED: ${{ secrets.ALTTEZ_ALERTS_TELEGRAM_ENABLED || 'false' }}
-      ALTTEZ_ALERTS_TELEGRAM_BOT_TOKEN: ${{ secrets.ALTTEZ_ALERTS_TELEGRAM_BOT_TOKEN }}
-      ALTTEZ_ALERTS_TELEGRAM_CHAT_ID: ${{ secrets.ALTTEZ_ALERTS_TELEGRAM_CHAT_ID }}
-      ALTTEZ_DAILY_BRIEF_DELIVERY_CHANNEL: ${{ (secrets.ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN != '' && secrets.ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID != '') && 'telegram' || (secrets.ALTTEZ_DAILY_BRIEF_WEBHOOK_URL != '' && 'webhook' || 'auto') }}
-      ALTTEZ_DAILY_BRIEF_WEBHOOK_URL: ${{ secrets.ALTTEZ_DAILY_BRIEF_WEBHOOK_URL }}
       ALTTEZ_DAILY_BRIEF_WEBHOOK_TIMEOUT_SECONDS: "10"
-      ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN: ${{ secrets.ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN }}
-      ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID: ${{ secrets.ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID }}
       ALTTEZ_DAILY_BRIEF_DELIVERY_TIMEOUT_SECONDS: "10"
-      ALTTEZ_DAILY_BRIEF_DELIVER: ${{ ((secrets.ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN != '' && secrets.ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID != '') || secrets.ALTTEZ_DAILY_BRIEF_WEBHOOK_URL != '') && 'true' || 'false' }}
-      ALTTEZ_AUTO_PROMOTE_MODELS: ${{ secrets.ALTTEZ_AUTO_PROMOTE_MODELS || 'false' }}
-      ALTTEZ_SUPPORTED_PRODUCTION_MODEL_FAMILIES: ${{ secrets.ALTTEZ_SUPPORTED_PRODUCTION_MODEL_FAMILIES || 'poisson,xgboost' }}
 
     steps:
       - name: Checkout
@@ -62,6 +51,21 @@ jobs:
 
       - name: Materialize runtime .env
         shell: pwsh
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          ALTTEZ_API_FOOTBALL_KEY: ${{ secrets.ALTTEZ_API_FOOTBALL_KEY }}
+          ALTTEZ_FOOTBALL_DATA_KEY: ${{ secrets.ALTTEZ_FOOTBALL_DATA_KEY }}
+          ALTTEZ_ALERT_WEBHOOK_URL: ${{ secrets.ALTTEZ_ALERT_WEBHOOK_URL }}
+          ALTTEZ_ALERTS_TELEGRAM_ENABLED: ${{ secrets.ALTTEZ_ALERTS_TELEGRAM_ENABLED || 'false' }}
+          ALTTEZ_ALERTS_TELEGRAM_BOT_TOKEN: ${{ secrets.ALTTEZ_ALERTS_TELEGRAM_BOT_TOKEN }}
+          ALTTEZ_ALERTS_TELEGRAM_CHAT_ID: ${{ secrets.ALTTEZ_ALERTS_TELEGRAM_CHAT_ID }}
+          ALTTEZ_DAILY_BRIEF_DELIVERY_CHANNEL: ${{ (secrets.ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN != '' && secrets.ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID != '') && 'telegram' || (secrets.ALTTEZ_DAILY_BRIEF_WEBHOOK_URL != '' && 'webhook' || 'auto') }}
+          ALTTEZ_DAILY_BRIEF_WEBHOOK_URL: ${{ secrets.ALTTEZ_DAILY_BRIEF_WEBHOOK_URL }}
+          ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN: ${{ secrets.ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN }}
+          ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID: ${{ secrets.ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID }}
+          ALTTEZ_DAILY_BRIEF_DELIVER: ${{ ((secrets.ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN != '' && secrets.ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID != '') || secrets.ALTTEZ_DAILY_BRIEF_WEBHOOK_URL != '') && 'true' || 'false' }}
+          ALTTEZ_AUTO_PROMOTE_MODELS: ${{ secrets.ALTTEZ_AUTO_PROMOTE_MODELS || 'false' }}
+          ALTTEZ_SUPPORTED_PRODUCTION_MODEL_FAMILIES: ${{ secrets.ALTTEZ_SUPPORTED_PRODUCTION_MODEL_FAMILIES || 'poisson,xgboost' }}
         run: |
           @"
           SUPABASE_DB_URL=$env:SUPABASE_DB_URL

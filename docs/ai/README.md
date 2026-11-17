@@ -6,7 +6,7 @@ sin tener que reconstruir la arquitectura en cada sesion.
 
 ## Lectura recomendada
 
-1. [`../../AGENTS.md`](../../AGENTS.md): reglas operativas y contrato minimo.
+1. [`../../CLAUDE.md`](../../CLAUDE.md): reglas operativas y contexto del proyecto.
 2. [`architecture.md`](architecture.md): componentes, dependencias y flujo de datos.
 3. [`workflows.md`](workflows.md): instalacion, pruebas y procesos operativos.
 4. [`data-and-models.md`](data-and-models.md): datos, inferencia, evaluacion y

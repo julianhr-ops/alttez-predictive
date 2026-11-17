@@ -39,13 +39,13 @@ venv\Scripts\python.exe scripts\run_challenger_cycle.py --date 2026-05-26
 .\scripts\run_daily_process.ps1 -ApplyMigrations -WriteSmoke
 ```
 
-There is no pytest config, no linter config, and no build step — `unittest discover -s tests` is the test contract. CI (`.github/workflows/ci.yml`) runs the tests + validates the migration chain on every push/PR. The `pre-push` hook (`.githooks/pre-push`, install via `git config core.hooksPath .githooks`) additionally runs `scripts/shadow_readiness_check.py`. `daily_process.yml` runs the whole pipeline on a 02:00 UTC schedule.
+Ruff is configured in `ruff.toml`; run `ruff check .` for linting. `unittest discover -s tests` is the test contract. CI (`.github/workflows/ci.yml`) runs tests, lint, and the migration chain on every push and pull request. The `pre-push` hook (`.githooks/pre-push`, install via `git config core.hooksPath .githooks`) additionally runs `scripts/shadow_readiness_check.py`. `daily_process.yml` runs the whole pipeline on a 02:00 UTC schedule.
 
 ## Architecture (big picture)
 
 Data flows: **ingestion → features → inference (router) → reports/dashboard**, with a separate **training/governance** loop that decides which model the router serves.
 
-- **`alttez/ingestion/`** — `provider_stack.py` fetches from an ordered, fall-through provider chain (`espn → football_data_org → statsbomb_open → local_json`, override via `ALTTEZ_PROVIDER_STACK`). ESPN (`providers/espn.py`) is the keyless primary live feed (covers `fifa.world` + `fifa.friendly`); api_football was retired (dead key). Each provider in `providers/` implements the `MatchProvider` base; `is_configured()` gates whether it runs. Raw rows land in `raw_matches_api`. The live-agenda read path (`live_matches.list_matches_for_date`) dedupes the same fixture across providers by canonical team name. `international.InternationalLoader` reads historical data (prefers Supabase, local fallback only when allowed). `certification.py` writes data-quality reports to `artifacts/certification/`. Provider team names are reconciled to historical canonicals via `TEAM_NAME_ALIASES` (e.g. ESPN "Congo DR"→"DR Congo").
+- **`alttez/ingestion/`** — `provider_stack.py` defaults to `api_football`, `football_data_org`, `statsbomb_open`, and `local_json`, overridable via `ALTTEZ_PROVIDER_STACK`. The separate live stack defaults to `espn`, `football_data_org`, and `local_json`. ESPN is the keyless primary live feed. Providers implement `MatchProvider`, and `is_configured()` gates whether they run. Raw rows land in `raw_matches_api`. `live_matches.list_matches_for_date` deduplicates fixtures by canonical team name. `international.InternationalLoader` reads historical data, preferring Supabase. `certification.py` writes reports to `artifacts/certification/`. `TEAM_NAME_ALIASES` reconciles provider names to historical names.
 
 - **`alttez/features/`** — `klement.py` is the **single source of truth for the model feature schema** (`MODEL_FEATURE_COLUMNS`); `inference/router.py` and `training/challenger_cycle.py` both alias it, so changing features means changing it here. `poisson.py` (`PoissonEngine`) and `elo.py` are the core engines; `selection.py`/`sampling.py`/`normalization.py` are preprocessing.
 
@@ -63,7 +63,7 @@ Data flows: **ingestion → features → inference (router) → reports/dashboar
 
 - **`alttez/api/`** — `db.py` (`get_engine`, SQLAlchemy/psycopg to `SUPABASE_DB_URL`), `settings.py` (`.env` loader), `migrations.py`.
 
-- **`sql/supabase/migrations/`** — numbered, forward-only migration chain (`001…009`). Adding schema means appending the next numbered file; `apply_supabase_migrations.py` validates ordering in CI.
+- **`sql/supabase/migrations/`** — numbered, forward-only migration chain (`001...013`). Adding schema means appending the next numbered file; `apply_supabase_migrations.py` validates ordering in CI.
 
 - **`scripts/`** — operational entry points (PowerShell `.ps1` orchestrators + Python CLIs for migrations, challenger cycle, model activation/rollback, briefs, smoke tests).
 

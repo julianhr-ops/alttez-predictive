@@ -1,0 +1,8 @@
+[project]
+name = "alttez-predictive"
+version = "0.1.0"
+requires-python = ">=3.13"
+description = "Football match prediction and reporting"
+
+[tool.alttez.unittest]
+start-directory = "tests"
