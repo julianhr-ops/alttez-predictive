@@ -48,3 +48,9 @@ Order inside one run: refresh hoopR (a failed refresh falls back to the cache an
 - **Live scoreboard.** Graded rows give served vs market Brier and accuracy on the same games. The paired bootstrap interval (by game date) is shown only from 30 lined games.
 - **Known limit.** The blend coefficients are fitted on odds-API closing lines in hoopR; live lines are ESPN's provider (usually DraftKings), recorded in `market_source`. Compare the live scoreboard with the validation table before trusting the blend more than the line.
 - **Exit codes.** 0 ok, 1 digest delivery failed, 2 data or database error, 3 `stale_data`. With `--dry-run` and no `--database-url` the database is never opened; with no URL and no `--dry-run` the run prints only. The agent never applies migration 015; the engineer runs it.
+
+## Attribution and disclaimer
+
+- Schedule and closing-line data come from [sportsdataverse/hoopR-nba-data](https://github.com/sportsdataverse/hoopR-nba-data), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The repository does not redistribute the files. The scripts download them at run time and cache them under `artifacts/nba/`. ALTTEZ changes the data by dropping non-NBA franchise ids and duplicate rows, converting tip-off times to US dates, and normalising the sign of the spread (see Data above).
+- Upcoming games and the DraftKings line come from ESPN's unofficial public scoreboard JSON, used for personal and educational purposes. The line belongs to a third party. ALTTEZ has no affiliation with the NBA, ESPN, DraftKings, or any bookmaker.
+- The output is a statistical research result. It is not betting or financial advice.

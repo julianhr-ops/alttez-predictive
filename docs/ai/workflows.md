@@ -2,40 +2,45 @@
 
 ## Preparacion local
 
-```powershell
-venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item .env.example .env
+```bash
+python -m venv .venv
+python -m pip install -r requirements.txt
+cp .env.example .env
 ```
+
+Activar antes el entorno (`source .venv/bin/activate` en Linux y macOS,
+`.venv\Scripts\Activate.ps1` en Windows). Se requiere Python 3.13 o superior.
 
 Completar solo las variables necesarias. `alttez.api.settings.load_local_env`
 carga `.env`. Nunca versionar ese archivo.
 
 ## Ciclo de desarrollo
 
-```powershell
-venv\Scripts\python.exe -m unittest discover -s tests
-venv\Scripts\python.exe -m unittest tests.test_prediction_committee
-venv\Scripts\python.exe -m ruff check alttez scripts tests
-venv\Scripts\python.exe scripts\apply_supabase_migrations.py
+```bash
+python -m unittest discover -s tests
+python -m unittest tests.test_prediction_committee
+python -m ruff check .
+python scripts/apply_supabase_migrations.py
 ```
 
-Las pruebas usan `unittest`. Ruff existe y CI lo ejecuta como job no bloqueante.
+Las pruebas usan `unittest`. Ruff no esta en `requirements.txt`: instalar `pip install ruff==0.17.5` (la version
+de CI). CI lo ejecuta como job bloqueante.
 Las pruebas que requieren red o una base real no deben incorporarse por accidente
 a la suite unitaria.
 
 ## Dashboard
 
-```powershell
-venv\Scripts\python.exe -m streamlit run alttez/dashboard/app.py
+```bash
+python -m streamlit run alttez/dashboard/app.py
 ```
 
 Separar calculos y transformaciones de Streamlit para probarlos sin navegador.
 
 ## Proveedores
 
-```powershell
-venv\Scripts\python.exe -m alttez.ingestion.provider_healthcheck --json
-venv\Scripts\python.exe scripts\smoke_live_pipeline.py --date AAAA-MM-DD
+```bash
+python -m alttez.ingestion.provider_healthcheck --json
+python scripts/smoke_live_pipeline.py --date AAAA-MM-DD
 ```
 
 El smoke sin `--write` es la opcion inicial. `--write` persiste datos.
@@ -46,12 +51,12 @@ del modelo ni debe disparar una alerta de incidente.
 
 ## Migraciones
 
-```powershell
+```bash
 # Validar, sin aplicar
-venv\Scripts\python.exe scripts\apply_supabase_migrations.py
+python scripts/apply_supabase_migrations.py
 
 # Aplicar con SUPABASE_DB_URL configurada
-venv\Scripts\python.exe scripts\apply_supabase_migrations.py --apply
+python scripts/apply_supabase_migrations.py --apply
 ```
 
 Crear el siguiente archivo numerico y agregar pruebas en
@@ -71,17 +76,30 @@ el PowerShell y `.github/workflows/daily_process.yml` antes de cambiar su orden.
 Cuando no hay agenda internacional, el proceso conserva el backfill de resultados y
 el cierre de torneos, y luego termina correctamente como `idle/no_schedule`. En ese
 caso no ejecuta calibracion, brief diario ni ciclo challenger, y no envia una
-alerta critica.
+alerta critica. La etapa NBA (`scripts/nba_daily.py`, no fatal) corre tambien en
+ese camino.
 
 ## Modelos
 
-```powershell
-venv\Scripts\python.exe scripts\run_challenger_cycle.py --date AAAA-MM-DD
-venv\Scripts\python.exe scripts\fit_probability_calibration.py --help
-venv\Scripts\python.exe scripts\evaluate_calibration.py --help
-venv\Scripts\python.exe scripts\activate_model_version.py --help
-venv\Scripts\python.exe scripts\rollback_active_model.py --help
+```bash
+python scripts/run_challenger_cycle.py --date AAAA-MM-DD
+python scripts/fit_probability_calibration.py --help
+python scripts/evaluate_calibration.py --help
+python scripts/activate_model_version.py --help
+python scripts/rollback_active_model.py --help
 ```
+
+## Validacion y NBA
+
+```bash
+python scripts/validate_soccer.py --help
+python scripts/nba_validate.py
+python scripts/nba_daily.py --dry-run
+```
+
+`validate_soccer.py` tarda decenas de minutos con `--refit-days 1`. `nba_validate.py`
+y `nba_daily.py` descargan datos gratuitos; con `--dry-run` no escriben en la base.
+Resultados y politica de modelo servido: `docs/validation_soccer.md` y `docs/nba.md`.
 
 Activacion, rollback, escritura, entrega y migraciones tienen efectos externos. No
 ejecutarlos como simple verificacion.

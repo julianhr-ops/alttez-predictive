@@ -1,8 +1,10 @@
-# ALTTEZ Fase 2 — UML de arquitectura y flujo operativo
+# ALTTEZ Fase 2: UML de arquitectura y flujo operativo
 
-Este documento resume el estado actual del trabajo en ALTTEZ Fase 2:
+Este documento resume la capa de ingesta, certificacion y operacion diaria del pipeline
+de futbol. Los modelos, la validacion y el pipeline NBA estan en
+[architecture.md](../architecture.md).
 
-- la rama activa es `desarrollo`
+- el proceso diario corre en GitHub Actions (`daily_process.yml`)
 - la ingesta diaria ya corre con orquestación ligera en GitHub Actions
 - la certificación de lotes escribe reporte local y ahora también persiste auditoría histórica en Supabase
 - el dashboard muestra el estado de sincronización, cobertura y certificación
@@ -22,6 +24,7 @@ La arquitectura se divide en cuatro capas principales:
 ```mermaid
 flowchart LR
     subgraph Providers["Fuentes externas"]
+        A0[ESPN scoreboard]
         A1[API-Football]
         A2[football-data.org]
         A3[StatsBomb Open Data]
@@ -82,6 +85,7 @@ flowchart LR
         H2[README / docs / logs]
     end
 
+    A0 --> B1
     A1 --> B1
     A2 --> B1
     A3 --> B1
@@ -357,6 +361,7 @@ flowchart TB
     end
 
     subgraph Ext["Servicios externos"]
+        E0[ESPN scoreboard]
         E1[API-Football]
         E2[football-data.org]
         E3[StatsBomb Open Data]
@@ -376,6 +381,7 @@ flowchart TB
     C3 --> D6
     C3 --> D7
 
+    E0 --> C3
     E1 --> C3
     E2 --> C3
     E3 --> C3
@@ -387,7 +393,7 @@ flowchart TB
 
 ### Ya está operativo
 
-- ingesta multi-provider con fallback
+- ingesta multi-provider con fallback (ESPN sin clave como fuente primaria)
 - normalización de equipos, torneos y grupos
 - contrato de datos con `RawMatchPayload` y `CertifiedMatch`
 - certificación de lotes diarios
@@ -413,4 +419,5 @@ flowchart TB
 
 - [README.md](../../README.md)
 - [docs/provider-stack.md](../provider-stack.md)
+- [docs/architecture.md](../architecture.md)
 - [sql/supabase/migrations/006_certification_batches.sql](../../sql/supabase/migrations/006_certification_batches.sql)
