@@ -7,6 +7,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
+from alttez.inference.calibration import matrix_1x2, temperature_scale
 from alttez.inference.prediction_committee import CommitteeMember, PredictionCommittee, load_latest_challenger_record
 from alttez.inference.router import ActiveModelSelection, BaseMatchPredictor, most_likely_score_from_matrix
 
@@ -146,6 +147,73 @@ class TestPredictionCommittee(unittest.TestCase):
 
         self.assertTrue(prediction["discordance_warning"])
         self.assertIn("0 - 2", prediction["member_primary_scores"])
+
+    def _predict_with_artifact(self, payload: dict | None) -> dict:
+        import json
+        import os
+        import tempfile
+
+        committee_members = [CommitteeMember("champion", DummyPredictor(score=(1, 0), model_version="champion"), 1.0)]
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {}
+            if payload is not None:
+                artifact = Path(tmp) / "active.json"
+                artifact.write_text(json.dumps(payload), encoding="utf-8")
+                env["ALTTEZ_CALIBRATION_PATH"] = str(artifact)
+            else:
+                env["ALTTEZ_CALIBRATION_PATH"] = str(Path(tmp) / "missing.json")
+            with patch.dict(os.environ, env):
+                return PredictionCommittee(committee_members).predict_match("United States", "Mexico")
+
+    def test_committee_applies_active_calibration_artifact_to_1x2(self) -> None:
+        raw_prediction = self._predict_with_artifact(None)
+        calibrated = self._predict_with_artifact({"temperature": 3.0, "class_floor": 0.0})
+
+        self.assertFalse(raw_prediction["calibration_applied"])
+        self.assertTrue(calibrated["calibration_applied"])
+        self.assertEqual(calibrated["calibration_temperature"], 3.0)
+        raw = np.array([calibrated[f"raw_prob_{side}"] for side in ("home", "draw", "away")])
+        np.testing.assert_allclose(raw, matrix_1x2(raw_prediction["prob_matrix"]), atol=1e-9)
+        np.testing.assert_allclose(
+            matrix_1x2(calibrated["prob_matrix"]), temperature_scale(raw, 3.0), atol=1e-9
+        )
+        served = [calibrated["prob_home"], calibrated["prob_draw"], calibrated["prob_away"]]
+        np.testing.assert_allclose(served, matrix_1x2(calibrated["prob_matrix"]), atol=1e-9)
+
+    def test_uncalibrated_committee_reports_raw_equal_to_served(self) -> None:
+        prediction = self._predict_with_artifact(None)
+
+        for side in ("home", "draw", "away"):
+            self.assertAlmostEqual(prediction[f"raw_prob_{side}"], prediction[f"prob_{side}"], places=6)
+
+    def test_committee_propagates_member_fallback(self) -> None:
+        champion = DummyPredictor(score=(1, 0), model_version="champion")
+        champion.used_fallback = True
+        champion.fallback_reason = "model registry unavailable: db down"
+        committee = PredictionCommittee(
+            [
+                CommitteeMember("champion", champion, 0.6),
+                CommitteeMember("poisson_baseline", DummyPredictor(score=(1, 0), model_version="poisson"), 0.4),
+            ]
+        )
+
+        prediction = committee.predict_match("United States", "Mexico")
+
+        self.assertTrue(committee.used_fallback)
+        self.assertTrue(prediction["used_fallback"])
+        self.assertIn("champion", prediction["fallback_reason"])
+        self.assertIn("db down", prediction["fallback_reason"])
+
+    def test_committee_without_fallback_members_reports_none(self) -> None:
+        committee = PredictionCommittee(
+            [CommitteeMember("champion", DummyPredictor(score=(1, 0), model_version="champion"), 1.0)]
+        )
+
+        prediction = committee.predict_match("United States", "Mexico")
+
+        self.assertFalse(prediction["used_fallback"])
+        self.assertIsNone(prediction["fallback_reason"])
+
 
 
 if __name__ == "__main__":

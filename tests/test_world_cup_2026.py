@@ -6,7 +6,12 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from alttez.inference.router import ActiveModelSelection, BaseMatchPredictor, build_active_predictor
+from alttez.inference.router import (
+    ActiveModelSelection,
+    ActiveRecordLookup,
+    BaseMatchPredictor,
+    build_active_predictor,
+)
 from alttez.inference.world_cup_2026 import (
     _sample_match,
     load_world_cup_2026_config,
@@ -44,7 +49,7 @@ def _historical_df() -> pd.DataFrame:
 
 class TestWorldCup2026Simulation(unittest.TestCase):
     def test_simulation_runs_with_official_config(self) -> None:
-        with patch("alttez.inference.router._load_active_model_record_safe", return_value=None):
+        with patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(None)):
             predictor = build_active_predictor(_historical_df(), "2026-05-27")
 
         report = simulate_world_cup_2026(
@@ -221,7 +226,7 @@ class TestWorldCup2026Simulation(unittest.TestCase):
 
 class TestWorldCup2026Bracket(unittest.TestCase):
     def _bracket(self):
-        with patch("alttez.inference.router._load_active_model_record_safe", return_value=None):
+        with patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(None)):
             predictor = build_active_predictor(_historical_df(), "2026-05-27")
         return predict_world_cup_2026_bracket(predictor, config=load_world_cup_2026_config())
 

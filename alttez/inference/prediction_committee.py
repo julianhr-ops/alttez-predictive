@@ -12,10 +12,11 @@ import pandas as pd
 
 from alttez.api.db import read_dataframe
 from alttez.experiments.tournament_oracle import optimize_prediction
-from alttez.inference.calibration import load_active_calibration
+from alttez.inference.calibration import load_active_calibration, matrix_1x2
 from alttez.inference.committee_weighting import WeightingDecision, resolve_committee_weights
 from alttez.features.hierarchical import load_active_hierarchical_strengths
 from alttez.inference.router import (
+    _raw_probability_fields,
     ActiveModelSelection,
     BaseMatchPredictor,
     BivariatePoissonMatchPredictor,
@@ -167,9 +168,17 @@ class PredictionCommittee(BaseMatchPredictor):
         self.members = _normalize_members(members)
         # Decision de pesos (guardia de consenso / error inverso). None = pesos previos.
         self.weighting = weighting
-        # Calibracion post-hoc del consenso (temperature scaling ajustado offline
-        # sobre las predicciones cerradas del comite). Neutra si no hay artefacto.
-        self.calibration = load_active_calibration()
+        fallback_members = [
+            member for member in self.members if getattr(member.predictor, "used_fallback", False)
+        ]
+        fallback_reason = (
+            "; ".join(
+                f"{member.role}: {getattr(member.predictor, 'fallback_reason', None) or 'motivo desconocido'}"
+                for member in fallback_members
+            )
+            if fallback_members
+            else None
+        )
         super().__init__(
             selection=ActiveModelSelection(
                 version_key=None,
@@ -177,8 +186,14 @@ class PredictionCommittee(BaseMatchPredictor):
                 model_family="committee",
                 artifact_path=None,
                 requested_production_status="active",
-            )
+            ),
+            used_fallback=bool(fallback_members),
+            fallback_reason=fallback_reason,
         )
+        # Calibracion post-hoc del consenso (temperature scaling ajustado offline
+        # sobre las predicciones cerradas del comite). Neutra si no hay artefacto.
+        # Se asigna DESPUES de super().__init__, que fija la calibracion del predictor unico.
+        self.calibration = load_active_calibration()
 
     def get_team_profile(self, team: str) -> dict[str, float]:
         return self.members[0].predictor.get_team_profile(canonical_team_name(team))
@@ -269,6 +284,7 @@ class PredictionCommittee(BaseMatchPredictor):
         # campeon ya bien calibrado (p.ej. Poisson).
         deferred = bool(self.weighting and self.weighting.deferred_to_champion)
         calibration_active = (not deferred) and (not self.calibration.is_neutral)
+        raw_1x2 = matrix_1x2(consensus_matrix)
         if calibration_active:
             consensus_matrix = self.calibration.calibrate_matrix(consensus_matrix)
         recommendations = optimize_prediction(consensus_matrix, is_knockout=is_knockout).head(5).copy()
@@ -297,8 +313,8 @@ class PredictionCommittee(BaseMatchPredictor):
             "model_family": self.model_family,
             "requested_model_version": self.requested_model_version,
             "requested_model_family": self.requested_model_family,
-            "used_fallback": False,
-            "fallback_reason": None,
+            "used_fallback": self.used_fallback,
+            "fallback_reason": self.fallback_reason,
             "profile_local": profile_local,
             "profile_visitante": profile_visitante,
             "prediction_supported": True,
@@ -310,6 +326,7 @@ class PredictionCommittee(BaseMatchPredictor):
             "prob_home": result_probabilities.get(f"Victoria {home_team}"),
             "prob_draw": result_probabilities.get("Empate"),
             "prob_away": result_probabilities.get(f"Victoria {away_team}"),
+            **_raw_probability_fields(raw_1x2),
             "result_summary": result_summary,
             "recommendations": recommendations,
             "primary_score": score_decision["primary_score"],
@@ -331,7 +348,7 @@ class PredictionCommittee(BaseMatchPredictor):
             "committee_weights": {member.role: member.weight for member in self.members},
             "committee_weighting_strategy": self.weighting.strategy if self.weighting else "default",
             "committee_deferred_to_champion": bool(self.weighting.deferred_to_champion) if self.weighting else False,
-            "calibration_temperature": self.calibration.temperature,
+            "calibration_temperature": getattr(self.calibration, "temperature", None),
             "calibration_applied": calibration_active,
             "discordance_warning": _discordance_warning(member_scores),
             "member_primary_scores": member_scores,

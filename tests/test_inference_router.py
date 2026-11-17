@@ -6,17 +6,23 @@ from pathlib import Path
 from unittest.mock import patch
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from alttez.experiments.tournament_oracle import optimize_prediction
 from alttez.features.klement import MODEL_FEATURE_COLUMNS
+from alttez.inference.calibration import temperature_scale
 from alttez.inference.router import (
     XGBOOST_FEATURE_COLUMNS,
+    ActiveRecordLookup,
+    ArtifactPathError,
     _is_prediction_supported,
+    _load_active_model_record_safe,
     build_active_predictor,
     exact_scoreline_decision,
     most_likely_score_from_matrix,
     outcome_aligned_score_from_matrix,
+    resolve_artifact_path,
 )
 from alttez.training.challenger_cycle import FEATURE_COLUMNS as CHALLENGER_FEATURE_COLUMNS
 
@@ -102,7 +108,7 @@ class TestInferenceRouter(unittest.TestCase):
 
     def test_build_active_predictor_defaults_to_poisson_when_no_registry_record(self) -> None:
         with (
-            patch("alttez.inference.router._load_active_model_record_safe", return_value=None),
+            patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(None)),
             patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}),
         ):
             predictor = build_active_predictor(_historical_df(), "2026-05-27")
@@ -155,7 +161,7 @@ class TestInferenceRouter(unittest.TestCase):
             "production_status": "active",
         }
         with (
-            patch("alttez.inference.router._load_active_model_record_safe", return_value=active_record),
+            patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(active_record)),
             patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}),
         ):
             predictor = build_active_predictor(_historical_df(), "2026-05-27")
@@ -216,7 +222,7 @@ class TestInferenceRouter(unittest.TestCase):
             "germany": {"gdp_per_capita": 50000.0, "confederation_code": "UEFA"},
         }
         with (
-            patch("alttez.inference.router._load_active_model_record_safe", return_value=active_record),
+            patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(active_record)),
             patch("alttez.features.klement.load_team_macro_context", return_value=macro_context),
             patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}),
         ):
@@ -249,7 +255,7 @@ class TestSinglePredictorCalibration(unittest.TestCase):
         import json
         import tempfile
 
-        with patch("alttez.inference.router._load_active_model_record_safe", return_value=None):
+        with patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(None)):
             # Baseline sin calibracion (compuerta apagada).
             with patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}, clear=False):
                 os.environ.pop("ALTTEZ_CALIBRATE_SINGLE_PREDICTOR", None)
@@ -276,11 +282,16 @@ class TestSinglePredictorCalibration(unittest.TestCase):
                     )
             cal_max = self._max_prob(cal_pred)
 
-        # La calibracion esta cableada: cambia la salida del predictor unico.
-        # (No se asume direccion del max: temperature_scale opera sobre la matriz
-        # de marcadores 8x8, no sobre el triplete 1X2, asi que aplanar la matriz
-        # no aplana necesariamente las 3 clases.)
-        self.assertNotAlmostEqual(cal_max, base_max, places=4)
+        # T=4 aplana el 1X2 agregado: la clase mas probable pierde masa.
+        self.assertLess(cal_max, base_max)
+        sides = ("home", "draw", "away")
+        raw = [float(cal_pred[f"raw_prob_{side}"]) for side in sides]
+        for side, raw_value in zip(sides, raw):
+            self.assertAlmostEqual(raw_value, float(base_pred[f"prob_{side}"]), places=6)
+            self.assertAlmostEqual(float(base_pred[f"raw_prob_{side}"]), float(base_pred[f"prob_{side}"]), places=6)
+        calibrated = [float(cal_pred[f"prob_{side}"]) for side in sides]
+        for expected, actual in zip(temperature_scale(np.array(raw), 4.0), calibrated):
+            self.assertAlmostEqual(float(expected), actual, places=6)
         # Sigue siendo distribucion valida.
         self.assertAlmostEqual(
             float(cal_pred["prob_home"]) + float(cal_pred["prob_draw"]) + float(cal_pred["prob_away"]),
@@ -289,11 +300,113 @@ class TestSinglePredictorCalibration(unittest.TestCase):
         )
 
     def test_calibration_neutral_when_flag_off(self) -> None:
-        with patch("alttez.inference.router._load_active_model_record_safe", return_value=None):
+        with patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(None)):
             with patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}, clear=False):
                 os.environ.pop("ALTTEZ_CALIBRATE_SINGLE_PREDICTOR", None)
                 predictor = build_active_predictor(_historical_df(), "2026-05-27")
         self.assertTrue(predictor.calibration.is_neutral)
+
+
+class TestArtifactPathContainment(unittest.TestCase):
+    def setUp(self) -> None:
+        self.base = Path("artifacts").resolve()
+
+    def test_path_inside_artifacts_is_accepted(self) -> None:
+        resolved = resolve_artifact_path("artifacts/model-artifacts/champion.joblib")
+        self.assertTrue(resolved.is_relative_to(self.base))
+
+    def test_parent_traversal_is_rejected(self) -> None:
+        with self.assertRaises(ArtifactPathError):
+            resolve_artifact_path("artifacts/../../etc/passwd.joblib")
+        with self.assertRaises(ArtifactPathError):
+            resolve_artifact_path("../../etc/x.joblib")
+
+    def test_absolute_path_outside_is_rejected(self) -> None:
+        import tempfile
+
+        with self.assertRaises(ArtifactPathError):
+            resolve_artifact_path(Path(tempfile.gettempdir()) / "evil.joblib")
+
+    def test_sibling_directory_with_shared_prefix_is_rejected(self) -> None:
+        with self.assertRaises(ArtifactPathError):
+            resolve_artifact_path("artifacts-evil/x.joblib")
+
+    def test_custom_artifacts_dir_from_environment(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"ALTTEZ_ARTIFACTS_DIR": tmp}):
+            inside = resolve_artifact_path(Path(tmp) / "m.joblib")
+            self.assertEqual(inside.parent, Path(tmp).resolve())
+            with self.assertRaises(ArtifactPathError):
+                resolve_artifact_path("artifacts/m.joblib")
+
+
+class TestLoudFallback(unittest.TestCase):
+    def _build(self, lookup: ActiveRecordLookup):
+        with (
+            patch("alttez.inference.router._load_active_model_record_safe", return_value=lookup),
+            patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}),
+        ):
+            return build_active_predictor(_historical_df(), "2026-05-27")
+
+    def test_registry_error_sets_fallback_flags_and_reaches_prediction(self) -> None:
+        predictor = self._build(ActiveRecordLookup(None, error="OperationalError: db down"))
+        self.assertTrue(predictor.used_fallback)
+        self.assertIn("db down", predictor.fallback_reason)
+        prediction = predictor.predict_match("Mexico", "USA", is_neutral=True)
+        self.assertTrue(prediction["used_fallback"])
+        self.assertIn("model registry unavailable", prediction["fallback_reason"])
+
+    def test_healthy_registry_without_active_record_is_not_a_fallback(self) -> None:
+        predictor = self._build(ActiveRecordLookup(None))
+        self.assertFalse(predictor.used_fallback)
+        self.assertIsNone(predictor.fallback_reason)
+
+    def test_registry_lookup_logs_warning_and_reports_error(self) -> None:
+        with (
+            patch("alttez.operations.prediction_memory.read_dataframe", side_effect=RuntimeError("db down")),
+            self.assertLogs("alttez.inference.router", level="WARNING") as logs,
+        ):
+            lookup = _load_active_model_record_safe()
+        self.assertIsNone(lookup.record)
+        self.assertIn("RuntimeError: db down", lookup.error)
+        self.assertTrue(any("db down" in line for line in logs.output))
+
+    def test_missing_artifact_sets_fallback_and_logs_warning(self) -> None:
+        record = {
+            "version_key": None,
+            "model_version": "xgb-missing",
+            "model_family": "xgboost",
+            "artifact_path": "artifacts/test-router/does-not-exist.joblib",
+            "production_status": "active",
+        }
+        with self.assertLogs("alttez.inference.router", level="WARNING") as logs:
+            predictor = self._build(ActiveRecordLookup(record))
+        self.assertTrue(predictor.used_fallback)
+        self.assertIn("FileNotFoundError", predictor.fallback_reason)
+        self.assertTrue(any("xgb-missing" in line for line in logs.output))
+
+    def test_artifact_path_traversal_falls_back_without_loading(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside.joblib"
+            joblib.dump({"artifact_schema_version": 1, "model": DummyProbabilityModel()}, outside)
+            for artifact_path in (str(outside), "artifacts/../../escape.joblib"):
+                record = {
+                    "version_key": None,
+                    "model_version": "xgb-evil",
+                    "model_family": "xgboost",
+                    "artifact_path": artifact_path,
+                    "production_status": "active",
+                }
+                with patch("alttez.inference.router.joblib.load") as load, self.assertLogs(
+                    "alttez.inference.router", level="WARNING"
+                ):
+                    predictor = self._build(ActiveRecordLookup(record))
+                load.assert_not_called()
+                self.assertTrue(predictor.used_fallback)
+                self.assertIn("ArtifactPathError", predictor.fallback_reason)
 
 
 if __name__ == "__main__":

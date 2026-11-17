@@ -8,6 +8,11 @@ eso sin reentrenar, mediante:
   1. Temperature scaling: p -> p^(1/T) / Z. T>1 suaviza la sobreconfianza.
   2. Piso por clase: ninguna clase queda en ~0, lo que acota el log loss.
 
+La temperatura se ajusta sobre tripletes 1X2, asi que se aplica al triplete 1X2
+agregado. Para calibrar una matriz de marcadores se calibra su 1X2 y cada celda se
+reescala por calibrada/cruda de su clase (local, empate, visitante): la matriz
+sigue siendo una distribucion y sus marginales 1X2 son exactamente las calibradas.
+
 Es post-hoc, reversible y barato. El parametro T se ajusta offline sobre las
 evaluaciones cerradas (ver scripts/fit_probability_calibration.py) y se persiste
 en un artefacto JSON. Si el artefacto no existe, la calibracion es NEUTRA
@@ -19,6 +24,7 @@ Funciones puras y unitariamente testeables segun la politica anti-monolitica.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -91,6 +97,64 @@ def apply_class_floor(triplet: np.ndarray, floor: float) -> np.ndarray:
     return out
 
 
+def _class_masks(shape: tuple[int, ...]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Mascaras booleanas (local, empate, visitante) de una matriz goles-local x goles-visitante."""
+    if len(shape) != 2 or shape[0] != shape[1]:
+        raise ValueError(f"La matriz de marcadores debe ser cuadrada, recibio {shape}.")
+    rows, cols = np.indices(shape)
+    return rows > cols, rows == cols, rows < cols
+
+
+def matrix_1x2(matrix: np.ndarray) -> tuple[float, float, float]:
+    """Marginales 1X2 (local, empate, visitante) de una matriz de marcadores, normalizada a suma 1."""
+    array = np.asarray(matrix, dtype=float)
+    masses = np.array([array[mask].sum() for mask in _class_masks(array.shape)])
+    total = masses.sum()
+    if not np.isfinite(total) or total <= 0:
+        return 1 / 3, 1 / 3, 1 / 3
+    masses = masses / total
+    return float(masses[0]), float(masses[1]), float(masses[2])
+
+
+def rescale_matrix_to_triplet(matrix: np.ndarray, target: tuple[float, float, float]) -> np.ndarray:
+    """Reescala la matriz para que sus marginales 1X2 sean `target`, conservando la forma dentro de cada clase.
+
+    Cada celda se multiplica por target_clase / masa_cruda_clase. Si una clase no
+    tiene masa en la matriz (p. ej. matriz 1x1 sin celdas de victoria) no puede
+    recibir la probabilidad pedida: el objetivo se renormaliza sobre las clases
+    con masa.
+    """
+    array = np.asarray(matrix, dtype=float)
+    total = array.sum()
+    if not np.isfinite(total) or total <= 0:
+        return np.full(array.shape, 1.0 / array.size, dtype=float)
+    array = array / total
+    masks = _class_masks(array.shape)
+    raw = np.array([array[mask].sum() for mask in masks])
+    wanted = np.where(raw > 0, np.asarray(target, dtype=float), 0.0)
+    wanted_total = wanted.sum()
+    if wanted_total <= 0:
+        return array
+    wanted = wanted / wanted_total
+    factors = np.divide(wanted, raw, out=np.zeros_like(raw), where=raw > 0)
+    out = array.copy()
+    for mask, factor in zip(masks, factors):
+        out[mask] *= factor
+    return out
+
+
+def _calibrate_matrix_via_triplet(
+    calibration: ProbabilityCalibration | IsotonicCalibration, matrix: np.ndarray
+) -> np.ndarray:
+    array = np.asarray(matrix, dtype=float)
+    total = array.sum()
+    normalized = array / total if np.isfinite(total) and total > 0 else array
+    if calibration.is_neutral:
+        return normalized
+    calibrated = calibration.calibrate_triplet(*matrix_1x2(normalized))
+    return rescale_matrix_to_triplet(normalized, calibrated)
+
+
 @dataclass(slots=True, frozen=True)
 class ProbabilityCalibration:
     """Calibracion activa: una temperatura y un piso por clase."""
@@ -103,9 +167,12 @@ class ProbabilityCalibration:
         return self.temperature == 1.0 and self.class_floor <= 0.0
 
     def calibrate_matrix(self, matrix: np.ndarray) -> np.ndarray:
-        """Calibra una matriz de marcadores (goles local x visitante). Coherente
-        para 1X2 y marcadores porque se aplica antes de derivar ambos."""
-        return temperature_scale(matrix, self.temperature)
+        """Calibra una matriz de marcadores (goles local x visitante) via su 1X2.
+
+        La temperatura se ajusto sobre tripletes 1X2, por eso se aplica al 1X2
+        agregado y la matriz se reescala por clase (ver rescale_matrix_to_triplet).
+        """
+        return _calibrate_matrix_via_triplet(self, matrix)
 
     def calibrate_triplet(self, home: float, draw: float, away: float) -> tuple[float, float, float]:
         """Calibra y pisa un vector 1X2. Usar cuando solo se tienen las 3 clases."""
@@ -175,10 +242,9 @@ class IsotonicCalibration:
     Mantiene tres curvas (x, y) escalonadas, una por clase (H, D, A). Se serializa
     como arreglos puros (sin objetos sklearn) y se reevalua con np.interp.
 
-    NOTA: la calibracion isotonica se define solo sobre el triplete 1X2. No hay
-    una calibracion bien definida a nivel de matriz de marcadores, asi que
-    calibrate_matrix es IDENTIDAD (no rompe a los llamadores que la invocan antes
-    de derivar 1X2; la correccion 1X2 se aplica luego en calibrate_triplet).
+    NOTA: la calibracion isotonica se define sobre el triplete 1X2. Para una
+    matriz de marcadores se calibra su 1X2 y la matriz se reescala por clase,
+    igual que en ProbabilityCalibration.
     """
 
     home_x: tuple[float, ...] = ()
@@ -200,8 +266,8 @@ class IsotonicCalibration:
         )
 
     def calibrate_matrix(self, matrix: np.ndarray) -> np.ndarray:
-        """Identidad: la calibracion isotonica solo aplica al triplete 1X2."""
-        return np.asarray(matrix, dtype=float)
+        """Calibra una matriz de marcadores via su 1X2 calibrado (reescalado por clase)."""
+        return _calibrate_matrix_via_triplet(self, matrix)
 
     def calibrate_triplet(self, home: float, draw: float, away: float) -> tuple[float, float, float]:
         cal_h = _eval_curve(list(self.home_x), list(self.home_y), home)
@@ -231,7 +297,7 @@ class IsotonicCalibration:
         }
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "IsotonicCalibration":
+    def from_payload(cls, payload: dict) -> IsotonicCalibration:
         curves = payload.get("curves", {}) or {}
         home = curves.get("home", {}) or {}
         draw = curves.get("draw", {}) or {}
@@ -374,7 +440,7 @@ def expected_calibration_error(triplets: np.ndarray, outcomes: list[str], *, bin
     edges = np.linspace(0.0, 1.0, bins + 1)
     ece = 0.0
     total = len(confidences)
-    for low, high in zip(edges[:-1], edges[1:]):
+    for low, high in itertools.pairwise(edges):
         mask = (confidences > low) & (confidences <= high)
         count = int(mask.sum())
         if count == 0:
