@@ -273,6 +273,16 @@ The daily process now sends a short incident message when a critical stage fails
 - daily brief
 - challenger cycle
 
+### 9. NBA predictions
+
+NBA game predictions run on free data only (hoopR schedule and closing lines, ESPN scoreboard). The daily process runs `scripts/nba_daily.py` as a non-fatal stage; run it by hand with:
+
+```powershell
+python scripts/nba_daily.py --dry-run --date 2026-11-17
+```
+
+`--dry-run` prints the predictions and writes nothing. Without it, and with a database URL, the run stores each prediction once in `public.nba_predictions` (migration `015_nba_predictions.sql`, applied by you) and grades finished games. It refuses to predict on stale data (exit 3). See `docs/nba.md` for the served-model policy, the measured results and the exit codes.
+
 ## Environment
 
 Copy the template and fill in the real credentials:
