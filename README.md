@@ -11,7 +11,7 @@ ALTTEZ produces win probabilities for international football (1X2 and scorelines
 - **Walk-forward validation.** Every test period is predicted only from data that came before it. Hyperparameters, calibrators and blend weights are fitted on earlier seasons or years and never on the period being scored. Ratings score a game from the state before its date, so a prediction cannot see its own result.
 - **Baselines on the same games.** Uniform, base rate, plain Elo and the NBA closing line are scored on the identical matches as the model. Beating a coin flip is not reported as a win.
 - **Uncertainty on every comparison.** `alttez/evaluation/paired.py` resamples per-game loss differences, in blocks of game dates when games share a day, and reports a 95% interval. A difference counts only when the interval excludes 0.
-- **The legacy soccer model lost to plain Elo.** The original Poisson champion is worse than an Elo-only baseline on Brier, RPS and log loss, pooled and in 7 of 8 test years. It beats the uniform and base-rate baselines. Temperature calibration changes nothing measurable. The report ([docs/validation_soccer.md](docs/validation_soccer.md)) links the gap to a draw bias that one temperature cannot fix, and it labels that explanation inferred and untested.
+- **The legacy soccer model lost to plain Elo, and the fix was measured before it was served.** The audit found that the original Poisson champion is worse than an Elo-only baseline on Brier, RPS and log loss, pooled and in 7 of 8 test years, with a draw bias that one temperature cannot fix. The harness then scored eight candidate replacements. Selection used 2018 to 2022 only, and 2023 to 2025 were kept as an untouched final test. The chosen Elo ordinal rule beat the Poisson champion there by Brier -0.0728 [-0.0836, -0.0623] on 3,191 matches, and it is now served by default through `alttez/inference/serving_policy.py`. The Poisson score matrix is rescaled to the Elo 1X2 so scorelines stay coherent, and `ALTTEZ_SERVING_POLICY=off` restores plain Poisson. The same report says the rule is statistically equivalent to plain Elo, so the win is mostly "use Elo" ([docs/validation_soccer.md](docs/validation_soccer.md)).
 - **NBA Elo does not beat the closing line.** Elo beats the constant home rate and vanilla Elo, but it does not beat the market close in any test season. A blend of Elo and the market line only reproduces the line. So the served prediction defers to the market-based blend whenever a line exists, and uses calibrated Elo only for games with no line ([docs/nba.md](docs/nba.md)).
 - **Leakage and duplication fixed with tests.** The audit found and fixed a calibration fitted on one shape and applied to another, duplicate prediction rows that inflated the learning data, an Elo K factor that treated qualifiers as finals, and a registry failure that silently served the fallback ([docs/model-history.md](docs/model-history.md)). NBA predictions are keyed on game and model version, written while the game is scheduled and never rewritten after tip-off.
 
@@ -34,12 +34,12 @@ Every number below is copied from a validation report, and each report names the
 
 The paired bootstrap, by game date, pooled over the six test seasons, says MOV Elo beats the constant rate and vanilla Elo. Against vanilla Elo its log loss difference is -0.0055 [-0.0078, -0.0032], a gain of about 0.005. It does not beat the market close in any season. Pooled, its log loss is +0.0245 [+0.0202, +0.0288] worse than the market. The blend gives the Elo logit a coefficient of about zero and the market logit about 1.03, so it reproduces the market. Its Brier difference against the market is +0.0004 [-0.0000, +0.0008] and its log loss difference is +0.0009 [+0.0000, +0.0017].
 
-### Soccer 1X2, walk-forward, test years 2018 to 2025
+### Soccer 1X2, walk-forward
 
-<!-- SOCCER-NUMBERS -->
-7,611 identical international matches. Source is [docs/validation_soccer.md](docs/validation_soccer.md), reproduced with `python scripts/validate_soccer.py --refit-days 1 --workers 10` (33 minutes in the report).
+Source is [docs/validation_soccer.md](docs/validation_soccer.md). The work has two stages, a diagnosis of the legacy Poisson champion on 2018 to 2025 and a held-out test of a replacement.
 
-<!-- SOCCER-NUMBERS -->
+**Stage 1, diagnosis.** 7,611 identical international matches, test years 2018 to 2025, reproduced with `python scripts/validate_soccer.py --refit-days 1 --workers 10` (33 minutes in the report).
+
 | model | Brier | RPS | log loss | accuracy |
 | --- | --- | --- | --- | --- |
 | uniform | 0.6667 | 0.2390 | 1.0986 | 0.475 |
@@ -48,8 +48,22 @@ The paired bootstrap, by game date, pooled over the six test seasons, says MOV E
 | Poisson raw | 0.5811 | 0.1998 | 0.9760 | 0.526 |
 | Poisson + temperature | 0.5811 | 0.1996 | 0.9761 | 0.526 |
 
-<!-- SOCCER-NUMBERS -->
 Paired bootstrap, model minus baseline, lower is better. Poisson raw against Elo only is Brier +0.0663 [+0.0585, +0.0735], so the Poisson champion is worse. Poisson raw against base rate is -0.0539 [-0.0605, -0.0476], so it beats the base rate. Poisson + temperature against Poisson raw is Brier +0.0000 [-0.0007, +0.0007], so calibration changes nothing measurable. The accuracy of the uniform and base-rate rows is the home-win share, because both always pick home.
+
+**Stage 2, selection and held-out test.** Eight candidate rules were declared and compared on 2018 to 2022 only, and the simplest one inside the noise of the best was chosen, an Elo ordinal rule (Elo ratings with a fitted draw model). It was committed as the primary candidate before 2023 to 2025 were scored. Those three years are an untouched test of 3,191 matches, reproduced with `python scripts/validate_soccer.py --refit-days 1 --raw-cache-dir artifacts/soccer/raw --report-years 2023 2025 --candidates elo_ordinal`.
+
+| model | Brier | RPS | log loss | accuracy |
+| --- | --- | --- | --- | --- |
+| uniform | 0.6667 | 0.2389 | 1.0986 | 0.467 |
+| base rate | 0.6381 | 0.2295 | 1.0569 | 0.467 |
+| Elo only | 0.5142 | 0.1700 | 0.8714 | 0.599 |
+| Poisson raw (legacy champion) | 0.5855 | 0.2014 | 0.9812 | 0.522 |
+| Poisson + temperature | 0.5862 | 0.2015 | 0.9821 | 0.522 |
+| Elo ordinal draw | 0.5127 | 0.1694 | 0.8700 | 0.602 |
+
+Elo ordinal against Poisson raw, paired bootstrap, 2023 to 2025, is Brier -0.0728 [-0.0836, -0.0623], RPS -0.0320 [-0.0364, -0.0278] and log loss -0.1113 [-0.1271, -0.0955]. The Brier interval is below 0 in each of the three years. The draw over-prediction is gone. On the held-out years the mean predicted draw rate is 0.224 for Elo ordinal and 0.283 for Poisson raw, against 0.233 observed.
+
+The gain comes from using Elo, not from the fitted draw model. Elo ordinal against plain Elo only is Brier -0.0015 [-0.0025, -0.0004] on the held-out years, and over 2018 to 2025 (selection years included) it is -0.0003 [-0.0010, +0.0003]. The report treats the two Elo rules as equivalent in accuracy and prefers the fitted one for serving because its draw rate is calibrated and it comes with a coherent score matrix. A blend with the Poisson 1X2 added nothing.
 
 ## Architecture
 
@@ -57,9 +71,9 @@ Paired bootstrap, model minus baseline, lower is better. Poisson raw against Elo
 flowchart LR
     SRC["Free data<br/>martj42, hoopR, ESPN, StatsBomb"] --> ING["Ingestion<br/>provider stack, loaders, cache"]
     ING --> FEAT["Features and ratings<br/>Elo, Poisson, MOV Elo"]
-    FEAT --> MOD["Models<br/>Poisson, XGBoost, committee, NBA blend"]
+    FEAT --> MOD["Models<br/>Poisson, Elo ordinal, XGBoost, committee, NBA blend"]
     MOD --> CAL["Calibration<br/>temperature, isotonic, Platt"]
-    CAL --> SERVE["Serving<br/>router with fallback, NBA served model"]
+    CAL --> SERVE["Serving<br/>router, Elo ordinal serving policy, NBA served model"]
     SERVE --> DB[("Postgres<br/>one row per prediction")]
     DAILY["Daily pipeline<br/>run_daily_process.ps1"] --> ING
     DAILY --> SERVE
@@ -143,7 +157,8 @@ Schedule and betting-line data come from sportsdataverse/hoopR-nba-data (CC BY 4
 
 ## Limitations and known follow-ups
 
-- The soccer champion does not beat plain Elo. Giving the Poisson model Elo inputs, or using an Elo-based 1X2 for the matches it abstains on, is the first untested candidate. A class-specific correction such as the isotonic option targets the draw bias and is untested.
+- The soccer serving rule is Elo based. Its edge over plain Elo is inside the noise, so the validated claim is "Elo beats the Poisson champion", not "the fitted draw model beats Elo". A class-specific correction of the Poisson 1X2 and a Poisson model with Elo inputs are untested.
+- A team with no Elo rating, or a match the support gate rejects, keeps the Poisson path and is flagged as a fallback. Calibration of the served Elo 1X2 is not applied, since the existing temperature was fitted on Poisson output.
 - The soccer backtest scores 7,611 of 7,829 test-year matches. The router abstains on the other 218 because a team has fewer than 5 matches in the last 4 years.
 - XGBoost, the hierarchical and bivariate Poisson models, the committee consensus and the tournament simulation are not evaluated in the backtest.
 - The Elo constants come from the original code. Whether they were tuned on the test years is unknown.
@@ -162,4 +177,4 @@ MIT, see [LICENSE.txt](LICENSE.txt). The code began as a reshaping of [ProphitBe
 
 ## Resumen en español
 
-ALTTEZ calcula probabilidades de victoria para fútbol internacional (1X2 y marcadores) y para partidos de la NBA usando solo datos públicos y gratuitos. Cada modelo se valida con el método walk-forward, contra modelos de referencia sobre los mismos partidos y con intervalos de confianza de bootstrap pareado. El repositorio conserva los resultados negativos. El campeón Poisson de fútbol resultó peor que un Elo simple. El Elo de la NBA no supera la línea de cierre del mercado, así que cuando existe una línea el modelo servido se apoya en el mercado. Para probarlo, instale Python 3.13 o superior, cree un entorno virtual, ejecute `pip install -r requirements.txt` y luego `python -m unittest discover -s tests`. Las cifras están en `docs/nba.md` y `docs/validation_soccer.md`, y la guía local en español está en `docs/ai/workflows.md`. Este proyecto es de investigación y no constituye asesoría de apuestas ni financiera.
+ALTTEZ calcula probabilidades de victoria para fútbol internacional (1X2 y marcadores) y para partidos de la NBA usando solo datos públicos y gratuitos. Cada modelo se valida con el método walk-forward, contra modelos de referencia sobre los mismos partidos y con intervalos de confianza de bootstrap pareado. El repositorio conserva los resultados negativos. La auditoría mostró que el campeón Poisson de fútbol era peor que un Elo simple. Se evaluaron ocho reglas candidatas, se eligió una con los años 2018 a 2022 y se probó en 2023 a 2025, que no se usaron para elegir. La regla ganadora, un Elo ordinal con modelo de empates, mejora al campeón Poisson con una diferencia de Brier de -0.0728 [-0.0836, -0.0623] sobre 3,191 partidos, y hoy se sirve por defecto (`ALTTEZ_SERVING_POLICY=off` devuelve el Poisson original). Frente a un Elo simple la diferencia es estadísticamente equivalente. El Elo de la NBA no supera la línea de cierre del mercado, así que cuando existe una línea el modelo servido se apoya en el mercado. Para probarlo, instale Python 3.13 o superior, cree un entorno virtual, ejecute `pip install -r requirements.txt` y luego `python -m unittest discover -s tests`. Las cifras están en `docs/nba.md` y `docs/validation_soccer.md`, y la guía local en español está en `docs/ai/workflows.md`. Este proyecto es de investigación y no constituye asesoría de apuestas ni financiera.
