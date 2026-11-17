@@ -1,13 +1,17 @@
-"""Persistence of NBA predictions in ``public.nba_predictions`` (migration 015).
+"""Persistence of NBA predictions in ``public.nba_predictions`` (migrations 015 and 016).
 
-A prediction row is written once, while its game is still scheduled, and is never
-rewritten: the insert is ``ON CONFLICT DO NOTHING`` and :func:`grade_prediction` only
-fills the result columns. Row mapping and grading math are pure and tested apart from
-the SQL. Every function takes the engine explicitly; callers own its lifecycle.
+A game has at most one row per (model_version, served_model). The Elo+Platt row is written
+first; when a market line appears later, the blend row is added beside it. A row is never
+rewritten: inserts skip an existing key and :func:`grade_prediction` only fills the result
+columns of its own row. Nothing is written once a game has tipped off. For scoring, the
+row that served a game is picked by :func:`served_rows`. Row mapping and grading math are
+pure and tested apart from the SQL. Every function takes the engine explicitly; callers own
+its lifecycle.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from datetime import UTC, date, datetime
 from enum import StrEnum
@@ -32,6 +36,7 @@ class PredictionStatus(StrEnum):
 
 class InsertOutcome(StrEnum):
     INSERTED = "inserted"
+    UPGRADED = "upgraded"
     ALREADY_EXISTS = "already_exists"
     PAST_TIPOFF = "past_tipoff"
 
@@ -158,11 +163,15 @@ def grade_outcome(p_home_served: float, home_score: int, away_score: int) -> Gra
     return Grade(home_score, away_score, home_win, (p_home_served - float(home_win)) ** 2)
 
 
+_SIBLINGS_SQL = text(
+    f"select served_model from {TABLE} where game_id = :game_id and model_version = :model_version"
+)
+
 _INSERT_SQL = text(
     f"""
     insert into {TABLE} ({", ".join(COLUMNS)})
     values ({", ".join(f":{c}" for c in COLUMNS)})
-    on conflict (game_id, model_version) do nothing
+    on conflict do nothing
     """
 ).bindparams(
     bindparam("game_date", type_=Date),
@@ -193,20 +202,33 @@ _GRADE_SQL = text(
     update {TABLE}
     set status = 'graded', home_score = :home_score, away_score = :away_score,
         home_win = :home_win, brier = :brier, graded_at = :graded_at
-    where game_id = :game_id and model_version = :model_version and status = 'scheduled'
+    where game_id = :game_id and model_version = :model_version and served_model = :served_model
+        and status = 'scheduled'
     """
 ).bindparams(bindparam("graded_at", type_=DateTime(timezone=True)), bindparam("home_win", type_=Boolean))
 
 
 def insert_prediction_if_absent(engine: Engine, row: NbaPredictionRow, *, now: datetime) -> InsertOutcome:
-    """Insert ``row`` unless one exists for (game_id, model_version) or the game has tipped off."""
+    """Insert ``row`` unless its game has tipped off or an equal-or-better row already exists.
+
+    An existing row of the same ``served_model`` blocks the insert, and so does an existing
+    blend row for an Elo+Platt candidate (the blend supersedes it). A blend row is the only
+    one that can be added beside an existing Elo+Platt row; that returns ``UPGRADED``.
+    The insert has no conflict target so a database still on migration 015, whose key
+    lacks ``served_model``, skips the upgrade row instead of failing.
+    """
     if row.status is not PredictionStatus.SCHEDULED:
         raise ValueError("only scheduled predictions can be inserted")
     if row.tipoff_utc <= now:
         return InsertOutcome.PAST_TIPOFF
+    key = {"game_id": row.game_id, "model_version": row.model_version}
     with engine.begin() as connection:
-        result = connection.execute(_INSERT_SQL, row_to_params(row))
-    return InsertOutcome.INSERTED if result.rowcount == 1 else InsertOutcome.ALREADY_EXISTS
+        stored = set(connection.execute(_SIBLINGS_SQL, key).scalars())
+        if row.served_model.value in stored or ServedModel.BLEND.value in stored:
+            return InsertOutcome.ALREADY_EXISTS
+        if connection.execute(_INSERT_SQL, row_to_params(row)).rowcount != 1:
+            return InsertOutcome.ALREADY_EXISTS
+    return InsertOutcome.UPGRADED if stored else InsertOutcome.INSERTED
 
 
 def _load(engine: Engine, statement: Any, window: DateWindow) -> list[NbaPredictionRow]:
@@ -220,13 +242,22 @@ def load_ungraded(engine: Engine, window: DateWindow) -> list[NbaPredictionRow]:
 
 
 def grade_prediction(
-    engine: Engine, game_id: int, model_version: str, home_score: int, away_score: int, p_home_served: float, *, now: datetime
+    engine: Engine,
+    game_id: int,
+    model_version: str,
+    served_model: ServedModel,
+    home_score: int,
+    away_score: int,
+    p_home_served: float,
+    *,
+    now: datetime,
 ) -> bool:
-    """Fill the result columns of a scheduled prediction. Returns False when it was already graded or absent."""
+    """Fill the result columns of one scheduled row. Returns False when it was already graded or absent."""
     grade = grade_outcome(p_home_served, home_score, away_score)
     params = {
         "game_id": game_id,
         "model_version": model_version,
+        "served_model": served_model.value,
         "home_score": grade.home_score,
         "away_score": grade.away_score,
         "home_win": grade.home_win,
@@ -237,19 +268,53 @@ def grade_prediction(
         return connection.execute(_GRADE_SQL, params).rowcount == 1
 
 
+def _serving_rank(row: NbaPredictionRow) -> tuple[bool, datetime, str]:
+    return row.served_model is ServedModel.BLEND, row.created_at, row.model_version
+
+
+def served_rows(rows: Iterable[NbaPredictionRow]) -> list[NbaPredictionRow]:
+    """One row per game: the one that served it, in tip-off order.
+
+    The blend wins over Elo+Platt. Rows only exist from before tip-off, so a blend row
+    that exists was issued before the game started. Among equal candidates the newest
+    ``created_at`` wins, then the larger ``model_version``, so the choice never depends
+    on the order the database returned the rows.
+    """
+    best: dict[int, NbaPredictionRow] = {}
+    for row in rows:
+        current = best.get(row.game_id)
+        if current is None or _serving_rank(row) > _serving_rank(current):
+            best[row.game_id] = row
+    return sorted(best.values(), key=lambda r: (r.tipoff_utc, r.game_id))
+
+
 @dataclass(frozen=True, slots=True)
 class GradedSummary:
     """Served probabilities against the stored market probability on the games that have both.
 
+    ``rows`` holds one served row per game (:func:`served_rows`) so no game counts twice;
+    ``all_rows`` keeps every graded row, including the Elo+Platt row a blend replaced.
     Losses are per game and aligned, so the caller can bootstrap the paired difference.
     """
 
     rows: tuple[NbaPredictionRow, ...]
     market_rows: tuple[NbaPredictionRow, ...]
+    all_rows: tuple[NbaPredictionRow, ...]
 
     @property
     def n(self) -> int:
         return len(self.rows)
+
+    @property
+    def upgraded_pairs(self) -> tuple[tuple[NbaPredictionRow, NbaPredictionRow], ...]:
+        """(Elo+Platt row, blend row) of games first predicted without a line and graded on both."""
+        elo = {(r.game_id, r.model_version): r for r in self.all_rows if r.served_model is ServedModel.ELO_PLATT}
+        pairs = [
+            (elo[key], r)
+            for r in self.all_rows
+            if r.served_model is ServedModel.BLEND and (key := (r.game_id, r.model_version)) in elo
+        ]
+        return tuple(sorted(pairs, key=lambda pair: (pair[1].tipoff_utc, pair[1].game_id)))
 
     @property
     def n_market(self) -> int:
@@ -286,7 +351,10 @@ class GradedSummary:
 
 def summarise_graded(rows: list[NbaPredictionRow]) -> GradedSummary:
     graded = tuple(r for r in rows if r.status is PredictionStatus.GRADED)
-    return GradedSummary(rows=graded, market_rows=tuple(r for r in graded if r.p_home_market is not None))
+    served = tuple(served_rows(graded))
+    return GradedSummary(
+        rows=served, market_rows=tuple(r for r in served if r.p_home_market is not None), all_rows=graded
+    )
 
 
 def load_graded_summary(engine: Engine, window: DateWindow) -> GradedSummary:
@@ -296,5 +364,6 @@ def load_graded_summary(engine: Engine, window: DateWindow) -> GradedSummary:
 __all__ = [
     "COLUMNS", "DateWindow", "Grade", "GradedSummary", "InsertOutcome", "NbaPredictionRow",
     "PredictionStatus", "ServedModel", "grade_outcome", "grade_prediction", "insert_prediction_if_absent",
-    "load_graded_summary", "load_ungraded", "row_from_mapping", "row_to_params", "summarise_graded",
+    "load_graded_summary", "load_ungraded", "row_from_mapping", "row_to_params", "served_rows",
+    "summarise_graded",
 ]

@@ -133,11 +133,37 @@ class RunTests(unittest.TestCase):
         engine = make_engine(self)
         code, output = self.run_script(self.args(dry_run=False), engine=engine)
         self.assertEqual(code, 0)
-        self.assertIn("stored 2 new, 0 already present, 0 past tipoff", output)
+        self.assertIn("stored 2 new, 0 upgraded to the blend after a line appeared, 0 already present, 0 past tipoff", output)
         _, again = self.run_script(self.args(dry_run=False), engine=engine)
-        self.assertIn("stored 0 new, 2 already present, 0 past tipoff", again)
+        self.assertIn("stored 0 new, 0 upgraded to the blend after a line appeared, 2 already present, 0 past tipoff", again)
         with engine.connect() as connection:
             self.assertEqual(connection.execute(text("select count(*) from public.nba_predictions")).scalar(), 2)
+
+    def test_a_line_that_appears_on_a_later_run_upgrades_the_stored_game(self):
+        engine = make_engine(self)
+        tip = self.tip
+
+        def unlined(day):
+            return [scheduled(1, 1, 2, tip)] if day == self.today else []
+
+        def lined(day):
+            return [scheduled(1, 1, 2, tip, line=3.5)] if day == self.today else []
+
+        args = self.args(dry_run=False)
+        with mock.patch.object(nba_daily, "refresh_inputs", return_value=self.inputs()), mock.patch.object(
+            nba_daily, "resolve_engine", return_value=engine
+        ):
+            _, first = nba_daily.run(args, fetch=unlined, now=self.now)
+            _, second = nba_daily.run(args, fetch=lined, now=self.now + timedelta(hours=2))
+            _, third = nba_daily.run(args, fetch=lined, now=self.now + timedelta(hours=3))
+            _, late = nba_daily.run(args, fetch=lined, now=tip - timedelta(minutes=1))
+        self.assertIn("stored 1 new, 0 upgraded", first)
+        self.assertIn("stored 0 new, 1 upgraded", second)
+        self.assertIn("stored 0 new, 0 upgraded to the blend after a line appeared, 1 already present", third)
+        self.assertIn("1 already present", late)
+        with engine.connect() as connection:
+            rows = connection.execute(text("select served_model from public.nba_predictions order by served_model")).scalars().all()
+        self.assertEqual(rows, ["blend", "elo_platt"])
 
     def test_stale_data_exits_with_its_own_code_and_writes_nothing(self):
         engine = make_engine(self)

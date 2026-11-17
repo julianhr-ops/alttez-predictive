@@ -58,14 +58,17 @@ def refresh_inputs(cache_dir: Path, notes: list[str]) -> predict.NbaInputs:
 def grade_finished(
     engine: Engine, today: date, *, now: datetime, fetch: ScoreboardFetch, write: bool
 ) -> GradeReport:
-    """Grade scheduled predictions whose game finished on the ESPN scoreboard in the last days.
+    """Grade scheduled rows whose game finished on the ESPN scoreboard in the last days.
 
-    Idempotent: only rows still ``scheduled`` are loaded, and the update itself is
-    conditioned on that status.
+    A game with two rows (Elo+Platt and its later blend) gets both graded, each from its
+    own probability. Idempotent: only rows still ``scheduled`` are loaded, and the update
+    itself is conditioned on that status.
     """
     window = store.DateWindow(today - timedelta(days=GRADING_LOOKBACK_DAYS + 1), today + timedelta(days=1))
     pending = store.load_ungraded(engine, window)
-    unresolved_old = len(store.load_ungraded(engine, store.DateWindow(EARLIEST_GAME_DATE, window.start - timedelta(days=1))))
+    unresolved_old = len(
+        {r.game_id for r in store.load_ungraded(engine, store.DateWindow(EARLIEST_GAME_DATE, window.start - timedelta(days=1)))}
+    )
     finished: dict[int, data.NbaScheduledGame] = {}
     if pending:
         for offset in range(GRADING_LOOKBACK_DAYS + 1):
@@ -80,10 +83,11 @@ def grade_finished(
         if not write:
             graded += 1
         elif store.grade_prediction(
-            engine, row.game_id, row.model_version, game.home_score, game.away_score, row.p_home_served, now=now
+            engine, row.game_id, row.model_version, row.served_model, game.home_score, game.away_score,
+            row.p_home_served, now=now,
         ):
             graded += 1
-    still_open = sum(1 for r in pending if r.game_id not in finished and r.game_date < today)
+    still_open = len({r.game_id for r in pending if r.game_id not in finished and r.game_date < today})
     return GradeReport(graded=graded, unresolved=unresolved_old + still_open)
 
 
@@ -128,6 +132,7 @@ def run(
             counts = store_predictions(engine, prediction_run, now=now)
             notes.append(
                 f"stored {counts[store.InsertOutcome.INSERTED]} new, "
+                f"{counts[store.InsertOutcome.UPGRADED]} upgraded to the blend after a line appeared, "
                 f"{counts[store.InsertOutcome.ALREADY_EXISTS]} already present, "
                 f"{counts[store.InsertOutcome.PAST_TIPOFF]} past tipoff"
             )
