@@ -17,8 +17,56 @@ from alttez.inference.calibration import (
     fit_temperature,
     load_active_calibration,
     log_loss,
+    matrix_1x2,
+    rescale_matrix_to_triplet,
     temperature_scale,
 )
+
+
+def _score_matrix(max_goals: int = 7, lambda_h: float = 1.7, lambda_a: float = 0.9) -> np.ndarray:
+    from scipy.stats import poisson
+
+    goals = np.arange(max_goals + 1)
+    matrix = np.outer(poisson.pmf(goals, lambda_h), poisson.pmf(goals, lambda_a))
+    return matrix / matrix.sum()
+
+
+class TestMatrixCalibration(unittest.TestCase):
+    def test_marginals_equal_calibrated_triplet_when_temperature_not_one(self) -> None:
+        matrix = _score_matrix()
+        for temperature in (0.6, 1.5, 3.0):
+            cal = ProbabilityCalibration(temperature=temperature)
+            calibrated = cal.calibrate_matrix(matrix)
+            expected = cal.calibrate_triplet(*matrix_1x2(matrix))
+            np.testing.assert_allclose(matrix_1x2(calibrated), expected, atol=1e-9)
+            self.assertAlmostEqual(float(calibrated.sum()), 1.0, places=9)
+            self.assertGreaterEqual(float(calibrated.min()), 0.0)
+
+    def test_temperature_one_is_identity(self) -> None:
+        matrix = _score_matrix()
+        np.testing.assert_allclose(ProbabilityCalibration(temperature=1.0).calibrate_matrix(matrix), matrix, atol=1e-12)
+
+    def test_class_floor_is_respected_by_the_matrix(self) -> None:
+        matrix = _score_matrix(lambda_h=4.0, lambda_a=0.3)
+        cal = ProbabilityCalibration(temperature=1.0, class_floor=0.05)
+        self.assertGreaterEqual(min(matrix_1x2(cal.calibrate_matrix(matrix))), 0.05 - 1e-9)
+
+    def test_within_class_shape_is_preserved(self) -> None:
+        matrix = _score_matrix()
+        calibrated = ProbabilityCalibration(temperature=2.0).calibrate_matrix(matrix)
+        ratio = calibrated / matrix
+        home_cells = np.indices(matrix.shape)[0] > np.indices(matrix.shape)[1]
+        np.testing.assert_allclose(ratio[home_cells], ratio[home_cells][0], rtol=1e-9)
+
+    def test_softening_lowers_the_top_class_of_the_matrix(self) -> None:
+        matrix = _score_matrix(lambda_h=3.0, lambda_a=0.5)
+        raw = matrix_1x2(matrix)
+        calibrated = matrix_1x2(ProbabilityCalibration(temperature=3.0).calibrate_matrix(matrix))
+        self.assertLess(max(calibrated), max(raw))
+
+    def test_class_without_mass_does_not_break_rescale(self) -> None:
+        out = rescale_matrix_to_triplet(np.array([[1.0]]), (0.5, 0.3, 0.2))
+        np.testing.assert_allclose(out, [[1.0]])
 
 
 class TestTemperatureScale(unittest.TestCase):
@@ -131,10 +179,18 @@ class TestIsotonicCalibration(unittest.TestCase):
         self.assertAlmostEqual(h + d + a, 1.0, places=9)
         self.assertAlmostEqual(h, 0.7, places=9)
 
-    def test_calibrate_matrix_is_identity(self) -> None:
+    def test_calibrate_matrix_marginals_match_calibrated_triplet(self) -> None:
         cal = fit_isotonic(*_miscalibrated_dataset())
         matrix = np.array([[0.1, 0.2], [0.3, 0.4]])
-        np.testing.assert_allclose(cal.calibrate_matrix(matrix), matrix, atol=1e-12)
+        calibrated = cal.calibrate_matrix(matrix)
+        self.assertAlmostEqual(float(calibrated.sum()), 1.0, places=9)
+        np.testing.assert_allclose(
+            matrix_1x2(calibrated), cal.calibrate_triplet(*matrix_1x2(matrix)), atol=1e-9
+        )
+
+    def test_neutral_calibrate_matrix_is_identity(self) -> None:
+        matrix = np.array([[0.1, 0.2], [0.3, 0.4]])
+        np.testing.assert_allclose(IsotonicCalibration().calibrate_matrix(matrix), matrix, atol=1e-12)
 
     def test_fit_reduces_log_loss_vs_raw(self) -> None:
         triplets, outcomes = _miscalibrated_dataset()
