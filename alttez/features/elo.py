@@ -12,6 +12,23 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def tournament_k_factor(tournament: str | None, base_k: float) -> float:
+    """K del ELO segun la importancia del torneo.
+
+    Las eliminatorias se evaluan antes que el nombre del torneo final: "FIFA World
+    Cup qualification" contiene "FIFA World Cup" pero es un clasificatorio.
+    """
+
+    value = tournament or ""
+    if "qualification" in value.lower():
+        return 40
+    if "FIFA World Cup" in value:
+        return 60
+    if "Copa America" in value or "UEFA Euro" in value:
+        return 50
+    return base_k
+
+
 class EloEngine:
     """Calcula el ELO historico de las selecciones nacionales."""
 
@@ -67,18 +84,6 @@ class EloEngine:
         elo_away = []
         df = df.copy()
 
-        def get_k(tournament: str) -> float:
-            """Pondera la importancia del torneo."""
-
-            tournament = tournament or ""
-            if "FIFA World Cup" in tournament:
-                return 60
-            if "Copa America" in tournament or "UEFA Euro" in tournament:
-                return 50
-            if "qualification" in tournament.lower():
-                return 40
-            return self.k_factor
-
         for _, row in tqdm(df.iterrows(), total=len(df), desc="Calculando ELO historico"):
             home = row["home_team"]
             away = row["away_team"]
@@ -98,7 +103,7 @@ class EloEngine:
             expected_home = self.get_expected_score(home_eff, current_away_elo)
             expected_away = 1 - expected_home
 
-            k = get_k(row["tournament"])
+            k = tournament_k_factor(row["tournament"], self.k_factor)
             if self.mov_enabled and "home_score" in row and "away_score" in row:
                 k *= self.margin_of_victory_multiplier(
                     row["home_score"], row["away_score"], home_eff, current_away_elo

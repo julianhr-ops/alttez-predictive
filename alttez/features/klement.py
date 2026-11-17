@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 
 from alttez.api.db import read_dataframe
-from alttez.features.elo import EloEngine
+from alttez.features.elo import EloEngine, tournament_k_factor
 from alttez.ingestion.international import InternationalLoader
 from alttez.ingestion.seed_historical import normalize_name
 
@@ -156,17 +156,6 @@ def _is_knockout_stage(stage: str | None) -> bool:
         "knockout",
     )
     return any(keyword in lowered for keyword in keywords)
-
-
-def _elo_k_for_tournament(tournament: str | None, base_k: float) -> float:
-    value = tournament or ""
-    if "FIFA World Cup" in value:
-        return 60
-    if "Copa America" in value or "UEFA Euro" in value:
-        return 50
-    if "qualification" in value.lower():
-        return 40
-    return base_k
 
 
 def _latest_rating_at_or_before(history: list[tuple[pd.Timestamp, float]], anchor: pd.Timestamp) -> float | None:
@@ -557,7 +546,7 @@ def build_klement_feature_state(
         home_eff = current_home_elo + home_advantage
         expected_home = elo_engine.get_expected_score(home_eff, current_away_elo)
         expected_away = 1 - expected_home
-        k = _elo_k_for_tournament(getattr(row, "tournament", None), elo_engine.k_factor)
+        k = tournament_k_factor(getattr(row, "tournament", None), elo_engine.k_factor)
         if elo_engine.mov_enabled:
             k *= elo_engine.margin_of_victory_multiplier(
                 int(row.home_score), int(row.away_score), home_eff, current_away_elo
