@@ -19,7 +19,7 @@ The `desarrollo` branch already includes:
 - a Supabase schema and compatibility view for historical international results
 - a historical seed pipeline from `international_results.csv`
 - a Streamlit dashboard powered by the new ingestion layer
-- a provider stack with `API-Football`, `football-data.org`, `StatsBomb Open Data`, and local JSON fallback support
+- separate historical and live provider stacks with ESPN, API-Football, football-data.org, StatsBomb Open Data, and local JSON support
 
 What is still in progress:
 
@@ -362,14 +362,14 @@ The current tournament oracle:
 
 ALTTEZ does not rely on a single API anymore.
 
-Default stack:
+The general ingestion stack defaults to:
 
 1. `api_football`
 2. `football_data_org`
 3. `statsbomb_open`
 4. `local_json`
 
-This lets us combine operational coverage, structured fallback, analytical richness, and manual recovery paths.
+The live stack defaults to `espn`, `football_data_org`, and `local_json`. The scheduled workflow sets its own provider order. API-Football and football-data.org require keys; ESPN is keyless.
 
 More details:
 
