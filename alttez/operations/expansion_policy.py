@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from alttez.api.db import read_dataframe
+from alttez.operations.prediction_memory import select_latest_pre_kickoff
 
 
 DEFAULT_EXPANSION_LOOKBACK_YEARS = 4
@@ -61,6 +62,36 @@ def classify_competition_readiness(row: dict[str, Any], thresholds: ExpansionThr
     return "approved", "Competencia apta para ampliar cobertura diaria."
 
 
+def aggregate_prediction_memory(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Conteos y metricas por competencia con UNA prediccion por (partido, model_version).
+
+    Cada ejecucion diaria inserta una fila nueva por partido; contarlas todas infla
+    ``predicted_matches`` y ``evaluated_predictions`` y adelanta el umbral de expansion.
+    """
+    keys = ["tournament_name", "competition_class"]
+    frame = predictions.assign(competition_class=predictions["competition_class"].fillna("other_international"))
+    predicted = select_latest_pre_kickoff(frame)
+    analyzable = (
+        predicted.assign(analyzable=(predicted["support_label"] == "Analizable").astype(float))
+        .groupby(keys)
+        .agg(analyzable_rate=("analyzable", "mean"), predicted_matches=("analyzable", "size"))
+        .reset_index()
+    )
+    evaluated_rows = select_latest_pre_kickoff(frame[frame["brier_1x2"].notna()])
+    evaluated = (
+        evaluated_rows.assign(accuracy=evaluated_rows["hit_1x2"].astype(float))
+        .groupby(keys)
+        .agg(
+            evaluated_predictions=("brier_1x2", "size"),
+            brier_score=("brier_1x2", "mean"),
+            log_loss=("log_loss_1x2", "mean"),
+            accuracy_1x2=("accuracy", "mean"),
+        )
+        .reset_index()
+    )
+    return analyzable.merge(evaluated, on=keys, how="outer")
+
+
 def load_expansion_candidates(
     *,
     database_url: str | None = None,
@@ -87,66 +118,50 @@ def load_expansion_candidates(
                 select tournament_name, competition_class, home_team_id as team_id from base_matches
                 union
                 select tournament_name, competition_class, away_team_id as team_id from base_matches
-            ),
-            analyzable as (
-                select
-                    mp.tournament_name,
-                    coalesce(mp.competition_class, 'other_international') as competition_class,
-                    avg(case when mp.support_label = 'Analizable' then 1.0 else 0.0 end) as analyzable_rate,
-                    count(*) as predicted_matches
-                from public.match_predictions as mp
-                group by mp.tournament_name, coalesce(mp.competition_class, 'other_international')
-            ),
-            evaluated as (
-                select
-                    mp.tournament_name,
-                    coalesce(mp.competition_class, 'other_international') as competition_class,
-                    count(*) as evaluated_predictions,
-                    avg(pe.brier_1x2) as brier_score,
-                    avg(pe.log_loss_1x2) as log_loss,
-                    avg(case when pe.hit_1x2 then 1.0 else 0.0 end) as accuracy_1x2
-                from public.prediction_evaluations as pe
-                join public.match_predictions as mp
-                    on mp.id = pe.prediction_id
-                group by mp.tournament_name, coalesce(mp.competition_class, 'other_international')
             )
             select
                 bm.tournament_name,
                 bm.competition_class,
                 count(*) as matches_total,
-                count(distinct tu.team_id) as teams_total,
-                coalesce(a.predicted_matches, 0) as predicted_matches,
-                coalesce(a.analyzable_rate, 0.0) as analyzable_rate,
-                coalesce(e.evaluated_predictions, 0) as evaluated_predictions,
-                e.brier_score,
-                e.log_loss,
-                e.accuracy_1x2
+                count(distinct tu.team_id) as teams_total
             from base_matches as bm
             left join team_universe as tu
                 on tu.tournament_name = bm.tournament_name
                and tu.competition_class = bm.competition_class
-            left join analyzable as a
-                on a.tournament_name = bm.tournament_name
-               and a.competition_class = bm.competition_class
-            left join evaluated as e
-                on e.tournament_name = bm.tournament_name
-               and e.competition_class = bm.competition_class
             group by
                 bm.tournament_name,
-                bm.competition_class,
-                a.predicted_matches,
-                a.analyzable_rate,
-                e.evaluated_predictions,
-                e.brier_score,
-                e.log_loss,
-                e.accuracy_1x2
+                bm.competition_class
             order by matches_total desc, tournament_name
             """,
             params={"lookback_years": effective_thresholds.lookback_years},
             database_url=database_url,
         )
+        predictions = read_dataframe(
+            """
+            select
+                mp.match_id,
+                mp.model_version,
+                mp.prediction_created_at,
+                mp.kickoff_at,
+                mp.tournament_name,
+                mp.competition_class,
+                mp.support_label,
+                pe.brier_1x2,
+                pe.log_loss_1x2,
+                pe.hit_1x2
+            from public.match_predictions as mp
+            left join public.prediction_evaluations as pe
+                on pe.prediction_id = mp.id
+            """,
+            database_url=database_url,
+        )
     except Exception:
         return pd.DataFrame()
+
+    df = df.merge(aggregate_prediction_memory(predictions), on=["tournament_name", "competition_class"], how="left")
+    df["predicted_matches"] = df["predicted_matches"].fillna(0).astype(int)
+    df["analyzable_rate"] = df["analyzable_rate"].fillna(0.0)
+    df["evaluated_predictions"] = df["evaluated_predictions"].fillna(0).astype(int)
 
     if df.empty:
         return df

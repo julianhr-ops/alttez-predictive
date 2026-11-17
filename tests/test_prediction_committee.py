@@ -8,8 +8,14 @@ import numpy as np
 import pandas as pd
 
 from alttez.inference.calibration import matrix_1x2, temperature_scale
-from alttez.inference.prediction_committee import CommitteeMember, PredictionCommittee, load_latest_challenger_record
+from alttez.inference.prediction_committee import (
+    CommitteeMember,
+    PredictionCommittee,
+    _resolve_member_weights,
+    load_latest_challenger_record,
+)
 from alttez.inference.router import ActiveModelSelection, BaseMatchPredictor, most_likely_score_from_matrix
+from alttez.operations.prediction_memory import _filter_match_prediction_row, paired_member_losses
 
 
 class DummyPredictor(BaseMatchPredictor):
@@ -213,6 +219,112 @@ class TestPredictionCommittee(unittest.TestCase):
 
         self.assertFalse(prediction["used_fallback"])
         self.assertIsNone(prediction["fallback_reason"])
+
+    def test_member_probabilities_survive_persistence_and_pair_with_consensus(self) -> None:
+        committee = PredictionCommittee(
+            [
+                CommitteeMember("champion", DummyPredictor(score=(1, 0), model_version="champion-v1"), 0.7),
+                CommitteeMember("poisson_baseline", DummyPredictor(score=(0, 1), model_version="poisson"), 0.3),
+            ]
+        )
+        prediction = committee.predict_match("United States", "Mexico")
+        champion_entry = next(item for item in prediction["committee_members"] if item["role"] == "champion")
+        np.testing.assert_allclose(
+            [champion_entry["prob_home"], champion_entry["prob_draw"], champion_entry["prob_away"]],
+            matrix_1x2(DummyPredictor(score=(1, 0), model_version="x").predict_match("a", "b")["prob_matrix"]),
+            atol=1e-9,
+        )
+
+        row = _filter_match_prediction_row(
+            {
+                **prediction,
+                "match_id": "m1",
+                "home_team": "United States",
+                "away_team": "Mexico",
+                "kickoff_at": "2026-06-01T18:00:00+00:00",
+                "target_date": "2026-06-01",
+                "generated_at": "2026-06-01T08:00:00+00:00",
+            },
+            "run-row",
+            "run-1",
+            "committee-consensus-v1",
+            "committee",
+        )
+        frame = pd.DataFrame([{**row, "prob_home": row["predicted_home_win_prob"], "prob_draw": row["predicted_draw_prob"], "prob_away": row["predicted_away_win_prob"], "actual_outcome": "H"}])
+
+        consensus_losses, champion_losses = paired_member_losses(
+            frame, member_role="champion", member_version="champion-v1"
+        )
+
+        self.assertEqual(len(consensus_losses), 1)
+        self.assertEqual(len(champion_losses), 1)
+        self.assertGreater(consensus_losses[0], champion_losses[0])
+
+    def _members_with_versions(self) -> list[CommitteeMember]:
+        return [
+            CommitteeMember("champion", DummyPredictor(score=(1, 0), model_version="champion-v1"), 0.5),
+            CommitteeMember("poisson_baseline", DummyPredictor(score=(1, 0), model_version="poisson"), 0.5),
+        ]
+
+    def _audit(self) -> dict:
+        return {
+            "models": [
+                {"model_version": "champion-v1", "evaluated_predictions": 40, "brier_score": 0.55},
+                {"model_version": "poisson", "evaluated_predictions": 40, "brier_score": 0.60},
+            ]
+        }
+
+    def test_resolve_member_weights_defers_to_champion_when_paired_losses_show_consensus_worse(self) -> None:
+        rng = np.random.default_rng(0)
+        champion_losses = 0.4 + rng.uniform(-0.02, 0.02, 40)
+        consensus_losses = champion_losses + 0.2 + rng.uniform(-0.02, 0.02, 40)
+        with (
+            patch("alttez.operations.prediction_memory.load_prediction_learning_audit", return_value=self._audit()),
+            patch(
+                "alttez.operations.prediction_memory.load_committee_paired_losses",
+                return_value=(consensus_losses, champion_losses),
+            ) as loader,
+        ):
+            decision = _resolve_member_weights(self._members_with_versions(), database_url=None)
+
+        self.assertEqual(loader.call_args.kwargs["member_version"], "champion-v1")
+        self.assertEqual(loader.call_args.kwargs["consensus_version"], "committee-consensus-v1")
+        self.assertTrue(decision.deferred_to_champion)
+        self.assertEqual(decision.strategy, "champion_guard")
+        self.assertEqual(decision.weights, {"champion": 1.0, "poisson_baseline": 0.0})
+
+    def test_resolve_member_weights_keeps_blend_when_consensus_is_not_worse(self) -> None:
+        rng = np.random.default_rng(1)
+        champion_losses = 0.4 + rng.uniform(-0.05, 0.05, 40)
+        consensus_losses = champion_losses - 0.01 + rng.uniform(-0.05, 0.05, 40)
+        with (
+            patch("alttez.operations.prediction_memory.load_prediction_learning_audit", return_value=self._audit()),
+            patch(
+                "alttez.operations.prediction_memory.load_committee_paired_losses",
+                return_value=(consensus_losses, champion_losses),
+            ),
+        ):
+            decision = _resolve_member_weights(self._members_with_versions(), database_url=None)
+
+        self.assertFalse(decision.deferred_to_champion)
+        self.assertEqual(decision.strategy, "inverse_brier")
+        self.assertNotIn("no evaluada", decision.reason)
+
+    def test_unreadable_paired_losses_leave_guard_unevaluated_and_warn(self) -> None:
+        with (
+            patch("alttez.operations.prediction_memory.load_prediction_learning_audit", return_value=self._audit()),
+            patch(
+                "alttez.operations.prediction_memory.load_committee_paired_losses",
+                side_effect=RuntimeError("db down"),
+            ),
+            self.assertLogs("alttez.inference.prediction_committee", level="WARNING") as logs,
+        ):
+            decision = _resolve_member_weights(self._members_with_versions(), database_url=None)
+
+        self.assertIn("db down", logs.output[0])
+        self.assertFalse(decision.deferred_to_champion)
+        self.assertIn("no evaluada", decision.reason)
+
 
 
 

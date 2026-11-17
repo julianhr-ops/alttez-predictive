@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -13,7 +14,7 @@ import pandas as pd
 from alttez.api.db import read_dataframe
 from alttez.experiments.tournament_oracle import optimize_prediction
 from alttez.inference.calibration import load_active_calibration, matrix_1x2
-from alttez.inference.committee_weighting import WeightingDecision, resolve_committee_weights
+from alttez.inference.committee_weighting import CHAMPION_ROLE, WeightingDecision, resolve_committee_weights
 from alttez.features.hierarchical import load_active_hierarchical_strengths
 from alttez.inference.router import (
     _raw_probability_fields,
@@ -243,6 +244,7 @@ class PredictionCommittee(BaseMatchPredictor):
                 continue
 
             primary_score = prediction.get("primary_score")
+            member_home, member_draw, member_away = (float(value) for value in matrix_1x2(prob_matrix))
             member_predictions.append(
                 {
                     "role": member.role,
@@ -257,6 +259,9 @@ class PredictionCommittee(BaseMatchPredictor):
                     "ev_optimal_value": prediction.get("ev_optimal_value"),
                     "lambda_h": prediction.get("lambda_h"),
                     "lambda_a": prediction.get("lambda_a"),
+                    "prob_home": member_home,
+                    "prob_draw": member_draw,
+                    "prob_away": member_away,
                 }
             )
             matrices.append((member.weight, np.asarray(prob_matrix, dtype=float)))
@@ -452,6 +457,33 @@ def build_prediction_committee(
     return PredictionCommittee(members, weighting=weighting)
 
 
+def _load_champion_paired_losses(
+    member_versions: dict[str, str],
+    committee_version: str,
+    database_url: str | None,
+) -> tuple[Sequence[float], Sequence[float]] | None:
+    """Perdidas Brier por partido (consenso, campeon) sobre partidos comunes, o None sin muestra.
+
+    Sin ellas la guardia de consenso no se evalua; un fallo de lectura se avisa en
+    WARNING en vez de silenciar la guardia.
+    """
+    champion_version = member_versions.get(CHAMPION_ROLE)
+    if champion_version is None:
+        return None
+    try:
+        from alttez.operations.prediction_memory import load_committee_paired_losses
+
+        return load_committee_paired_losses(
+            consensus_version=committee_version,
+            member_role=CHAMPION_ROLE,
+            member_version=champion_version,
+            database_url=database_url,
+        )
+    except Exception as exc:  # noqa: BLE001 - the guard degrades to "not evaluated", never blocks the committee.
+        LOGGER.warning("committee_guard_losses_unavailable detail=%s", exc)
+        return None
+
+
 def _resolve_member_weights(
     members: list[CommitteeMember],
     *,
@@ -475,6 +507,7 @@ def _resolve_member_weights(
             audit.get("models", []),
             DEFAULT_COMMITTEE_WEIGHTS,
             committee_version=committee_version,
+            paired_losses=_load_champion_paired_losses(member_versions, committee_version, database_url),
         )
     except Exception as exc:  # noqa: BLE001 - weighting is an optimization, never a hard dependency.
         LOGGER.warning("committee_weighting_failed detail=%s", exc)

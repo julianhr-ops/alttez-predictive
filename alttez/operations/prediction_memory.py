@@ -4,7 +4,7 @@ import json
 import logging
 import math
 import os
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -18,6 +18,7 @@ from sqlalchemy.engine import Engine
 from alttez.api.db import get_engine, read_dataframe
 from alttez.api.settings import load_local_env
 from alttez.evaluation.metrics import ranked_probability_score
+from alttez.evaluation.paired import brier_1x2_per_game
 
 
 LOGGER = logging.getLogger(__name__)
@@ -316,27 +317,22 @@ def log_loss_1x2(home_prob: float, draw_prob: float, away_prob: float, actual_ou
     return -math.log(actual_probability)
 
 
-def close_finished_prediction_evaluations(
-    *,
-    engine: Engine,
-    tables: dict[str, Table],
-    target_date: date | None = None,
-) -> dict[str, Any]:
-    predictions_table = tables.get("match_predictions")
-    evaluations_table = tables.get("prediction_evaluations")
-    matches_table = tables.get("matches")
-    if predictions_table is None or evaluations_table is None or matches_table is None:
-        return {
-            "prediction_evaluations_closed": 0,
-            "prediction_evaluation_error": "Prediction memory tables are not available.",
-        }
+def _pending_prediction_rows(connection: Any, target_date: date | None) -> list[Any]:
+    """Predicciones de partidos terminados aun sin evaluar y creadas ANTES del saque inicial.
 
-    filters = ["m.status = 'finished'"]
+    Una fila creada en o despues del inicio ya conoce el resultado parcial: evaluarla
+    contaminaria las metricas. Con marca de tiempo desconocida se evalua, igual que en
+    ``select_latest_pre_kickoff``.
+    """
+    filters = [
+        "m.status = 'finished'",
+        "pe.id is null",
+        "(mp.kickoff_at is null or mp.prediction_created_at is null or mp.prediction_created_at < mp.kickoff_at)",
+    ]
     params: dict[str, Any] = {}
     if target_date is not None:
         filters.append("m.match_date = :target_date")
         params["target_date"] = target_date.isoformat()
-
     sql = text(
         f"""
         select
@@ -354,13 +350,29 @@ def close_finished_prediction_evaluations(
             on m.id = mp.match_id
         left join public.prediction_evaluations as pe
             on pe.prediction_id = mp.id
-        where pe.id is null
-          and {' and '.join(filters)}
+        where {' and '.join(filters)}
         """
     )
+    return list(connection.execute(sql, params).mappings().all())
+
+
+def close_finished_prediction_evaluations(
+    *,
+    engine: Engine,
+    tables: dict[str, Table],
+    target_date: date | None = None,
+) -> dict[str, Any]:
+    predictions_table = tables.get("match_predictions")
+    evaluations_table = tables.get("prediction_evaluations")
+    matches_table = tables.get("matches")
+    if predictions_table is None or evaluations_table is None or matches_table is None:
+        return {
+            "prediction_evaluations_closed": 0,
+            "prediction_evaluation_error": "Prediction memory tables are not available.",
+        }
 
     with engine.begin() as connection:
-        rows = connection.execute(sql, params).mappings().all()
+        rows = _pending_prediction_rows(connection, target_date)
         evaluation_rows = []
         for row in rows:
             actual_home_score = int(row["home_score"])
@@ -764,11 +776,113 @@ def load_prediction_metrics_by_confidence(*, database_url: str | None = None) ->
     return metrics.sort_values("confidence_band").reset_index(drop=True)
 
 
-def load_recent_prediction_evaluations(*, database_url: str | None = None, limit: int = 50) -> pd.DataFrame:
+def _committee_member_entry(payload: Any, *, role: str, model_version: str) -> dict[str, Any] | None:
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            return None
+    members = payload.get("committee_members") if isinstance(payload, dict) else None
+    for member in members or []:
+        if (
+            isinstance(member, dict)
+            and member.get("role") == role
+            and str(member.get("model_version")) == model_version
+            and member.get("prediction_supported")
+        ):
+            return member
+    return None
+
+
+def paired_member_losses(
+    frame: pd.DataFrame, *, member_role: str, member_version: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Perdidas Brier 1X2 por partido ``(consenso, miembro)`` sobre LOS MISMOS partidos.
+
+    ``frame`` son filas del consenso ya deduplicadas (una por partido) con sus
+    probabilidades servidas, el resultado real y el ``payload`` que guarda las
+    probabilidades de cada miembro. Se omiten las filas donde el miembro no aparece
+    (otro model_version, no soportado o filas anteriores a que se guardaran sus
+    probabilidades), para que ambas series cubran exactamente los mismos partidos.
+    """
+    consensus_rows: list[list[float]] = []
+    member_rows: list[list[float]] = []
+    outcomes: list[str] = []
+    for row in frame.to_dict("records"):
+        entry = _committee_member_entry(row.get("payload"), role=member_role, model_version=member_version)
+        if entry is None:
+            continue
+        try:
+            member = [float(entry[key]) for key in ("prob_home", "prob_draw", "prob_away")]
+            consensus = [float(row[key]) for key in ("prob_home", "prob_draw", "prob_away")]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not np.isfinite(member + consensus).all() or row.get("actual_outcome") not in {"H", "D", "A"}:
+            continue
+        consensus_rows.append(consensus)
+        member_rows.append(member)
+        outcomes.append(row["actual_outcome"])
+    if not outcomes:
+        return np.empty(0), np.empty(0)
+    return brier_1x2_per_game(np.array(consensus_rows), outcomes), brier_1x2_per_game(np.array(member_rows), outcomes)
+
+
+def load_committee_paired_losses(
+    *,
+    consensus_version: str,
+    member_role: str,
+    member_version: str,
+    database_url: str | None = None,
+    lookback_days: int = 365,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Perdidas pareadas consenso vs miembro desde memoria de predicciones; None si no hay partidos comunes.
+
+    Propaga los errores de base de datos: el llamador decide si la guardia queda sin evaluar.
+    """
+    params = {
+        "consensus_version": consensus_version,
+        "lookback_start": (datetime.now(UTC).date() - pd.Timedelta(days=lookback_days)).isoformat(),
+    }
+    df = read_dataframe(
+        """
+        select
+            mp.match_id,
+            mp.model_version,
+            mp.prediction_created_at,
+            mp.kickoff_at,
+            mp.predicted_home_win_prob as prob_home,
+            mp.predicted_draw_prob as prob_draw,
+            mp.predicted_away_win_prob as prob_away,
+            mp.payload,
+            pe.actual_outcome
+        from public.prediction_evaluations as pe
+        join public.match_predictions as mp on mp.id = pe.prediction_id
+        where mp.model_version = :consensus_version
+          and mp.match_date >= :lookback_start
+          and pe.actual_outcome is not null
+        """,
+        params=params,
+        database_url=database_url,
+    )
+    consensus_losses, member_losses = paired_member_losses(
+        select_latest_pre_kickoff(df), member_role=member_role, member_version=member_version
+    )
+    if len(consensus_losses) == 0:
+        return None
+    return consensus_losses, member_losses
+
+
+def load_recent_prediction_evaluations(
+    *, database_url: str | None = None, limit: int = 50, lookback_days: int = 365
+) -> pd.DataFrame:
+    """Ultimas evaluaciones cerradas, una por (partido, model_version)."""
+    params = {"lookback_start": (datetime.now(UTC).date() - pd.Timedelta(days=lookback_days)).isoformat()}
     try:
-        return read_dataframe(
+        df = read_dataframe(
             """
             select
+                mp.match_id,
+                mp.kickoff_at,
                 mp.prediction_created_at,
                 mp.model_version,
                 mp.home_team,
@@ -793,14 +907,15 @@ def load_recent_prediction_evaluations(*, database_url: str | None = None, limit
             from public.prediction_evaluations as pe
             join public.match_predictions as mp
                 on mp.id = pe.prediction_id
-            order by pe.evaluated_at desc
-            limit :limit
+            where mp.match_date >= :lookback_start
             """,
-            params={"limit": limit},
+            params=params,
             database_url=database_url,
         )
     except Exception:
         return pd.DataFrame()
+    latest = select_latest_pre_kickoff(df).drop(columns=["match_id", "kickoff_at"])
+    return latest.sort_values("evaluated_at", ascending=False).head(limit).reset_index(drop=True)
 
 
 def load_closed_evaluation_samples(*, database_url: str | None = None, lookback_days: int = 180) -> pd.DataFrame:
