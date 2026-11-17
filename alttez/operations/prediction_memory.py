@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import math
-import os
 import json
 import logging
+import math
+import os
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import MetaData, Table, inspect, text
 from sqlalchemy.dialects.postgresql import insert
@@ -459,12 +460,49 @@ def close_finished_prediction_evaluations(
     }
 
 
+def select_latest_pre_kickoff(
+    frame: pd.DataFrame,
+    *,
+    match_col: str = "match_id",
+    model_col: str = "model_version",
+    created_col: str = "prediction_created_at",
+    kickoff_col: str = "kickoff_at",
+) -> pd.DataFrame:
+    """Una prediccion por (partido, model_version): la ultima hecha ANTES del saque inicial.
+
+    Cada ejecucion diaria inserta una fila nueva por partido, asi que un partido queda
+    repetido y, ademas, con filas creadas despues del inicio (que ya conocen el
+    resultado parcial). Se descartan las filas con created >= kickoff cuando ambas
+    marcas son conocidas; las filas con marca desconocida se conservan porque no se
+    puede demostrar que sean posteriores. Funcion pura: no toca la base de datos.
+    """
+    required = {match_col, model_col, created_col, kickoff_col}
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(f"select_latest_pre_kickoff necesita las columnas {sorted(missing)}")
+    if frame.empty:
+        return frame
+    ordered = frame.reset_index(drop=True)
+    created = pd.to_datetime(ordered[created_col], utc=True, errors="coerce")
+    kickoff = pd.to_datetime(ordered[kickoff_col], utc=True, errors="coerce")
+    post_kickoff = created.notna() & kickoff.notna() & (created >= kickoff)
+    candidates = ordered.loc[~post_kickoff].assign(_created=created.loc[~post_kickoff])
+    latest = candidates.sort_values("_created", kind="stable", na_position="first").drop_duplicates(
+        subset=[match_col, model_col], keep="last"
+    )
+    return latest.drop(columns="_created").sort_index().reset_index(drop=True)
+
+
 def load_prediction_overview(*, database_url: str | None = None, lookback_days: int = 180) -> dict[str, Any]:
     params = {"lookback_start": (datetime.now(timezone.utc).date() - pd.Timedelta(days=lookback_days)).isoformat()}
     try:
         df = read_dataframe(
             """
             select
+                mp.match_id,
+                mp.model_version,
+                mp.prediction_created_at,
+                mp.kickoff_at,
                 pe.brier_1x2,
                 pe.log_loss_1x2,
                 pe.rps_1x2,
@@ -488,6 +526,7 @@ def load_prediction_overview(*, database_url: str | None = None, lookback_days: 
             "exact_score_hit_rate": 0.0,
         }
 
+    df = select_latest_pre_kickoff(df)
     if df.empty:
         return {
             "evaluated_predictions": 0,
@@ -514,7 +553,10 @@ def load_prediction_learning_audit(*, database_url: str | None = None, lookback_
         df = read_dataframe(
             """
             select
+                mp.match_id,
                 mp.model_version,
+                mp.prediction_created_at,
+                mp.kickoff_at,
                 pe.brier_1x2,
                 pe.log_loss_1x2,
                 pe.hit_1x2,
@@ -538,6 +580,7 @@ def load_prediction_learning_audit(*, database_url: str | None = None, lookback_
             "error": str(exc),
         }
 
+    df = select_latest_pre_kickoff(df)
     if df.empty:
         return {
             "evaluated_predictions": 0,
@@ -583,7 +626,7 @@ def load_calibration_overview(*, database_url: str | None = None, lookback_days:
 
     artifact = load_active_calibration()
     artifact_meta: dict[str, Any] = {
-        "temperature": artifact.temperature,
+        "temperature": getattr(artifact, "temperature", None),
         "class_floor": artifact.class_floor,
         "is_neutral": artifact.is_neutral,
     }
@@ -600,7 +643,10 @@ def load_calibration_overview(*, database_url: str | None = None, lookback_days:
         df = read_dataframe(
             """
             select
+                mp.match_id,
                 mp.model_version,
+                mp.prediction_created_at,
+                mp.kickoff_at,
                 mp.predicted_home_win_prob as prob_home,
                 mp.predicted_draw_prob as prob_draw,
                 mp.predicted_away_win_prob as prob_away,
@@ -614,6 +660,7 @@ def load_calibration_overview(*, database_url: str | None = None, lookback_days:
         )
     except Exception:  # noqa: BLE001
         return empty
+    df = select_latest_pre_kickoff(df)
 
     if df.empty:
         return empty
@@ -634,76 +681,87 @@ def load_calibration_overview(*, database_url: str | None = None, lookback_days:
     }
 
 
+def _load_deduplicated_evaluation_rows(*, database_url: str | None = None) -> pd.DataFrame:
+    """Evaluaciones cerradas, una por (partido, model_version): la ultima hecha antes del saque inicial."""
+    df = read_dataframe(
+        """
+        select
+            mp.match_id,
+            mp.model_version,
+            mp.prediction_created_at,
+            mp.kickoff_at,
+            mp.competition_class,
+            mp.avg_confidence,
+            pe.brier_1x2,
+            pe.log_loss_1x2,
+            pe.hit_1x2,
+            pe.hit_exact_score
+        from public.prediction_evaluations as pe
+        join public.match_predictions as mp
+            on mp.id = pe.prediction_id
+        """,
+        database_url=database_url,
+    )
+    return select_latest_pre_kickoff(df)
+
+
+def _aggregate_evaluation_metrics(frame: pd.DataFrame, group_column: str, *, with_exact_hits: bool) -> pd.DataFrame:
+    work = frame.assign(
+        accuracy_1x2=frame["hit_1x2"].astype(float),
+        exact_score_hit_rate=frame["hit_exact_score"].astype(float),
+    )
+    aggregations = {
+        "evaluated_predictions": ("brier_1x2", "size"),
+        "brier_score": ("brier_1x2", "mean"),
+        "log_loss": ("log_loss_1x2", "mean"),
+        "accuracy_1x2": ("accuracy_1x2", "mean"),
+    }
+    if with_exact_hits:
+        aggregations["exact_score_hit_rate"] = ("exact_score_hit_rate", "mean")
+    return work.groupby(group_column).agg(**aggregations).reset_index()
+
+
+def _confidence_band(confidence: pd.Series) -> pd.Series:
+    values = pd.to_numeric(confidence, errors="coerce")
+    return pd.Series(
+        np.select([values >= 0.80, values >= 0.65, values >= 0.50], ["0.80+", "0.65-0.79", "0.50-0.64"], default="<0.50"),
+        index=confidence.index,
+    )
+
+
 def load_prediction_metrics_by_model(*, database_url: str | None = None) -> pd.DataFrame:
     try:
-        return read_dataframe(
-            """
-            select
-                mp.model_version,
-                count(*) as evaluated_predictions,
-                avg(pe.brier_1x2) as brier_score,
-                avg(pe.log_loss_1x2) as log_loss,
-                avg(case when pe.hit_1x2 then 1.0 else 0.0 end) as accuracy_1x2,
-                avg(case when pe.hit_exact_score then 1.0 else 0.0 end) as exact_score_hit_rate
-            from public.prediction_evaluations as pe
-            join public.match_predictions as mp
-                on mp.id = pe.prediction_id
-            group by mp.model_version
-            order by mp.model_version desc
-            """,
-            database_url=database_url,
-        )
+        df = _load_deduplicated_evaluation_rows(database_url=database_url)
     except Exception:
         return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+    metrics = _aggregate_evaluation_metrics(df, "model_version", with_exact_hits=True)
+    return metrics.sort_values("model_version", ascending=False).reset_index(drop=True)
 
 
 def load_prediction_metrics_by_competition(*, database_url: str | None = None) -> pd.DataFrame:
     try:
-        return read_dataframe(
-            """
-            select
-                coalesce(mp.competition_class, 'other_international') as competition_class,
-                count(*) as evaluated_predictions,
-                avg(pe.brier_1x2) as brier_score,
-                avg(pe.log_loss_1x2) as log_loss,
-                avg(case when pe.hit_1x2 then 1.0 else 0.0 end) as accuracy_1x2
-            from public.prediction_evaluations as pe
-            join public.match_predictions as mp
-                on mp.id = pe.prediction_id
-            group by coalesce(mp.competition_class, 'other_international')
-            order by evaluated_predictions desc, competition_class
-            """,
-            database_url=database_url,
-        )
+        df = _load_deduplicated_evaluation_rows(database_url=database_url)
     except Exception:
         return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+    df = df.assign(competition_class=df["competition_class"].fillna("other_international"))
+    metrics = _aggregate_evaluation_metrics(df, "competition_class", with_exact_hits=False)
+    return metrics.sort_values(["evaluated_predictions", "competition_class"], ascending=[False, True]).reset_index(drop=True)
 
 
 def load_prediction_metrics_by_confidence(*, database_url: str | None = None) -> pd.DataFrame:
     try:
-        return read_dataframe(
-            """
-            select
-                case
-                    when mp.avg_confidence >= 0.80 then '0.80+'
-                    when mp.avg_confidence >= 0.65 then '0.65-0.79'
-                    when mp.avg_confidence >= 0.50 then '0.50-0.64'
-                    else '<0.50'
-                end as confidence_band,
-                count(*) as evaluated_predictions,
-                avg(pe.brier_1x2) as brier_score,
-                avg(pe.log_loss_1x2) as log_loss,
-                avg(case when pe.hit_1x2 then 1.0 else 0.0 end) as accuracy_1x2
-            from public.prediction_evaluations as pe
-            join public.match_predictions as mp
-                on mp.id = pe.prediction_id
-            group by confidence_band
-            order by confidence_band
-            """,
-            database_url=database_url,
-        )
+        df = _load_deduplicated_evaluation_rows(database_url=database_url)
     except Exception:
         return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+    df = df.assign(confidence_band=_confidence_band(df["avg_confidence"]))
+    metrics = _aggregate_evaluation_metrics(df, "confidence_band", with_exact_hits=False)
+    return metrics.sort_values("confidence_band").reset_index(drop=True)
 
 
 def load_recent_prediction_evaluations(*, database_url: str | None = None, limit: int = 50) -> pd.DataFrame:
@@ -757,9 +815,13 @@ def load_closed_evaluation_samples(*, database_url: str | None = None, lookback_
     """
     params = {"lookback_start": (datetime.now(timezone.utc).date() - pd.Timedelta(days=lookback_days)).isoformat()}
     try:
-        return read_dataframe(
+        df = read_dataframe(
             """
             select
+                mp.match_id,
+                mp.model_version,
+                mp.prediction_created_at,
+                mp.kickoff_at,
                 mp.predicted_home_win_prob as prob_home,
                 mp.predicted_draw_prob as prob_draw,
                 mp.predicted_away_win_prob as prob_away,
@@ -777,6 +839,7 @@ def load_closed_evaluation_samples(*, database_url: str | None = None, lookback_
         )
     except Exception:
         return pd.DataFrame()
+    return select_latest_pre_kickoff(df)
 
 
 def upsert_model_version_record(

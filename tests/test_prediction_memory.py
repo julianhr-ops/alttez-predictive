@@ -13,8 +13,14 @@ from alttez.operations.prediction_memory import (
     _restrict_to_table_columns,
     activate_model_version_by_key,
     brier_score_1x2,
+    load_closed_evaluation_samples,
     load_prediction_learning_audit,
+    load_prediction_metrics_by_competition,
+    load_prediction_metrics_by_confidence,
+    load_prediction_metrics_by_model,
+    load_prediction_overview,
     log_loss_1x2,
+    select_latest_pre_kickoff,
 )
 
 
@@ -34,8 +40,8 @@ class TestPredictionMemory(unittest.TestCase):
     def test_learning_audit_summarizes_prediction_evaluations(self) -> None:
         df = pd.DataFrame(
             [
-                {"model_version": "xgb-v1", "brier_1x2": 0.20, "log_loss_1x2": 0.5, "hit_1x2": True, "hit_exact_score": False},
-                {"model_version": "xgb-v1", "brier_1x2": 0.40, "log_loss_1x2": 0.9, "hit_1x2": False, "hit_exact_score": True},
+                _eval_row("m1", "2026-05-30T08:00:00+00:00", model_version="xgb-v1", brier_1x2=0.20, log_loss_1x2=0.5, hit_1x2=True, hit_exact_score=False),
+                _eval_row("m2", "2026-05-30T08:00:00+00:00", model_version="xgb-v1", brier_1x2=0.40, log_loss_1x2=0.9, hit_1x2=False, hit_exact_score=True),
             ]
         )
         with patch("alttez.operations.prediction_memory.read_dataframe", return_value=df):
@@ -61,6 +67,132 @@ class TestPredictionMemory(unittest.TestCase):
 
         self.assertFalse(result["activated"])
         self.assertIn("artifact", result["error"].lower())
+
+
+def _eval_row(match_id, created, kickoff="2026-06-01T18:00:00+00:00", model_version="v1", **metrics) -> dict:
+    row = {
+        "match_id": match_id,
+        "model_version": model_version,
+        "prediction_created_at": created,
+        "kickoff_at": kickoff,
+        "competition_class": "friendly",
+        "avg_confidence": 0.7,
+        "brier_1x2": 0.2,
+        "log_loss_1x2": 0.5,
+        "rps_1x2": 0.1,
+        "hit_1x2": True,
+        "hit_exact_score": False,
+    }
+    row.update(metrics)
+    return row
+
+
+class TestSelectLatestPreKickoff(unittest.TestCase):
+    def test_keeps_one_row_per_match_and_model_version(self) -> None:
+        frame = pd.DataFrame(
+            [
+                _eval_row("m1", "2026-05-30T08:00:00+00:00", brier_1x2=0.9),
+                _eval_row("m1", "2026-05-31T08:00:00+00:00", brier_1x2=0.3),
+                _eval_row("m1", "2026-06-01T08:00:00+00:00", brier_1x2=0.1),
+                _eval_row("m2", "2026-05-31T08:00:00+00:00"),
+                _eval_row("m1", "2026-05-31T08:00:00+00:00", model_version="v2"),
+            ]
+        )
+
+        result = select_latest_pre_kickoff(frame)
+
+        self.assertEqual(len(result), 3)
+        self.assertFalse(result.duplicated(subset=["match_id", "model_version"]).any())
+        kept = result[(result["match_id"] == "m1") & (result["model_version"] == "v1")].iloc[0]
+        self.assertEqual(kept["brier_1x2"], 0.1)
+
+    def test_rows_created_at_or_after_kickoff_are_dropped(self) -> None:
+        frame = pd.DataFrame(
+            [
+                _eval_row("m1", "2026-06-01T08:00:00+00:00", brier_1x2=0.3),
+                _eval_row("m1", "2026-06-01T18:00:00+00:00", brier_1x2=0.0),
+                _eval_row("m1", "2026-06-01T20:00:00+00:00", brier_1x2=0.0),
+                _eval_row("m2", "2026-06-01T19:00:00+00:00"),
+            ]
+        )
+
+        result = select_latest_pre_kickoff(frame)
+
+        self.assertEqual(result["match_id"].tolist(), ["m1"])
+        self.assertEqual(result.iloc[0]["brier_1x2"], 0.3)
+
+    def test_unknown_kickoff_or_creation_time_is_kept(self) -> None:
+        frame = pd.DataFrame(
+            [
+                _eval_row("m1", "2026-06-02T08:00:00+00:00", kickoff=None),
+                _eval_row("m2", None),
+            ]
+        )
+
+        self.assertEqual(sorted(select_latest_pre_kickoff(frame)["match_id"]), ["m1", "m2"])
+
+    def test_mixed_timezone_representations_compare_in_utc(self) -> None:
+        frame = pd.DataFrame(
+            [
+                _eval_row("m1", "2026-06-01T10:00:00-05:00", kickoff="2026-06-01T18:00:00+00:00", brier_1x2=0.0),
+                _eval_row("m1", "2026-06-01T09:00:00+00:00", kickoff="2026-06-01T18:00:00+00:00", brier_1x2=0.3),
+            ]
+        )
+
+        result = select_latest_pre_kickoff(frame)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["brier_1x2"], 0.0)
+
+    def test_empty_frame_is_returned_and_missing_columns_are_rejected(self) -> None:
+        empty = pd.DataFrame(columns=["match_id", "model_version", "prediction_created_at", "kickoff_at"])
+        self.assertTrue(select_latest_pre_kickoff(empty).empty)
+        with self.assertRaises(ValueError):
+            select_latest_pre_kickoff(pd.DataFrame([{"model_version": "v1"}]))
+
+
+class TestDeduplicatedLoaders(unittest.TestCase):
+    def _frame(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                _eval_row("m1", "2026-05-29T08:00:00+00:00", brier_1x2=0.9, hit_1x2=False),
+                _eval_row("m1", "2026-05-30T08:00:00+00:00", brier_1x2=0.3, hit_1x2=True),
+                _eval_row("m1", "2026-06-02T08:00:00+00:00", brier_1x2=0.0, hit_1x2=True),
+                _eval_row("m2", "2026-05-30T08:00:00+00:00", brier_1x2=0.5, hit_1x2=False, competition_class=None),
+            ]
+        )
+
+    def test_overview_and_audit_count_one_prediction_per_match(self) -> None:
+        with patch("alttez.operations.prediction_memory.read_dataframe", return_value=self._frame()):
+            overview = load_prediction_overview()
+            audit = load_prediction_learning_audit()
+
+        for summary in (overview, audit):
+            self.assertEqual(summary["evaluated_predictions"], 2)
+            self.assertAlmostEqual(summary["brier_score"], 0.4)
+            self.assertAlmostEqual(summary["accuracy_1x2"], 0.5)
+        self.assertEqual(audit["models"][0]["evaluated_predictions"], 2)
+
+    def test_metrics_by_dimension_are_deduplicated(self) -> None:
+        with patch("alttez.operations.prediction_memory.read_dataframe", return_value=self._frame()):
+            by_model = load_prediction_metrics_by_model()
+            by_competition = load_prediction_metrics_by_competition()
+            by_confidence = load_prediction_metrics_by_confidence()
+
+        self.assertEqual(by_model["evaluated_predictions"].tolist(), [2])
+        self.assertAlmostEqual(by_model.iloc[0]["brier_score"], 0.4)
+        self.assertEqual(
+            by_competition.set_index("competition_class")["evaluated_predictions"].to_dict(),
+            {"friendly": 1, "other_international": 1},
+        )
+        self.assertEqual(by_confidence["evaluated_predictions"].sum(), 2)
+        self.assertEqual(by_confidence.iloc[0]["confidence_band"], "0.65-0.79")
+
+    def test_closed_samples_are_deduplicated(self) -> None:
+        with patch("alttez.operations.prediction_memory.read_dataframe", return_value=self._frame()):
+            samples = load_closed_evaluation_samples()
+
+        self.assertEqual(len(samples), 2)
 
 
 def _match_payload(**overrides) -> dict:
