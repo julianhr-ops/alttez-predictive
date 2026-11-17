@@ -34,7 +34,7 @@ flowchart LR
     end
 
     subgraph SERVE["Serving"]
-        V1["alttez/inference/router.py: active model with Poisson fallback"]
+        V1["alttez/inference/router.py and serving_policy.py: Elo ordinal 1X2 on the rescaled Poisson matrix, Poisson fallback"]
         V2["alttez/nba/predict.py: blend with a line, Elo plus Platt without"]
     end
 
@@ -79,7 +79,7 @@ flowchart LR
 
 `alttez/ingestion/provider_stack.py` builds an ordered chain of providers, each behind the `MatchProvider` contract in `providers/base.py`. Raw rows land in `raw_matches_api`, are certified in batches, and become canonical matches. `alttez/features/klement.py` holds the only feature schema (`MODEL_FEATURE_COLUMNS`) that training and inference share.
 
-`alttez/inference/router.py` resolves the active model from `public.model_versions`. If the registry or the artifact is unavailable, it serves the Poisson champion and records `used_fallback` and `fallback_reason`. `prediction_committee.py` combines the champion, the challenger and the Poisson baseline. `alttez/training/challenger_cycle.py` marks a challenger eligible only when the paired Brier difference against the production champion has a 95% interval below 0 on at least 200 identical matches. Automatic promotion stays off unless `ALTTEZ_AUTO_PROMOTE_MODELS` is true.
+`alttez/inference/router.py` resolves the active model from `public.model_versions`. If the registry or the artifact is unavailable, it serves the Poisson champion and records `used_fallback` and `fallback_reason`. By default the single predictor then applies `alttez/inference/serving_policy.py`. It rates every stored match before the target date, fits an ordinal draw model on the trailing four years, and rescales the Poisson score matrix by class ratios to the resulting Elo 1X2, so the 1X2 and the scoreline agree. The payload carries `serving_policy` and the raw Poisson 1X2, which the calibration fit still reads. A team without an Elo rating serves Poisson for that match and is flagged as a fallback. `ALTTEZ_SERVING_POLICY=off` restores plain Poisson. `prediction_committee.py` combines the champion, the challenger and the Poisson baseline, and its Poisson members stay raw. `alttez/training/challenger_cycle.py` marks a challenger eligible only when the paired Brier difference against the production champion has a 95% interval below 0 on at least 200 identical matches. Automatic promotion stays off unless `ALTTEZ_AUTO_PROMOTE_MODELS` is true.
 
 Validation evidence is in [validation_soccer.md](validation_soccer.md). The history of the defects it exposed is in [model-history.md](model-history.md).
 

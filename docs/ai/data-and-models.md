@@ -44,8 +44,10 @@ calibracion y metricas operativas; la politica concreta vive en
 `training/challenger_cycle.py`. Todo modelo se compara con baselines (uniforme,
 tasa base, Elo) sobre los mismos partidos, con bootstrap pareado
 (`alttez/evaluation/`). La validacion walk-forward mostro que el campeon Poisson
-no supera a Elo solo (`docs/validation_soccer.md`) y que Elo NBA no supera la linea
-de cierre (`docs/nba.md`).
+no supera a Elo solo y que una regla Elo ordinal, elegida con 2018 a 2022 y
+confirmada en 2023 a 2025, si lo supera (`docs/validation_soccer.md`). Esa regla
+se sirve por defecto (`inference/serving_policy.py`, `ALTTEZ_SERVING_POLICY=off`
+la desactiva). Elo NBA no supera la linea de cierre (`docs/nba.md`).
 
 ## Cold start y fallbacks
 

@@ -43,13 +43,15 @@ An audit of the validation and calibration code found defects that no metric on 
 
 **Soccer.** A walk-forward backtest of the production stack on 7,611 international matches (2018 to 2025) found that the Poisson champion loses to a plain Elo baseline on Brier, RPS and log loss, pooled and in 7 of 8 years. It beats the uniform and base-rate baselines. Temperature calibration changes nothing measurable. The Poisson model over-predicts draws (mean 0.281 against 0.233 observed). Tables, setup and caveats are in [validation_soccer.md](validation_soccer.md).
 
+**Soccer, replacement.** Eight candidate 1X2 rules (Elo with an ordinal or Davidson draw model, with and without a fitted scale and a Poisson blend) were compared on 2018 to 2022 only. The Elo ordinal rule was declared the primary candidate before 2023 to 2025 were scored. On those 3,191 untouched matches it beats the Poisson champion, Brier 0.5127 against 0.5855, paired difference -0.0728 [-0.0836, -0.0623]. Against plain Elo it is equivalent (-0.0003 [-0.0010, +0.0003] over 2018 to 2025), so the gain comes from using Elo. The rule is now served by default through `alttez/inference/serving_policy.py`, which rescales the Poisson score matrix to the Elo 1X2 so scorelines stay coherent. `ALTTEZ_SERVING_POLICY=off` restores plain Poisson.
+
 **NBA.** The MOV Elo model beats the constant home rate and vanilla Elo, and does not beat the closing line. The blend of Elo and market reproduces the market, so the served model is the blend when a line exists and calibrated Elo otherwise. See [nba.md](nba.md) and the [architecture overview](architecture.md).
 
 ## 4. Open questions
 
 These follow from the validation report and are not tested yet.
 
-- A Poisson model whose expected goals use Elo, or an Elo-based 1X2 for the matches the Poisson model abstains on, are the first candidates to run through the same harness.
+- A Poisson model whose expected goals use Elo is the first candidate to run through the same harness. The matches the Poisson support gate abstains on still abstain, although Elo alone could predict them.
 - A class-specific correction such as the isotonic option targets the draw bias. A single temperature cannot.
 - Neutral venues. The home label is nominal there, and 2,494 of the 7,829 test-year matches were neutral.
 - XGBoost, the hierarchical and bivariate Poisson models, the committee consensus and the tournament simulation have not been evaluated.
