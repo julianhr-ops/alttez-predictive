@@ -103,3 +103,30 @@ RPS and log loss per year, and every per-year comparison, are in `artifacts/socc
 - Anything that replaces or ranks against the Poisson champion should be compared with Elo-only on identical matches, with this paired CI, not only against uniform.
 - Single-temperature calibration is not worth enabling for the Poisson champion on this evidence. A class-specific correction, such as the existing isotonic option, targets the draw bias but is untested here.
 - A Poisson model whose lambdas use Elo, or an Elo-based 1X2 for the unsupported matches, are the obvious candidates to test next with this harness.
+
+## Candidate serving rules: selection on 2018 to 2022
+
+The Poisson champion loses to Elo-only, so a second stage tests rules that could replace its 1X2 while keeping a coherent score matrix. Code: `alttez/evaluation/soccer_candidates.py` (rules and selection), `alttez/features/elo_1x2.py` (fitted draw models and blend). Everything is fitted on the 4 years before each test year only, with the same walk-forward protocol (`--refit-days 1`) and the same scored matches as above. Raw Poisson output of the first run is reused from a data-keyed cache, so every number in this document comes from one refit-1 Poisson run.
+
+Candidates (8, all declared before any run):
+
+- Elo-only with a fitted draw model: ordinal (cumulative logit with symmetric cut points) or Davidson, home advantage and draw width fitted on the training window, with the Elo logit scale fixed at 400 points (`ln10/400`) or fitted (`_scaled`).
+- A log-linear blend of that model and the raw Poisson 1X2, weight in [0, 1] fitted by log loss on the supported training rows (Poisson output of the 4 preceding years, each predicted walk-forward).
+- Each candidate's 1X2 is then imposed on the Poisson score matrix by class-ratio rescaling (`rescale_matrix_to_triplet`), so scorelines agree with the served 1X2.
+
+Protocol, fixed before the held-out years were scored: only 2018 to 2022 are scored and read in this stage (`--report-years 2018 2022 --select`; the code refuses to select on a later year). The candidate with the lowest pooled Brier is the best. Among candidates whose paired Brier difference to the best has a CI that includes 0, the simplest wins (Elo-only before blend, fixed scale before fitted, ordinal before Davidson). 2023 to 2025 are not used for any choice.
+
+Selection result (4,420 matches, 2018 to 2022; negative = better than the best):
+
+| candidate | pooled Brier | Brier minus best (95% CI) |
+| --- | --- | --- |
+| Elo ordinal, fitted scale + Poisson blend | 0.5154 | best |
+| Elo ordinal, fitted scale | 0.5156 | +0.0002 [-0.0003, +0.0007] |
+| Elo ordinal + Poisson blend | 0.5158 | +0.0003 [+0.0000, +0.0007] |
+| **Elo ordinal** | 0.5158 | +0.0004 [-0.0000, +0.0007] |
+| Elo Davidson, fitted scale + Poisson blend | 0.5158 | +0.0004 [-0.0003, +0.0010] |
+| Elo Davidson, fitted scale | 0.5159 | +0.0005 [-0.0004, +0.0013] |
+| Elo Davidson | 0.5223 | +0.0069 [+0.0048, +0.0091] |
+| Elo Davidson + Poisson blend | 0.5223 | +0.0069 [+0.0048, +0.0091] |
+
+**Declared primary candidate: Elo ordinal** (`PRIMARY_CANDIDATE = "elo_ordinal"`). The blend and the fitted scale buy at most 0.0004 Brier, inside the noise, and the fitted blend weight on Elo is 0.92 to 1.00 in the 2018 to 2022 folds, so the Poisson 1X2 adds close to nothing. Selection-year context: Elo only (the existing baseline) 0.5153, Poisson raw 0.5779 on the same rows. Fitted Elo ordinal parameters in those folds: home advantage 92 to 100 Elo points, draw cut point 0.63 to 0.65.
