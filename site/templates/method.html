@@ -1,0 +1,49 @@
+<h1>Evaluation method</h1>
+<p class="lead">The project is built around the evaluation harness. A model is trusted only after it has been scored the same way as its competitors on the same games.</p>
+
+<section aria-labelledby="walk">
+<h2 id="walk">Walk-forward</h2>
+<p>Every test period is predicted only from data that came before it. Hyperparameters, calibrators and blend weights are fitted on earlier seasons or years, never on the period being scored. Ratings score a game from the state before its date, so a prediction cannot see its own result.</p>
+</section>
+
+<section aria-labelledby="baselines">
+<h2 id="baselines">Baselines on identical games</h2>
+<p>Uniform, base rate, plain Elo and the NBA closing line are scored on exactly the same matches as the model. Beating a coin flip is not reported as a win.</p>
+</section>
+
+<section aria-labelledby="bootstrap">
+<h2 id="bootstrap">Paired bootstrap</h2>
+<p>For each comparison the harness resamples per-game loss differences, in blocks of game dates when games share a day, and reports a 95% interval. A difference counts only when the interval excludes 0.</p>
+</section>
+
+<section aria-labelledby="negative">
+<h2 id="negative">Negative results are kept</h2>
+<ul class="tight">
+<li>The legacy Poisson soccer model is worse than an Elo-only baseline.</li>
+<li>NBA Elo does not beat the market closing line in any test season.</li>
+<li>A blend of Elo and the market line only reproduces the line.</li>
+<li>Temperature calibration of the Poisson model changes nothing measurable.</li>
+</ul>
+</section>
+
+<section aria-labelledby="fixes">
+<h2 id="fixes">Leakage and duplication fixes</h2>
+<ul class="tight">
+<li>A calibration fitted on one shape of data and applied to another.</li>
+<li>Duplicate prediction rows that inflated the learning data.</li>
+<li>An Elo K factor that treated qualifiers as finals.</li>
+<li>A model registry failure that silently served the fallback.</li>
+</ul>
+<p>Each fix has a test. NBA predictions are keyed on game, model version and served model. They are written while the game is scheduled and never rewritten after tip-off, so the live scoreboard cannot be edited after the fact.</p>
+</section>
+
+<section aria-labelledby="docs">
+<h2 id="docs">Read more</h2>
+<ul class="tight">
+<li><a href="${repo}/blob/main/docs/nba.md">NBA report</a></li>
+<li><a href="${repo}/blob/main/docs/validation_soccer.md">Soccer validation report</a></li>
+<li><a href="${repo}/blob/main/docs/model-history.md">Model history and audit</a></li>
+<li><a href="${repo}/blob/main/docs/architecture.md">Architecture</a></li>
+<li><a href="${repo}/blob/main/docs/site.md">How this site is built</a></li>
+</ul>
+</section>

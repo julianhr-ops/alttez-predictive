@@ -1,0 +1,4 @@
+{"generated_at": "2026-11-18T14:05:00Z", "newest_completed": "2026-11-17", "games": [
+{"game_id": 401800001, "tipoff_utc": "2026-11-18T23:30:00Z", "home_abbr": "BOS", "away_abbr": "NYK", "served_model": "blend", "p_home_served": 0.652314, "p_home_elo": 0.612201, "p_home_market": 0.655, "expected_margin": 4.1, "market_spread": 4.5, "market_source": "ESPN BET <b>", "created_at": "2026-11-18T13:58:00Z"},
+{"game_id": 401800002, "tipoff_utc": "2026-11-19T01:00:00Z", "home_abbr": "LAL", "away_abbr": "DEN", "served_model": "elo_platt", "p_home_served": 0.4411, "p_home_elo": 0.4411, "p_home_market": null, "expected_margin": -1.9, "market_spread": null, "market_source": null, "created_at": "2026-11-18T13:58:00Z"}
+]}

@@ -1,0 +1,8 @@
+{"source_command": "python scripts/nba_validate.py", "report": "docs/nba.md", "test_seasons": "2020-21 to 2025-26", "n_games": 7776, "n_with_line": 7764, "rows": [
+{"model": "constant home rate", "brier": 0.2473, "log_loss": 0.6878, "accuracy": 0.554, "ece": 0.011},
+{"model": "vanilla Elo", "brier": 0.2199, "log_loss": 0.6295, "accuracy": 0.646, "ece": 0.013},
+{"model": "MOV Elo", "brier": 0.2174, "log_loss": 0.6240, "accuracy": 0.651, "ece": 0.012},
+{"model": "MOV Elo + Platt", "brier": 0.2173, "log_loss": 0.6238, "accuracy": 0.652, "ece": 0.012},
+{"model": "market close", "brier": 0.2067, "log_loss": 0.5995, "accuracy": 0.678, "ece": 0.012},
+{"model": "Elo + market blend", "brier": 0.2070, "log_loss": 0.6004, "accuracy": 0.679, "ece": 0.010}
+], "findings": ["MOV Elo beats the constant rate and vanilla Elo.", "It does not beat the market close in any season."]}

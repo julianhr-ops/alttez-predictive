@@ -1,0 +1,4 @@
+{"generated_at": "2026-11-18T14:05:00Z", "games": [
+{"game_id": 401799990, "game_date": "2026-11-17", "home_abbr": "MIA", "away_abbr": "ORL", "served_model": "blend", "p_home_served": 0.58, "p_home_market": 0.59, "home_score": 108, "away_score": 101, "home_win": true, "brier": 0.1764},
+{"game_id": 401799991, "game_date": "2026-11-17", "home_abbr": "PHX", "away_abbr": "SAC", "served_model": "elo_platt", "p_home_served": 0.51, "p_home_market": null, "home_score": 99, "away_score": 112, "home_win": false, "brier": 0.2601}
+]}
