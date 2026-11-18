@@ -36,6 +36,7 @@ from alttez.features.hierarchical import HierarchicalBayesEngine, load_active_hi
 from alttez.inference.calibration import load_single_predictor_calibration, matrix_1x2
 from alttez.inference.serving_policy import (
     POLICY_ELO_ORDINAL,
+    POLICY_NONE,
     POLICY_POISSON,
     EloUnavailableError,
     ServingPolicy,
@@ -613,6 +614,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         baseline["requested_model_family"] = self.requested_model_family
         baseline["used_fallback"] = self.used_fallback
         baseline["fallback_reason"] = self.fallback_reason
+        baseline["serving_policy"] = POLICY_NONE
         if not baseline["prediction_supported"]:
             return baseline
 

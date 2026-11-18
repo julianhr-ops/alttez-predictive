@@ -24,6 +24,7 @@ from alttez.inference.calibration import rescale_matrix_to_triplet
 SERVING_POLICY_ENV = "ALTTEZ_SERVING_POLICY"
 POLICY_POISSON = "poisson"
 POLICY_ELO_ORDINAL = "elo_ordinal_rescale"
+POLICY_NONE = "none"
 SERVING_WINDOW_YEARS = 4
 
 _OFF = {"off", "0", "false", "no", "none", POLICY_POISSON}

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -11,7 +14,9 @@ from alttez.evaluation import soccer_backtest as sb
 from alttez.evaluation.soccer_candidates import CANDIDATES, PRIMARY_CANDIDATE, fit_candidate
 from alttez.features.elo import rate_matches
 from alttez.inference.calibration import matrix_1x2
+from alttez.inference.prediction_committee import build_prediction_committee
 from alttez.inference.router import (
+    XGBOOST_FEATURE_COLUMNS,
     ActiveModelSelection,
     ActiveRecordLookup,
     BivariatePoissonMatchPredictor,
@@ -19,6 +24,7 @@ from alttez.inference.router import (
 )
 from alttez.inference.serving_policy import (
     POLICY_ELO_ORDINAL,
+    POLICY_NONE,
     POLICY_POISSON,
     SERVING_POLICY_ENV,
     SERVING_WINDOW_YEARS,
@@ -27,7 +33,7 @@ from alttez.inference.serving_policy import (
     build_serving_policy,
     serving_policy_enabled,
 )
-from tests.test_inference_router import _historical_df
+from tests.test_inference_router import DummyGoalModel, _historical_df
 from tests.test_soccer_backtest import synthetic_matches
 
 SIDES = ("home", "draw", "away")
@@ -199,6 +205,106 @@ class RouterIntegrationTests(unittest.TestCase):
         )
         member = BivariatePoissonMatchPredictor(_historical_df(), "2026-05-27", selection=selection)
         self.assertIsNone(member.poisson_baseline.serving_policy)
+
+
+def _committee():
+    with (
+        patch("alttez.inference.prediction_committee.load_latest_challenger_record", return_value=None),
+        patch("alttez.inference.prediction_committee._resolve_member_weights", return_value=None),
+    ):
+        return build_prediction_committee(_historical_df(), "2026-05-27")
+
+
+class CommitteeServingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(None)))
+        self.enterContext(patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}))
+        os.environ.pop(SERVING_POLICY_ENV, None)
+
+    def test_committee_serves_the_elo_1x2_and_keeps_the_members_as_diagnostics(self) -> None:
+        committee = _committee()
+        target = committee.members[0].predictor.serving_policy.target_1x2("Mexico", "Brazil", True)
+
+        prediction = committee.predict_match("Mexico", "Brazil", is_neutral=True)
+
+        for side, want in zip(SIDES, target, strict=True):
+            self.assertAlmostEqual(float(prediction[f"prob_{side}"]), want, delta=1e-9)
+        for got, want in zip(matrix_1x2(prediction["prob_matrix"]), target, strict=True):
+            self.assertAlmostEqual(got, want, delta=1e-9)
+        self.assertAlmostEqual(float(prediction["prob_matrix"].sum()), 1.0, places=12)
+        self.assertEqual(prediction["serving_policy"], POLICY_ELO_ORDINAL)
+        self.assertFalse(prediction["calibration_applied"])
+        members = {item["role"]: item for item in prediction["committee_members"]}
+        self.assertEqual(set(members), {"champion", "poisson_baseline", "bivariate"})
+        self.assertGreater(members["poisson_baseline"]["prob_draw"], members["champion"]["prob_draw"])
+
+    def test_committee_follows_the_champion_when_the_policy_is_off(self) -> None:
+        with patch.dict(os.environ, {SERVING_POLICY_ENV: "off"}):
+            committee = _committee()
+            prediction = committee.predict_match("Mexico", "Brazil", is_neutral=True)
+
+        self.assertEqual(prediction["serving_policy"], POLICY_POISSON)
+        self.assertFalse(prediction["used_fallback"])
+
+    def test_committee_reports_a_per_match_elo_fallback(self) -> None:
+        committee = _committee()
+        self.assertFalse(committee.used_fallback)
+
+        with self.assertLogs("alttez.inference.router", level="WARNING"):
+            prediction = committee.predict_match("Mexico", "Atlantis", is_neutral=True)
+
+        self.assertTrue(prediction["prediction_supported"])
+        self.assertTrue(prediction["used_fallback"])
+        self.assertIn("champion", prediction["fallback_reason"])
+        self.assertIn("Atlantis", prediction["fallback_reason"])
+        self.assertEqual(prediction["serving_policy"], POLICY_POISSON)
+
+    def test_a_match_without_fallback_does_not_inherit_the_previous_one(self) -> None:
+        committee = _committee()
+        with self.assertLogs("alttez.inference.router", level="WARNING"):
+            committee.predict_match("Mexico", "Atlantis", is_neutral=True)
+
+        prediction = committee.predict_match("Mexico", "Brazil", is_neutral=True)
+
+        self.assertFalse(prediction["used_fallback"])
+        self.assertIsNone(prediction["fallback_reason"])
+
+
+class NonPoissonChampionTests(unittest.TestCase):
+    def test_an_active_xgboost_model_serves_without_the_elo_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_path = Path(tmp) / "xgboost-active.joblib"
+            joblib.dump(
+                {
+                    "artifact_schema_version": 2,
+                    "models": {"home_goals": DummyGoalModel(1.8), "away_goals": DummyGoalModel(0.9)},
+                    "feature_columns": list(XGBOOST_FEATURE_COLUMNS),
+                    "model_version": "xgboost-active-v1",
+                    "model_family": "xgboost",
+                },
+                artifact_path,
+            )
+            record = {
+                "version_key": "xgboost-active-v1:2026-05-27",
+                "model_version": "xgboost-active-v1",
+                "model_family": "xgboost",
+                "artifact_path": str(artifact_path),
+                "production_status": "active",
+            }
+            with (
+                patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0", "ALTTEZ_ARTIFACTS_DIR": tmp}),
+                patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(record)),
+                patch("alttez.inference.prediction_committee.load_latest_challenger_record", return_value=None),
+                patch("alttez.inference.prediction_committee._resolve_member_weights", return_value=None),
+            ):
+                predictor = build_active_predictor(_historical_df(), "2026-05-27")
+                single = predictor.predict_match("Mexico", "USA", is_neutral=True)
+                committee = build_prediction_committee(_historical_df(), "2026-05-27")
+                blended = committee.predict_match("Mexico", "USA", is_neutral=True)
+
+        self.assertEqual(predictor.model_family, "xgboost")
+        self.assertEqual(single["serving_policy"], POLICY_NONE)
+        self.assertEqual(blended["serving_policy"], POLICY_NONE)
 
 
 if __name__ == "__main__":

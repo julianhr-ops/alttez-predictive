@@ -29,6 +29,7 @@ from alttez.inference.router import (
     build_active_predictor,
     exact_scoreline_decision,
 )
+from alttez.inference.serving_policy import POLICY_NONE, POLICY_POISSON, EloUnavailableError, ServingPolicy
 from alttez.ingestion.live_matches import canonical_team_name
 
 
@@ -156,6 +157,21 @@ def _normalize_members(members: list[CommitteeMember]) -> list[CommitteeMember]:
     ]
 
 
+def _member_fallback_reason(predictor: BaseMatchPredictor, prediction: dict[str, Any] | None = None) -> str | None:
+    used = getattr(predictor, "used_fallback", False)
+    reason = getattr(predictor, "fallback_reason", None)
+    if prediction is not None and "used_fallback" in prediction:
+        used, reason = prediction["used_fallback"], prediction.get("fallback_reason")
+    if not used:
+        return None
+    return reason or "motivo desconocido"
+
+
+def _format_fallback_reasons(fallback_reasons: dict[str, str | None]) -> str | None:
+    reasons = [f"{role}: {reason}" for role, reason in fallback_reasons.items() if reason]
+    return "; ".join(reasons) or None
+
+
 class PredictionCommittee(BaseMatchPredictor):
     def __init__(
         self,
@@ -195,6 +211,14 @@ class PredictionCommittee(BaseMatchPredictor):
     def get_team_profile(self, team: str) -> dict[str, float]:
         return self.members[0].predictor.get_team_profile(canonical_team_name(team))
 
+    def _champion_serving_policy(self) -> ServingPolicy | None:
+        champion = next((member.predictor for member in self.members if member.role == CHAMPION_ROLE), None)
+        return getattr(champion, "serving_policy", None)
+
+    def _unserved_policy_label(self) -> str:
+        champion = next((member.predictor for member in self.members if member.role == CHAMPION_ROLE), None)
+        return POLICY_POISSON if isinstance(champion, PoissonMatchPredictor) else POLICY_NONE
+
     def predict_match(
         self,
         home_team: str,
@@ -209,7 +233,7 @@ class PredictionCommittee(BaseMatchPredictor):
         away_team = canonical_team_name(away_team)
         member_predictions: list[dict[str, Any]] = []
         matrices: list[tuple[float, np.ndarray]] = []
-
+        fallback_reasons = {member.role: _member_fallback_reason(member.predictor) for member in self.members}
         for member in self.members:
             try:
                 prediction = member.predictor.predict_match(
@@ -220,6 +244,7 @@ class PredictionCommittee(BaseMatchPredictor):
                     max_goals=max_goals,
                     tournament_context=tournament_context,
                 )
+                fallback_reasons[member.role] = _member_fallback_reason(member.predictor, prediction)
             except Exception as exc:
                 LOGGER.warning("committee_member_failed role=%s detail=%s", member.role, exc)
                 continue
@@ -281,6 +306,19 @@ class PredictionCommittee(BaseMatchPredictor):
         deferred = bool(self.weighting and self.weighting.deferred_to_champion)
         calibration_active = (not deferred) and (not self.calibration.is_neutral)
         raw_1x2 = matrix_1x2(consensus_matrix)
+        serving_policy = self._champion_serving_policy()
+        served_policy = self._unserved_policy_label()
+        if serving_policy is not None:
+            try:
+                consensus_matrix = serving_policy.serve(consensus_matrix, home_team, away_team, is_neutral)
+                served_policy = serving_policy.name
+                calibration_active = False
+            except EloUnavailableError as exc:
+                if not any(fallback_reasons.values()):
+                    fallback_reasons["committee"] = (
+                        f"serving policy {serving_policy.name} unavailable for {home_team} vs {away_team}: {exc}"
+                    )
+                    LOGGER.warning(fallback_reasons["committee"])
         if calibration_active:
             consensus_matrix = self.calibration.calibrate_matrix(consensus_matrix)
         recommendations = optimize_prediction(consensus_matrix, is_knockout=is_knockout).head(5).copy()
@@ -309,8 +347,9 @@ class PredictionCommittee(BaseMatchPredictor):
             "model_family": self.model_family,
             "requested_model_version": self.requested_model_version,
             "requested_model_family": self.requested_model_family,
-            "used_fallback": self.used_fallback,
-            "fallback_reason": self.fallback_reason,
+            "used_fallback": any(fallback_reasons.values()),
+            "fallback_reason": _format_fallback_reasons(fallback_reasons),
+            "serving_policy": served_policy,
             "profile_local": profile_local,
             "profile_visitante": profile_visitante,
             "prediction_supported": True,
