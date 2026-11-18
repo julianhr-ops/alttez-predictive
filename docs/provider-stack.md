@@ -17,13 +17,36 @@ The code default for the raw stack lists `api_football` first. Set `ALTTEZ_PROVI
 
 | Provider | Needs | Role |
 | --- | --- | --- |
-| `espn` | no key | Unofficial public scoreboard JSON. Primary live agenda and results, including friendlies. Enabled unless `ALTTEZ_ESPN_ENABLED=false`. |
+| `espn` | no key | Unofficial public scoreboard JSON. Primary live agenda and results, for the World Cup, friendlies and the national-team competitions in the next section. Enabled unless `ALTTEZ_ESPN_ENABLED=false`. |
 | `football_data_org` | `ALTTEZ_FOOTBALL_DATA_KEY` | Structured fixtures and scores for the competitions in `ALTTEZ_FOOTBALL_DATA_LIVE_COMPETITIONS`. |
 | `api_football` | `ALTTEZ_API_FOOTBALL_KEY` | Optional paid feed. The scheduled workflow does not include it in its stacks. |
 | `statsbomb_open` | `ALTTEZ_STATSBOMB_OPEN_ROOT` | Event-level historical data from a local clone of StatsBomb Open Data. |
 | `local_json` | `ALTTEZ_LOCAL_JSON_PATH` | Manual fallback for tests and emergency ingestion. |
 
 ESPN and the DraftKings odds it relays are third-party data. ALTTEZ has no affiliation with ESPN, DraftKings, or any league. The ESPN endpoints are unofficial and can change or disappear without notice.
+
+## ESPN competitions
+
+`ALTTEZ_ESPN_LEAGUES` is a comma list of ESPN league slugs. Unset, the code reads `ESPN_DEFAULT_LEAGUES` from `alttez/ingestion/espn_competitions.py`, which both ESPN readers share. `.env.example` and the daily workflow carry the same list, and a test fails if they differ.
+
+`fifa.world` and `fifa.friendly` are stored under the name ESPN sends. Every other slug is stored under the tournament name of the historical results dataset, because the Elo K factor and the competition class read that name. A qualifier stored as "FIFA World Cup Qualifying - UEFA" would get the K of a final (60) instead of the qualifier K (40).
+
+| ESPN slug | Stored tournament name |
+| --- | --- |
+| `uefa.nations` | UEFA Nations League |
+| `concacaf.nations.league` | CONCACAF Nations League |
+| `fifa.worldq.uefa`, `fifa.worldq.conmebol`, `fifa.worldq.concacaf`, `fifa.worldq.afc`, `fifa.worldq.caf`, `fifa.wcq.ply` | FIFA World Cup qualification |
+| `caf.nations` | African Cup of Nations |
+| `caf.nations_qual` | African Cup of Nations qualification |
+| `afc.cupq` | AFC Asian Cup qualification |
+| `aff.championship` | ASEAN Championship |
+| `global.gulf_cup` | Gulf Cup |
+| `afc.saff.championship` | SAFF Cup |
+| `global.finalissima` | `CONMEBOL–UEFA Cup of Champions` |
+
+To add a competition, probe `.../soccer/<slug>/scoreboard?dates=YYYYMM` for national teams, find the name the historical dataset gives it, and add one line to `HISTORICAL_TOURNAMENT_BY_SLUG`. Then update `.env.example` and the workflow list.
+
+These slugs are valid on ESPN but had no events between 2025-09 and 2026-11, so they are not listed. They are `uefa.euroq`, `uefa.euro`, `concacaf.gold`, `conmebol.america`, `afc.asian.cup` and `fifa.worldq.ofc`. Women's and youth slugs are excluded on purpose, since the ratings are for senior men's teams.
 
 ## Environment variables
 

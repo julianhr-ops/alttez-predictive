@@ -17,14 +17,14 @@ from typing import Any, Iterable
 
 import requests
 
+from alttez.ingestion.espn_competitions import ESPN_DEFAULT_LEAGUES
 from alttez.ingestion.results_backfill import FinishedResult, _norm
 
 
 LOGGER = logging.getLogger(__name__)
 
 ESPN_BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer"
-# National-team leagues that map to our prediction set. Friendlies are the key gap.
-ESPN_DEFAULT_LEAGUES: tuple[str, ...] = ("fifa.friendly", "fifa.world")
+# National-team competitions that map to our prediction set. Friendlies are the key gap.
 ESPN_FINISHED_STATE = "post"
 _TIMEOUT = 20
 

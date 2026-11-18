@@ -1,0 +1,63 @@
+{
+  "leagues": [
+    {
+      "id": "786",
+      "name": "FIFA World Cup Qualifying - UEFA",
+      "slug": "fifa.worldq.uefa",
+      "season": {
+        "year": 2025,
+        "displayName": "2026 World Cup Qualifying - UEFA"
+      }
+    }
+  ],
+  "events": [
+    {
+      "id": "724850",
+      "date": "2025-10-11T18:45Z",
+      "name": "Georgia at Spain",
+      "season": {
+        "year": 2025,
+        "type": 13079,
+        "slug": "group-stage"
+      },
+      "competitions": [
+        {
+          "date": "2025-10-11T18:45Z",
+          "status": {
+            "type": {
+              "state": "post"
+            }
+          },
+          "venue": {
+            "id": "3468",
+            "fullName": "Estadio Martínez Valero",
+            "address": {
+              "city": "Elche",
+              "country": "Spain"
+            }
+          },
+          "competitors": [
+            {
+              "homeAway": "home",
+              "score": "2",
+              "team": {
+                "id": "164",
+                "displayName": "Spain",
+                "logo": "https://a.espncdn.com/i/teamlogos/countries/500/esp.png"
+              }
+            },
+            {
+              "homeAway": "away",
+              "score": "0",
+              "team": {
+                "id": "584",
+                "displayName": "Georgia",
+                "logo": "https://a.espncdn.com/i/teamlogos/countries/500/geo.png"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
