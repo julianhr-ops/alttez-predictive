@@ -152,6 +152,20 @@ class BuildPredictionsTests(PredictionTestBase):
         without = only_tomorrow.predictions[0].row
         self.assertGreater(with_b2b.p_home_elo, without.p_home_elo)
 
+    def test_back_to_back_when_first_game_is_on_previous_espn_date(self):
+        models = replace(self.models, elo_params=replace(self.models.elo_params, b2b_penalty=60.0))
+        today = self.today + timedelta(days=3)
+        tip = datetime.combine(today, datetime.min.time(), tzinfo=UTC) + timedelta(hours=3, minutes=30)
+        now = tip - timedelta(hours=1)
+        first = scheduled(1, 1, 2, tip)
+        second = scheduled(2, 3, 1, tip + timedelta(days=1))
+        board = {today - timedelta(days=1): [first], today: [second]}
+        games = predict.fetch_upcoming(today, now=now, fetch=lambda day: board.get(day, []))
+        both = predict.build_predictions(models, self.inputs, games, now=now)
+        alone = predict.build_predictions(models, self.inputs, [second], now=now)
+        self.assertEqual([prediction.row.game_id for prediction in both.predictions], [1, 2])
+        self.assertGreater(both.predictions[1].row.p_home_elo, alone.predictions[0].row.p_home_elo)
+
     def test_each_date_uses_only_earlier_results(self):
         tomorrow = self.tip + timedelta(days=1)
         together = {p.row.game_id: p.row for p in self.build([scheduled(1, 1, 2, self.tip), scheduled(2, 3, 4, tomorrow)]).predictions}
