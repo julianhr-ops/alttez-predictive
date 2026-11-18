@@ -2,7 +2,7 @@ import os
 from typing import Any, Optional
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 
 from alttez.api.settings import load_local_env
@@ -29,13 +29,14 @@ def get_database_url(explicit_url: Optional[str] = None) -> str:
 
 
 def get_engine(database_url: Optional[str] = None) -> Engine:
-    """Builds a SQLAlchemy engine for PostgreSQL/Supabase."""
-
-    return create_engine(
-        get_database_url(database_url),
-        pool_pre_ping=True,
-        future=True,
-    )
+    """Build an engine, exposing a SQLite database under the public schema."""
+    url = get_database_url(database_url)
+    engine = create_engine(url, pool_pre_ping=True, future=True)
+    if engine.dialect.name == "sqlite":
+        @event.listens_for(engine, "connect")
+        def attach_public(connection, _record):
+            connection.execute("attach database ? as public", (engine.url.database or ":memory:",))
+    return engine
 
 
 def read_dataframe(sql: str, params: Optional[dict[str, Any]] = None, database_url: Optional[str] = None) -> pd.DataFrame:
