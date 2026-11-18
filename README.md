@@ -4,6 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.txt)
 ![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)
 
+**Live demo:** [julianhr-ops.github.io/alttez-predictive](https://julianhr-ops.github.io/alttez-predictive/) shows the live NBA scoreboard, the soccer validation and a matchup calculator. How it is built is in [docs/site.md](docs/site.md).
+
 ALTTEZ produces win probabilities for international football (1X2 and scorelines) and for NBA games from free public data, and it measures every model before trusting it. A daily pipeline ingests results, serves predictions, stores each prediction once, grades it after the game, and builds a report. The core of the project is the evaluation harness. Each model is scored walk-forward against simple baselines on identical games, with paired bootstrap confidence intervals, and the repository keeps the findings that went against its own models.
 
 ## Why it is different
@@ -179,5 +181,7 @@ ALTTEZ is a research and engineering project. Its output is a statistical result
 MIT, see [LICENSE.txt](LICENSE.txt). The code began as a reshaping of [ProphitBet](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor) by Vasileios Kochliaridis, whose copyright notice stays in the license. The ALTTEZ name is the owner's. Citation metadata is in [CITATION.cff](CITATION.cff).
 
 ## Resumen en español
+
+**Demo en vivo:** [julianhr-ops.github.io/alttez-predictive](https://julianhr-ops.github.io/alttez-predictive/). La página está en inglés y se actualiza dos veces al día.
 
 ALTTEZ calcula probabilidades de victoria para fútbol internacional (1X2 y marcadores) y para partidos de la NBA usando solo datos públicos y gratuitos. Cada modelo se valida con el método walk-forward, contra modelos de referencia sobre los mismos partidos y con intervalos de confianza de bootstrap pareado. El repositorio conserva los resultados negativos. La auditoría mostró que el campeón Poisson de fútbol era peor que un Elo simple. Se evaluaron ocho reglas candidatas, se eligió una con los años 2018 a 2022 y se probó en 2023 a 2025, que no se usaron para elegir. La regla ganadora, un Elo ordinal con modelo de empates, mejora al campeón Poisson con una diferencia de Brier de -0.0728 [-0.0836, -0.0623] sobre 3,191 partidos, y hoy se sirve por defecto (`ALTTEZ_SERVING_POLICY=off` devuelve el Poisson original). Frente a un Elo simple la diferencia es estadísticamente equivalente. El Elo de la NBA no supera la línea de cierre del mercado, así que cuando existe una línea el modelo servido se apoya en el mercado. Para probarlo, instale Python 3.13 o superior, cree un entorno virtual, ejecute `pip install -r requirements.txt` y luego `python -m unittest discover -s tests`. Para ver las predicciones NBA sin base de datos, ejecute `python scripts/nba_daily.py --dry-run --html out.html`, que genera un resumen HTML autocontenido. El panel (`python -m streamlit run alttez/dashboard/app.py`) tiene una opción NBA en la barra lateral. Necesita `SUPABASE_DB_URL` para mostrar datos y, sin ella, muestra un aviso claro. Las cifras están en `docs/nba.md` y `docs/validation_soccer.md`, y la guía local en español está en `docs/ai/workflows.md`. Este proyecto es de investigación y no constituye asesoría de apuestas ni financiera.
