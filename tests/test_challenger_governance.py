@@ -20,6 +20,8 @@ from alttez.training.challenger_cycle import (
     _baseline_comparison,
     _champion_lambda_stream,
     _evaluate_poisson_champion,
+    _gated_promotion_decision,
+    _promotion_decision,
     _score_lambda_stream,
     run_challenger_cycle,
 )
@@ -147,6 +149,57 @@ class TestBaselineComparison(unittest.TestCase):
         self.assertTrue(report["uniform"]["champion_vs_baseline"]["a_better"])
 
 
+def _loss_metrics(losses: np.ndarray, *, log_loss: float) -> dict:
+    return {"brier_losses": [float(value) for value in losses], "log_loss": log_loss, "rps": None}
+
+
+class TestPromotionAgainstTheServedRule(unittest.TestCase):
+    def _series(self, challenger_vs_elo: float) -> tuple[dict, dict, dict]:
+        rng = np.random.default_rng(7)
+        elo = rng.normal(0.4961, 0.2, 300)
+        elo += 0.4961 - elo.mean()
+        poisson = elo + 0.0599 + rng.normal(0.0, 0.01, 300)
+        challenger = elo + challenger_vs_elo + rng.normal(0.0, 0.01, 300)
+        return (
+            _loss_metrics(poisson, log_loss=1.05),
+            _loss_metrics(challenger, log_loss=1.00),
+            _loss_metrics(elo, log_loss=0.95),
+        )
+
+    def test_a_challenger_that_beats_poisson_but_not_the_served_elo_is_not_promoted(self) -> None:
+        champion, challenger, elo = self._series(challenger_vs_elo=0.0294)
+
+        plain_promote, _, plain_detail = _promotion_decision(champion, challenger)
+        promote, reason, detail = _gated_promotion_decision(champion, challenger, elo)
+
+        self.assertTrue(plain_promote)
+        self.assertLess(plain_detail["paired_brier"]["ci_high"], 0.0)
+        self.assertFalse(promote)
+        self.assertIn("Elo", reason)
+        self.assertGreater(detail["elo_only_paired_brier"]["ci_low"], 0.0)
+        self.assertGreaterEqual(detail["elo_only_paired_brier"]["n"], 200)
+
+    def test_a_challenger_that_beats_both_references_is_promoted(self) -> None:
+        champion, challenger, elo = self._series(challenger_vs_elo=-0.03)
+        challenger["log_loss"] = elo["log_loss"] - 0.01
+
+        promote, reason, detail = _gated_promotion_decision(champion, challenger, elo)
+
+        self.assertTrue(promote, reason)
+        self.assertLess(detail["paired_brier"]["ci_high"], 0.0)
+        self.assertLess(detail["elo_only_paired_brier"]["ci_high"], 0.0)
+
+    def test_a_log_loss_decay_against_elo_blocks_promotion(self) -> None:
+        champion, challenger, elo = self._series(challenger_vs_elo=-0.03)
+        challenger["log_loss"] = elo["log_loss"] + 0.05
+
+        promote, reason, _ = _gated_promotion_decision(champion, challenger, elo)
+
+        self.assertFalse(promote)
+        self.assertIn("Elo", reason)
+        self.assertIn("Log Loss", reason)
+
+
 class TestRunChallengerCycle(unittest.TestCase):
     def _run(self, *, active_record, fitted_rho, n_rows=400, **kwargs):
         artifact = {
@@ -203,6 +256,12 @@ class TestRunChallengerCycle(unittest.TestCase):
         self.assertIn("Muestra insuficiente", report["promotion_reason"])
         self.assertEqual(written["baselines"].keys(), report["baselines"].keys())
         self.assertTrue(np.isfinite(report["paired_comparison"]["mean_diff"]))
+
+    def test_cycle_report_carries_the_elo_comparison(self) -> None:
+        report, written = self._run(active_record=None, fitted_rho=-0.07)
+
+        self.assertEqual(report["elo_comparison"]["n"], report["evaluation_matches"])
+        self.assertEqual(written["elo_comparison"], report["elo_comparison"])
 
 
 if __name__ == "__main__":

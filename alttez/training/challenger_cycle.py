@@ -567,6 +567,7 @@ def _promotion_decision(
     *,
     block_ids: Any = None,
     min_matches: int = DEFAULT_MIN_PROMOTION_MATCHES,
+    reference: str = "champion",
 ) -> tuple[bool, str, dict[str, Any]]:
     """Decide elegibilidad del retador y devuelve el detalle de gobernanza.
 
@@ -598,12 +599,12 @@ def _promotion_decision(
         return False, f"Muestra insuficiente: {paired.n} partidos comunes < {min_matches} requeridos.", detail
     if not paired.a_better:
         reason = (
-            "Challenger no supera al champion en Brier con significancia "
+            f"Challenger no supera al {reference} en Brier con significancia "
             f"(diferencia {paired.mean_diff:+.4f}, IC [{paired.ci_low:+.4f}, {paired.ci_high:+.4f}])."
         )
         return False, reason, detail
     if float(challenger_metrics["log_loss"]) > float(champion_metrics["log_loss"]) + DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE:
-        return False, "Challenger mejora Brier pero deteriora Log Loss materialmente.", detail
+        return False, f"Challenger mejora Brier pero deteriora Log Loss materialmente frente al {reference}.", detail
     if (
         challenger_rps is not None
         and champion_rps is not None
@@ -611,6 +612,54 @@ def _promotion_decision(
     ):
         return False, "Challenger mejora Brier pero deteriora RPS ordinal frente al champion.", detail
     return True, "Challenger elegible: mejora Brier con IC pareado completamente bajo 0 y sin deterioro de Log Loss ni RPS.", detail
+
+
+def _gated_promotion_decision(
+    champion_metrics: dict[str, Any],
+    challenger_metrics: dict[str, Any],
+    elo_metrics: dict[str, Any],
+    *,
+    block_ids: Any = None,
+    min_matches: int = DEFAULT_MIN_PROMOTION_MATCHES,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Promotion needs to beat the Poisson champion and the Elo-only baseline, under one rule.
+
+    The Poisson champion is not what serves: ``serving_policy`` rescales it to an Elo 1X2. A
+    challenger that only beats the raw Poisson would replace a served rule it has not been
+    compared with, so the Elo-only baseline gets the same gates (same matches, paired Brier CI
+    below 0, no material Log Loss deterioration). The Elo outcome is reported in
+    ``detail["elo_only_paired_brier"]``.
+    """
+
+    promote, reason, detail = _promotion_decision(
+        champion_metrics, challenger_metrics, block_ids=block_ids, min_matches=min_matches
+    )
+    elo_promote, elo_reason, elo_detail = _promotion_decision(
+        elo_metrics, challenger_metrics, block_ids=block_ids, min_matches=min_matches, reference="baseline Elo-only (la regla que sirve)"
+    )
+    detail["elo_only_paired_brier"] = elo_detail["paired_brier"]
+    if promote and not elo_promote:
+        return False, elo_reason, detail
+    return promote, reason, detail
+
+
+def _holdout_baselines(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> tuple[dict[str, np.ndarray], list[str]]:
+    """Baseline 1X2 probabilities on the date-ordered holdout, fitted on the training window only."""
+
+    ordered_train = train_df.sort_values("date").reset_index(drop=True)
+    ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
+    train_outcomes = [_outcome_label(int(h), int(a)) for h, a in zip(ordered_train["home_score"], ordered_train["away_score"], strict=False)]
+    holdout_outcomes = [
+        _outcome_label(int(h), int(a)) for h, a in zip(ordered_holdout["home_score"], ordered_holdout["away_score"], strict=False)
+    ]
+    probabilities = baseline_probabilities(
+        train_outcomes,
+        ordered_train["elo_difference"].to_numpy(dtype=float),
+        ordered_train["neutral"].to_numpy(dtype=bool),
+        ordered_holdout["elo_difference"].to_numpy(dtype=float),
+        ordered_holdout["neutral"].to_numpy(dtype=bool),
+    )
+    return probabilities, holdout_outcomes
 
 
 def _baseline_comparison(
@@ -627,19 +676,7 @@ def _baseline_comparison(
     beats the baseline.
     """
 
-    ordered_train = train_df.sort_values("date").reset_index(drop=True)
-    ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
-    train_outcomes = [_outcome_label(int(h), int(a)) for h, a in zip(ordered_train["home_score"], ordered_train["away_score"], strict=False)]
-    holdout_outcomes = [
-        _outcome_label(int(h), int(a)) for h, a in zip(ordered_holdout["home_score"], ordered_holdout["away_score"], strict=False)
-    ]
-    probabilities = baseline_probabilities(
-        train_outcomes,
-        ordered_train["elo_difference"].to_numpy(dtype=float),
-        ordered_train["neutral"].to_numpy(dtype=bool),
-        ordered_holdout["elo_difference"].to_numpy(dtype=float),
-        ordered_holdout["neutral"].to_numpy(dtype=bool),
-    )
+    probabilities, holdout_outcomes = _holdout_baselines(train_df, holdout_df)
     report: dict[str, Any] = {}
     for name, matrix in probabilities.items():
         losses = brier_1x2_per_game(matrix, holdout_outcomes)
@@ -649,6 +686,19 @@ def _baseline_comparison(
             "challenger_vs_baseline": _paired_detail(paired_bootstrap_diff(challenger_losses, losses, block_ids=block_ids)),
         }
     return report
+
+
+def _elo_only_metrics(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> dict[str, Any]:
+    """Per-game Brier and mean log loss of the Elo-only baseline, the stand-in for the served Elo rule."""
+
+    probabilities, holdout_outcomes = _holdout_baselines(train_df, holdout_df)
+    elo_probabilities = probabilities["elo_only"]
+    y_true = pd.Series(holdout_outcomes).map({"H": 0, "D": 1, "A": 2}).to_numpy()
+    return {
+        "brier_losses": [float(value) for value in brier_1x2_per_game(elo_probabilities, holdout_outcomes)],
+        "log_loss": float(log_loss(y_true, elo_probabilities, labels=[0, 1, 2])),
+        "rps": None,
+    }
 
 
 def _governance_decision(
@@ -769,8 +819,11 @@ def run_challenger_cycle(
 
     ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
     block_ids = ordered_holdout["date"].astype(str).to_numpy()
-    promote, promotion_reason, promotion_detail = _promotion_decision(
-        champion_metrics, challenger_metrics, block_ids=block_ids
+    promote, promotion_reason, promotion_detail = _gated_promotion_decision(
+        champion_metrics,
+        challenger_metrics,
+        _elo_only_metrics(train_df, holdout_df),
+        block_ids=block_ids,
     )
     baselines = _baseline_comparison(
         train_df,
@@ -803,6 +856,7 @@ def run_challenger_cycle(
             "(menor es mejor; el retador debe igualar o mejorar)."
         ),
         "paired_comparison": promotion_detail["paired_brier"],
+        "elo_comparison": promotion_detail["elo_only_paired_brier"],
         "min_promotion_matches": promotion_detail["min_matches"],
         "baselines": baselines,
         "production_config": {
