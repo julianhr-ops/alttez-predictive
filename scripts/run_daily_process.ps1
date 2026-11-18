@@ -161,9 +161,8 @@ try {
         & $python $pipelineAlert --stage $CurrentStage --date $Date --message "Tournament review delivery failed (non-fatal)." --level warning | Out-Null
     }
 
-    Invoke-NbaStage
-
     if ($NoSchedule) {
+        Invoke-NbaStage
         Write-Output "PROCESS: complete (idle/no_schedule)"
         exit 0
     }
