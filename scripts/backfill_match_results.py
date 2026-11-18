@@ -27,7 +27,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--date-to", required=True, help="End date YYYY-MM-DD.")
     parser.add_argument("--source", default="espn", choices=["espn", "football_data"], help="Results feed (default espn, covers friendlies).")
     parser.add_argument("--competition", default="WC", help="football_data competition code (default WC).")
-    parser.add_argument("--leagues", default=None, help="Comma-separated ESPN league slugs (default fifa.friendly,fifa.world).")
+    parser.add_argument(
+        "--leagues",
+        default=None,
+        help="Comma-separated ESPN league slugs (default ESPN_DEFAULT_LEAGUES in alttez/ingestion/espn_competitions.py).",
+    )
     parser.add_argument("--day-tolerance", type=int, default=1, help="UTC/local date skew tolerance in days.")
     parser.add_argument("--apply", action="store_true", help="Persist updates and close evaluations.")
     parser.add_argument("--database-url", default=None, help="Explicit database URL.")
