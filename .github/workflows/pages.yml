@@ -1,0 +1,167 @@
+name: Pages site
+
+on:
+  schedule:
+    - cron: "0 14 * * *"
+    - cron: "30 22 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "alttez/site/**"
+      - "scripts/build_site.py"
+      - ".github/workflows/pages.yml"
+  pull_request:
+    paths:
+      - "site/**"
+      - "alttez/site/**"
+      - "scripts/build_site.py"
+      - ".github/workflows/pages.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-site
+  cancel-in-progress: false
+
+jobs:
+  refresh-ledger:
+    if: github.repository == 'julianhr-ops/alttez-predictive'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check that the data branch exists
+        run: |
+          if ! git ls-remote --exit-code --heads "https://github.com/${GITHUB_REPOSITORY}.git" data >/dev/null; then
+            echo "::error::Branch 'data' does not exist. The owner creates it with a first commit that holds nba/ledger.jsonl, then reruns this workflow."
+            exit 1
+          fi
+
+      - name: Check out the code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out the ledger branch
+        uses: actions/checkout@v4
+        with:
+          ref: data
+          path: ledger
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Load the ledger into SQLite
+        run: python scripts/nba_ledger.py import --ledger ledger/nba/ledger.jsonl --database-url sqlite:///nba.db
+
+      - name: Grade games and predict upcoming games
+        run: |
+          set +e
+          python scripts/nba_daily.py --date "$(date -u +%F)" --database-url sqlite:///nba.db
+          code=$?
+          set -e
+          if [ "$code" -eq 3 ]; then
+            echo "::warning::nba_daily stopped with stale_data (exit 3). Nothing was predicted today, the site shows the previous state."
+          elif [ "$code" -ne 0 ]; then
+            exit "$code"
+          fi
+
+      - name: Export and verify the ledger
+        run: |
+          python scripts/nba_ledger.py export --ledger ledger/nba/ledger.jsonl --database-url sqlite:///nba.db
+          python scripts/nba_ledger.py verify --ledger ledger/nba/ledger.jsonl
+
+      - name: Commit the ledger to the data branch
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        working-directory: ledger
+        run: |
+          if [ -z "$(git status --porcelain -- nba/ledger.jsonl)" ]; then
+            echo "Ledger unchanged, nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add nba/ledger.jsonl
+          git commit -m "ledger: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git pull --rebase origin data
+          git push origin HEAD:data
+
+      - name: Upload the database for the build job
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-db
+          path: nba.db
+          if-no-files-found: error
+          retention-days: 1
+
+  build-site:
+    if: github.repository == 'julianhr-ops/alttez-predictive'
+    needs: refresh-ledger
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download the database
+        uses: actions/download-artifact@v4
+        with:
+          name: nba-db
+
+      - name: Compute the ISO week
+        id: week
+        run: echo "iso=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the soccer raw results
+        uses: actions/cache@v4
+        with:
+          path: artifacts/soccer
+          key: soccer-raw-${{ steps.week.outputs.iso }}
+
+      - name: Write the NBA data files
+        run: python scripts/nba_site_data.py --database-url sqlite:///nba.db --out site_out
+
+      - name: Write the soccer data files
+        run: python scripts/soccer_site_data.py --out site_out
+
+      - name: Render the pages
+        run: python scripts/build_site.py --data-dir site_out/data --out site_out
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site_out
+
+  deploy:
+    if: github.repository == 'julianhr-ops/alttez-predictive' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build-site
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
