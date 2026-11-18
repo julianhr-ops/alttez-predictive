@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import logging
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ EARLIEST_GAME_DATE = date(2000, 1, 1)
 EXIT_DELIVERY_FAILED = 1
 EXIT_DATA_ERROR = 2
 EXIT_STALE_DATA = 3
+logger = logging.getLogger(__name__)
 
 ScoreboardFetch = Callable[[date], list[data.NbaScheduledGame]]
 
@@ -73,28 +75,34 @@ def grade_finished(
     if pending:
         for offset in range(GRADING_LOOKBACK_DAYS + 1):
             for game in fetch(today - timedelta(days=offset)):
-                if game.state == "post" and game.home_score is not None and game.away_score is not None:
+                if game.completed and game.home_score is not None and game.away_score is not None:
                     finished[game.game_id] = game
-    graded = 0
+    graded: set[int] = set()
     for row in pending:
         game = finished.get(row.game_id)
         if game is None:
             continue
         if not write:
-            graded += 1
-        elif store.grade_prediction(
-            engine, row.game_id, row.model_version, row.served_model, game.home_score, game.away_score,
-            row.p_home_served, now=now,
-        ):
-            graded += 1
+            graded.add(row.game_id)
+        else:
+            try:
+                if store.grade_prediction(
+                    engine, row.game_id, row.model_version, row.served_model, game.home_score, game.away_score,
+                    row.p_home_served, now=now,
+                ):
+                    graded.add(row.game_id)
+            except ValueError:
+                logger.exception("Unable to grade NBA game %s", row.game_id)
     still_open = len({r.game_id for r in pending if r.game_id not in finished and r.game_date < today})
-    return GradeReport(graded=graded, unresolved=unresolved_old + still_open)
+    return GradeReport(graded=len(graded), unresolved=unresolved_old + still_open)
 
 
-def store_predictions(engine: Engine, run: predict.PredictionRun, *, now: datetime) -> dict[store.InsertOutcome, int]:
+def store_predictions(
+    engine: Engine, run: predict.PredictionRun, *, now: datetime | None = None
+) -> dict[store.InsertOutcome, int]:
     counts = {outcome: 0 for outcome in store.InsertOutcome}
     for planned in run.predictions:
-        counts[store.insert_prediction_if_absent(engine, planned.row, now=now)] += 1
+        counts[store.insert_prediction_if_absent(engine, planned.row, now=now or datetime.now(UTC))] += 1
     return counts
 
 
@@ -111,6 +119,7 @@ def resolve_engine(args: argparse.Namespace) -> Engine | None:
 def run(
     args: argparse.Namespace, *, fetch: ScoreboardFetch = data.fetch_espn_scoreboard, now: datetime | None = None
 ) -> tuple[int, str]:
+    fixed_now = now
     now = now or datetime.now(UTC)
     today = date.fromisoformat(args.date) if args.date else now.date()
     notes: list[str] = []
@@ -129,7 +138,7 @@ def run(
             print(f"ERROR: {exc}", file=sys.stderr)
             return EXIT_STALE_DATA, str(exc)
         if write:
-            counts = store_predictions(engine, prediction_run, now=now)
+            counts = store_predictions(engine, prediction_run, now=fixed_now)
             notes.append(
                 f"stored {counts[store.InsertOutcome.INSERTED]} new, "
                 f"{counts[store.InsertOutcome.UPGRADED]} upgraded to the blend after a line appeared, "

@@ -14,7 +14,7 @@ from tests.nba_synthetic import SMALL_GRID, SMALL_VANILLA, synthetic_games
 def scheduled(game_id, home, away, start, *, line=None, state="pre", season=2017, season_type=2, provider="DraftKings"):
     return data.NbaScheduledGame(
         game_id=game_id, start_time=start, season=season, season_type=season_type, home_id=home, away_id=away,
-        home_abbreviation=f"T{home}", away_abbreviation=f"T{away}", neutral=False, state=state, home_score=None,
+        home_abbreviation=f"T{home}", away_abbreviation=f"T{away}", neutral=False, state=state, completed=state == "post", home_score=None,
         away_score=None, home_margin_line=line, total_line=None if line is None else 215.5,
         odds_provider=None if line is None else provider,
     )
@@ -152,6 +152,20 @@ class BuildPredictionsTests(PredictionTestBase):
         without = only_tomorrow.predictions[0].row
         self.assertGreater(with_b2b.p_home_elo, without.p_home_elo)
 
+    def test_back_to_back_when_first_game_is_on_previous_espn_date(self):
+        models = replace(self.models, elo_params=replace(self.models.elo_params, b2b_penalty=60.0))
+        today = self.today + timedelta(days=3)
+        tip = datetime.combine(today, datetime.min.time(), tzinfo=UTC) + timedelta(hours=3, minutes=30)
+        now = tip - timedelta(hours=1)
+        first = scheduled(1, 1, 2, tip)
+        second = scheduled(2, 3, 1, tip + timedelta(days=1))
+        board = {today - timedelta(days=1): [first], today: [second]}
+        games = predict.fetch_upcoming(today, now=now, fetch=lambda day: board.get(day, []))
+        both = predict.build_predictions(models, self.inputs, games, now=now)
+        alone = predict.build_predictions(models, self.inputs, [second], now=now)
+        self.assertEqual([prediction.row.game_id for prediction in both.predictions], [1, 2])
+        self.assertGreater(both.predictions[1].row.p_home_elo, alone.predictions[0].row.p_home_elo)
+
     def test_each_date_uses_only_earlier_results(self):
         tomorrow = self.tip + timedelta(days=1)
         together = {p.row.game_id: p.row for p in self.build([scheduled(1, 1, 2, self.tip), scheduled(2, 3, 4, tomorrow)]).predictions}
@@ -192,9 +206,21 @@ class FetchTests(unittest.TestCase):
             seen.append(day)
             return [scheduled(1, 1, 2, tip), scheduled(10 + len(seen), 3, 4, tip)]
 
-        games = predict.fetch_upcoming(date(2026, 11, 17), fetch=fetch)
-        self.assertEqual(seen, [date(2026, 11, 17), date(2026, 11, 18)])
-        self.assertEqual([g.game_id for g in games], [1, 11, 12])
+        games = predict.fetch_upcoming(date(2026, 11, 17), now=tip - timedelta(hours=1), fetch=fetch)
+        self.assertEqual(seen, [date(2026, 11, 16), date(2026, 11, 17), date(2026, 11, 18)])
+        self.assertEqual([g.game_id for g in games], [1, 11, 12, 13])
+
+    def test_previous_espn_date_includes_only_not_started_games(self):
+        today = date(2026, 11, 18)
+        now = datetime(2026, 11, 18, 2, tzinfo=UTC)
+        board = [
+            scheduled(1, 1, 2, now + timedelta(minutes=90), line=4.5),
+            scheduled(2, 3, 4, now + timedelta(hours=2)),
+            scheduled(3, 1, 2, now),
+            scheduled(4, 1, 2, now + timedelta(hours=1), state="in"),
+        ]
+        games = predict.fetch_upcoming(today, now=now, fetch=lambda day: board if day == today - timedelta(days=1) else [])
+        self.assertEqual([game.game_id for game in games], [1, 2])
 
 
 if __name__ == "__main__":

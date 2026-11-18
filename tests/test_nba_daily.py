@@ -76,6 +76,45 @@ class GradeFinishedTests(unittest.TestCase):
         report = nba_daily.grade_finished(engine, TODAY, now=NOW, fetch=self.fetch, write=True)
         self.assertEqual((report.graded, self.calls), (0, []))
 
+    def test_postponed_and_invalid_results_do_not_block_other_games(self):
+        postponed = {
+            "id": "401705090", "date": "2025-01-10T03:30Z", "season": {"year": 2025, "type": 2},
+            "competitions": [{
+                "status": {"type": {"name": "STATUS_POSTPONED", "state": "post", "completed": False}},
+                "competitors": [
+                    {"homeAway": "home", "team": {"id": "13", "abbreviation": "LAL"}, "score": "0"},
+                    {"homeAway": "away", "team": {"id": "30", "abbreviation": "CHA"}, "score": "0"},
+                ],
+            }],
+        }
+        game = data.parse_espn_scoreboard({"events": [postponed]})[0]
+        store.insert_prediction_if_absent(self.engine, make_row(401705090), now=NOW)
+        board = [game, finished(1, 0, 0), finished(2, 112, 101)]
+        with self.assertLogs("scripts.nba_daily", level="WARNING") as logs:
+            report = nba_daily.grade_finished(
+                self.engine, TODAY, now=TIPOFF + timedelta(hours=5), fetch=lambda _: board, write=True
+            )
+        self.assertEqual(report.graded, 1)
+        self.assertIn("1", " ".join(logs.output))
+        pending = store.load_ungraded(self.engine, DateWindow(date(2026, 11, 1), date(2026, 11, 30)))
+        self.assertEqual({row.game_id for row in pending}, {1, 401705090})
+
+    def test_upgraded_game_counts_once_in_dry_and_write_modes(self):
+        engine = make_engine(self)
+        store.insert_prediction_if_absent(engine, make_row(1, market=None), now=NOW)
+        store.insert_prediction_if_absent(engine, make_row(1), now=NOW)
+        for write in (False, True):
+            report = nba_daily.grade_finished(
+                engine, TODAY, now=TIPOFF + timedelta(hours=5),
+                fetch=lambda _: [finished(1, 112, 101)], write=write,
+            )
+            self.assertEqual(report.graded, 1)
+        with engine.connect() as connection:
+            self.assertEqual(connection.execute(text(
+                "select count(*) from public.nba_predictions where status = 'graded'"
+            )).scalar(), 2)
+
+
 
 class StorePredictionsTests(unittest.TestCase):
     def test_second_run_adds_nothing_and_past_tipoff_is_refused(self):
@@ -91,6 +130,18 @@ class StorePredictionsTests(unittest.TestCase):
         self.assertEqual(second[InsertOutcome.PAST_TIPOFF], 1)
         with engine.connect() as connection:
             self.assertEqual(connection.execute(text("select count(*) from public.nba_predictions")).scalar(), 1)
+
+    def test_live_write_rechecks_clock_before_each_insert(self):
+        engine = make_engine(self)
+        rows = (make_row(1), make_row(2))
+        run = predict.PredictionRun(
+            tuple(predict.PlannedPrediction(r, "A", "B") for r in rows), (), date(2026, 11, 16), (1994, 2026), 100
+        )
+        with mock.patch.object(nba_daily, "datetime", wraps=datetime) as clock:
+            clock.now.side_effect = [TIPOFF - timedelta(seconds=1), TIPOFF]
+            counts = nba_daily.store_predictions(engine, run)
+        self.assertEqual(counts[InsertOutcome.INSERTED], 1)
+        self.assertEqual(counts[InsertOutcome.PAST_TIPOFF], 1)
 
 
 class RunTests(unittest.TestCase):
