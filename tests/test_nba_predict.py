@@ -192,9 +192,21 @@ class FetchTests(unittest.TestCase):
             seen.append(day)
             return [scheduled(1, 1, 2, tip), scheduled(10 + len(seen), 3, 4, tip)]
 
-        games = predict.fetch_upcoming(date(2026, 11, 17), fetch=fetch)
-        self.assertEqual(seen, [date(2026, 11, 17), date(2026, 11, 18)])
-        self.assertEqual([g.game_id for g in games], [1, 11, 12])
+        games = predict.fetch_upcoming(date(2026, 11, 17), now=tip - timedelta(hours=1), fetch=fetch)
+        self.assertEqual(seen, [date(2026, 11, 16), date(2026, 11, 17), date(2026, 11, 18)])
+        self.assertEqual([g.game_id for g in games], [1, 11, 12, 13])
+
+    def test_previous_espn_date_includes_only_not_started_games(self):
+        today = date(2026, 11, 18)
+        now = datetime(2026, 11, 18, 2, tzinfo=UTC)
+        board = [
+            scheduled(1, 1, 2, now + timedelta(minutes=90), line=4.5),
+            scheduled(2, 3, 4, now + timedelta(hours=2)),
+            scheduled(3, 1, 2, now),
+            scheduled(4, 1, 2, now + timedelta(hours=1), state="in"),
+        ]
+        games = predict.fetch_upcoming(today, now=now, fetch=lambda day: board if day == today - timedelta(days=1) else [])
+        self.assertEqual([game.game_id for game in games], [1, 2])
 
 
 if __name__ == "__main__":

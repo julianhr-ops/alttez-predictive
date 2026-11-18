@@ -280,12 +280,16 @@ def build_predictions(
     )
 
 
-def fetch_upcoming(today: date, *, fetch: ScoreboardFetch = data.fetch_espn_scoreboard) -> list[data.NbaScheduledGame]:
-    """ESPN scoreboard for ``today`` and the next day (UTC), deduplicated by game id."""
+def fetch_upcoming(
+    today: date, *, now: datetime | None = None, fetch: ScoreboardFetch = data.fetch_espn_scoreboard
+) -> list[data.NbaScheduledGame]:
+    """Fetch three ESPN calendar dates and retain games that have not started."""
+    now = now or datetime.now(UTC)
     seen: dict[int, data.NbaScheduledGame] = {}
-    for offset in (0, 1):
+    for offset in (-1, 0, 1):
         for game in fetch(today + timedelta(days=offset)):
-            seen.setdefault(game.game_id, game)
+            if game.state == "pre" and game.start_time > now:
+                seen.setdefault(game.game_id, game)
     return list(seen.values())
 
 
@@ -300,4 +304,4 @@ def predict_upcoming(
     """Gate on freshness, then fit (unless ``models`` is given) and predict the upcoming games."""
     check_freshness(inputs.newest_completed, inputs.scheduled_dates, today)
     fitted = models if models is not None else fit_for_prediction(inputs)
-    return build_predictions(fitted, inputs, fetch_upcoming(today, fetch=fetch), now=now)
+    return build_predictions(fitted, inputs, fetch_upcoming(today, now=now, fetch=fetch), now=now)
