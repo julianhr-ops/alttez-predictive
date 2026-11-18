@@ -196,7 +196,7 @@ SOCCER_COLUMNS = [
 
 def _command_line(source_command: str | list[str]) -> str:
     commands = [source_command] if isinstance(source_command, str) else source_command
-    return "".join(f"<code>{fmt.esc(command)}</code> " for command in commands).strip()
+    return "<br>".join(f"<code>{fmt.esc(command)}</code>" for command in commands)
 
 
 def nba_upcoming_html(upcoming: dict[str, Any]) -> Html:
