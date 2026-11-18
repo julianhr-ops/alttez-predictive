@@ -131,6 +131,18 @@ class StorePredictionsTests(unittest.TestCase):
         with engine.connect() as connection:
             self.assertEqual(connection.execute(text("select count(*) from public.nba_predictions")).scalar(), 1)
 
+    def test_live_write_rechecks_clock_before_each_insert(self):
+        engine = make_engine(self)
+        rows = (make_row(1), make_row(2))
+        run = predict.PredictionRun(
+            tuple(predict.PlannedPrediction(r, "A", "B") for r in rows), (), date(2026, 11, 16), (1994, 2026), 100
+        )
+        with mock.patch.object(nba_daily, "datetime", wraps=datetime) as clock:
+            clock.now.side_effect = [TIPOFF - timedelta(seconds=1), TIPOFF]
+            counts = nba_daily.store_predictions(engine, run)
+        self.assertEqual(counts[InsertOutcome.INSERTED], 1)
+        self.assertEqual(counts[InsertOutcome.PAST_TIPOFF], 1)
+
 
 class RunTests(unittest.TestCase):
     @classmethod

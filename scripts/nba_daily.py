@@ -97,10 +97,12 @@ def grade_finished(
     return GradeReport(graded=len(graded), unresolved=unresolved_old + still_open)
 
 
-def store_predictions(engine: Engine, run: predict.PredictionRun, *, now: datetime) -> dict[store.InsertOutcome, int]:
+def store_predictions(
+    engine: Engine, run: predict.PredictionRun, *, now: datetime | None = None
+) -> dict[store.InsertOutcome, int]:
     counts = {outcome: 0 for outcome in store.InsertOutcome}
     for planned in run.predictions:
-        counts[store.insert_prediction_if_absent(engine, planned.row, now=now)] += 1
+        counts[store.insert_prediction_if_absent(engine, planned.row, now=now or datetime.now(UTC))] += 1
     return counts
 
 
@@ -117,6 +119,7 @@ def resolve_engine(args: argparse.Namespace) -> Engine | None:
 def run(
     args: argparse.Namespace, *, fetch: ScoreboardFetch = data.fetch_espn_scoreboard, now: datetime | None = None
 ) -> tuple[int, str]:
+    fixed_now = now
     now = now or datetime.now(UTC)
     today = date.fromisoformat(args.date) if args.date else now.date()
     notes: list[str] = []
@@ -135,7 +138,7 @@ def run(
             print(f"ERROR: {exc}", file=sys.stderr)
             return EXIT_STALE_DATA, str(exc)
         if write:
-            counts = store_predictions(engine, prediction_run, now=now)
+            counts = store_predictions(engine, prediction_run, now=fixed_now)
             notes.append(
                 f"stored {counts[store.InsertOutcome.INSERTED]} new, "
                 f"{counts[store.InsertOutcome.UPGRADED]} upgraded to the blend after a line appeared, "
