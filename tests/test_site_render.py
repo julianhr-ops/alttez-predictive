@@ -135,7 +135,15 @@ class ContentTests(SiteTestCase):
 
     def test_headline_numbers_come_from_the_data(self):
         index = self.page(self.build(), "index.html")
-        for expected in ("0.2113 vs 0.2087", "-0.0728", "[-0.0836, -0.0623]", "10,967", "40 of 44", "42"):
+        for expected in (
+            "0.2070 vs 0.2067",
+            "Live: served 0.2113 vs market 0.2087 (n = 36 graded games",
+            "-0.0728",
+            "[-0.0836, -0.0623]",
+            "10,967",
+            "40 of 44",
+            "42",
+        ):
             self.assertIn(expected, index)
 
     def test_soccer_gain_without_interval_note_still_shows_the_difference(self):
@@ -210,7 +218,22 @@ class ContentTests(SiteTestCase):
         )
         out = self.build(**{"nba_scoreboard.json": board})
         self.assertIn("No live predictions have been graded yet", self.page(out, "nba.html"))
-        self.assertIn(">n/a<", self.page(out, "index.html"))
+        index = self.page(out, "index.html")
+        self.assertIn("0.2070 vs 0.2067", index)
+        self.assertIn("walk-forward validation, 7,764 games", index)
+        self.assertIn("No live graded game with a market line yet", index)
+        self.assertNotIn("served 0.2113", index)
+
+    def test_headline_card_hides_live_numbers_until_a_lined_game_is_graded(self):
+        board = load_fixture("nba_scoreboard.json")
+        board.update(n_graded=3, n_market=0, market={"brier": None, "accuracy": None}, paired_brier_diff=None)
+        index = self.page(self.build(**{"nba_scoreboard.json": board}), "index.html")
+        self.assertIn("0.2070 vs 0.2067", index)
+        self.assertIn("No live graded game with a market line yet", index)
+        board.update(n_market=1, market={"brier": 0.25, "accuracy": 1.0})
+        index = self.page(self.build(**{"nba_scoreboard.json": board}), "index.html")
+        self.assertIn("0.2070 vs 0.2067", index)
+        self.assertIn("Live: served 0.2113 vs market 0.2500 (n = 1 graded games with a market line).", index)
 
     def test_validation_takeaway_names_best_and_the_poisson_gap(self):
         soccer = self.page(self.build(), "soccer.html")
