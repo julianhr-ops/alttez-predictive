@@ -379,14 +379,35 @@ def soccer_gain(validation: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def index_stats_html(data: SiteData) -> Html:
+def nba_headline(data: SiteData) -> tuple[str, str]:
+    """Validated blend against market close, plus the live comparison once a lined game is graded."""
+    validation = data.nba_validation
+    rows = validation["rows"]
+    blend = next((r for r in rows if _has_prefix(r["model"], "elo + market blend")), None)
+    market_row = next((r for r in rows if _has_prefix(r["model"], "market close")), None)
+    if blend is None or market_row is None:
+        value, note = fmt.MISSING, "The validation file has no blend or market close row."
+    else:
+        value = f"{fmt.brier(blend['brier'])} vs {fmt.brier(market_row['brier'])}"
+        note = (
+            f"Elo + market blend against market close, walk-forward validation, "
+            f"{fmt.count(validation['n_with_line'])} games. Lower is better."
+        )
     board = data.scoreboard
     served, market = board["served"]["brier"], board["market"]["brier"]
-    if served is None or market is None:
-        nba_value, nba_note = fmt.MISSING, "No live graded games with a market line yet."
+    if board["n_market"] >= 1 and served is not None and market is not None:
+        note += (
+            f" Live: served {fmt.brier(served)} vs market {fmt.brier(market)} "
+            f"(n = {fmt.count(board['n_market'])} graded games with a market line)."
+        )
     else:
-        nba_value = f"{fmt.brier(served)} vs {fmt.brier(market)}"
-        nba_note = "Served prediction against the market close on live graded games. Lower is better."
+        note += " No live graded game with a market line yet."
+    return value, note
+
+
+def index_stats_html(data: SiteData) -> Html:
+    board = data.scoreboard
+    nba_value, nba_note = nba_headline(data)
     before = board["predicted_before_tipoff"]
     gain = soccer_gain(data.soccer_validation)
     if gain is None:
@@ -405,7 +426,7 @@ def index_stats_html(data: SiteData) -> Html:
     nba_games = data.nba_validation["n_games"]
     total = nba_games + (gain["n"] if gain else 0)
     cards = [
-        ("NBA served Brier against market close", nba_value, nba_note),
+        ("NBA Brier against market close", nba_value, nba_note),
         (
             "NBA games graded live",
             fmt.count(board["n_graded"]),
