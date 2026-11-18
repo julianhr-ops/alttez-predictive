@@ -99,6 +99,22 @@ class GradeFinishedTests(unittest.TestCase):
         pending = store.load_ungraded(self.engine, DateWindow(date(2026, 11, 1), date(2026, 11, 30)))
         self.assertEqual({row.game_id for row in pending}, {1, 401705090})
 
+    def test_upgraded_game_counts_once_in_dry_and_write_modes(self):
+        engine = make_engine(self)
+        store.insert_prediction_if_absent(engine, make_row(1, market=None), now=NOW)
+        store.insert_prediction_if_absent(engine, make_row(1), now=NOW)
+        for write in (False, True):
+            report = nba_daily.grade_finished(
+                engine, TODAY, now=TIPOFF + timedelta(hours=5),
+                fetch=lambda _: [finished(1, 112, 101)], write=write,
+            )
+            self.assertEqual(report.graded, 1)
+        with engine.connect() as connection:
+            self.assertEqual(connection.execute(text(
+                "select count(*) from public.nba_predictions where status = 'graded'"
+            )).scalar(), 2)
+
+
 
 class StorePredictionsTests(unittest.TestCase):
     def test_second_run_adds_nothing_and_past_tipoff_is_refused(self):

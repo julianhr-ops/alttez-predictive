@@ -77,24 +77,24 @@ def grade_finished(
             for game in fetch(today - timedelta(days=offset)):
                 if game.completed and game.home_score is not None and game.away_score is not None:
                     finished[game.game_id] = game
-    graded = 0
+    graded: set[int] = set()
     for row in pending:
         game = finished.get(row.game_id)
         if game is None:
             continue
         if not write:
-            graded += 1
+            graded.add(row.game_id)
         else:
             try:
                 if store.grade_prediction(
                     engine, row.game_id, row.model_version, row.served_model, game.home_score, game.away_score,
                     row.p_home_served, now=now,
                 ):
-                    graded += 1
+                    graded.add(row.game_id)
             except ValueError:
                 logger.exception("Unable to grade NBA game %s", row.game_id)
     still_open = len({r.game_id for r in pending if r.game_id not in finished and r.game_date < today})
-    return GradeReport(graded=graded, unresolved=unresolved_old + still_open)
+    return GradeReport(graded=len(graded), unresolved=unresolved_old + still_open)
 
 
 def store_predictions(engine: Engine, run: predict.PredictionRun, *, now: datetime) -> dict[store.InsertOutcome, int]:
