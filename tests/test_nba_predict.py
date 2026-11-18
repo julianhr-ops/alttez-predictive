@@ -14,7 +14,7 @@ from tests.nba_synthetic import SMALL_GRID, SMALL_VANILLA, synthetic_games
 def scheduled(game_id, home, away, start, *, line=None, state="pre", season=2017, season_type=2, provider="DraftKings"):
     return data.NbaScheduledGame(
         game_id=game_id, start_time=start, season=season, season_type=season_type, home_id=home, away_id=away,
-        home_abbreviation=f"T{home}", away_abbreviation=f"T{away}", neutral=False, state=state, home_score=None,
+        home_abbreviation=f"T{home}", away_abbreviation=f"T{away}", neutral=False, state=state, completed=state == "post", home_score=None,
         away_score=None, home_margin_line=line, total_line=None if line is None else 215.5,
         odds_provider=None if line is None else provider,
     )

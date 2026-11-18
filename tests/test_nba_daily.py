@@ -76,6 +76,29 @@ class GradeFinishedTests(unittest.TestCase):
         report = nba_daily.grade_finished(engine, TODAY, now=NOW, fetch=self.fetch, write=True)
         self.assertEqual((report.graded, self.calls), (0, []))
 
+    def test_postponed_and_invalid_results_do_not_block_other_games(self):
+        postponed = {
+            "id": "401705090", "date": "2025-01-10T03:30Z", "season": {"year": 2025, "type": 2},
+            "competitions": [{
+                "status": {"type": {"name": "STATUS_POSTPONED", "state": "post", "completed": False}},
+                "competitors": [
+                    {"homeAway": "home", "team": {"id": "13", "abbreviation": "LAL"}, "score": "0"},
+                    {"homeAway": "away", "team": {"id": "30", "abbreviation": "CHA"}, "score": "0"},
+                ],
+            }],
+        }
+        game = data.parse_espn_scoreboard({"events": [postponed]})[0]
+        store.insert_prediction_if_absent(self.engine, make_row(401705090), now=NOW)
+        board = [game, finished(1, 0, 0), finished(2, 112, 101)]
+        with self.assertLogs("scripts.nba_daily", level="WARNING") as logs:
+            report = nba_daily.grade_finished(
+                self.engine, TODAY, now=TIPOFF + timedelta(hours=5), fetch=lambda _: board, write=True
+            )
+        self.assertEqual(report.graded, 1)
+        self.assertIn("1", " ".join(logs.output))
+        pending = store.load_ungraded(self.engine, DateWindow(date(2026, 11, 1), date(2026, 11, 30)))
+        self.assertEqual({row.game_id for row in pending}, {1, 401705090})
+
 
 class StorePredictionsTests(unittest.TestCase):
     def test_second_run_adds_nothing_and_past_tipoff_is_refused(self):

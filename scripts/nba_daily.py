@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import logging
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ EARLIEST_GAME_DATE = date(2000, 1, 1)
 EXIT_DELIVERY_FAILED = 1
 EXIT_DATA_ERROR = 2
 EXIT_STALE_DATA = 3
+logger = logging.getLogger(__name__)
 
 ScoreboardFetch = Callable[[date], list[data.NbaScheduledGame]]
 
@@ -73,7 +75,7 @@ def grade_finished(
     if pending:
         for offset in range(GRADING_LOOKBACK_DAYS + 1):
             for game in fetch(today - timedelta(days=offset)):
-                if game.state == "post" and game.home_score is not None and game.away_score is not None:
+                if game.completed and game.home_score is not None and game.away_score is not None:
                     finished[game.game_id] = game
     graded = 0
     for row in pending:
@@ -82,11 +84,15 @@ def grade_finished(
             continue
         if not write:
             graded += 1
-        elif store.grade_prediction(
-            engine, row.game_id, row.model_version, row.served_model, game.home_score, game.away_score,
-            row.p_home_served, now=now,
-        ):
-            graded += 1
+        else:
+            try:
+                if store.grade_prediction(
+                    engine, row.game_id, row.model_version, row.served_model, game.home_score, game.away_score,
+                    row.p_home_served, now=now,
+                ):
+                    graded += 1
+            except ValueError:
+                logger.exception("Unable to grade NBA game %s", row.game_id)
     still_open = len({r.game_id for r in pending if r.game_id not in finished and r.game_date < today})
     return GradeReport(graded=graded, unresolved=unresolved_old + still_open)
 

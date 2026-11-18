@@ -88,6 +88,7 @@ class NbaScheduledGame:
     away_abbreviation: str
     neutral: bool
     state: str
+    completed: bool
     home_score: int | None
     away_score: int | None
     home_margin_line: float | None
@@ -273,6 +274,7 @@ def _parse_event(event: dict[str, Any]) -> NbaScheduledGame:
             away_abbreviation=str(away["team"]["abbreviation"]),
             neutral=bool(competition.get("neutralSite", False)),
             state=str(state),
+            completed=competition["status"]["type"]["completed"],
             home_score=int(home["score"]) if started else None,
             away_score=int(away["score"]) if started else None,
             home_margin_line=_home_margin_line(odds) if odds else None,
