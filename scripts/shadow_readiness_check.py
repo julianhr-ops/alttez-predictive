@@ -22,8 +22,6 @@ from alttez.ingestion.provider_healthcheck import run_healthcheck
 
 
 REQUIRED_ENV_KEYS = (
-    "ALTTEZ_API_FOOTBALL_KEY",
-    "ALTTEZ_FOOTBALL_DATA_KEY",
     "SUPABASE_DB_URL",
 )
 PLACEHOLDERS = {"", "replace-me", "your_api_key_here", "changeme"}
@@ -124,8 +122,6 @@ def _check_python_sources() -> bool:
 def _check_providers() -> bool:
     print("\n[providers]")
     ok = True
-    # ESPN is the keyless primary live provider; football_data_org is the fallback.
-    # api_football was retired (dead key) so it is no longer a readiness gate.
     for item in run_healthcheck("espn,football_data_org,local_json"):
         print(f"{item['provider']} configured={item['configured']}")
         if item["provider"] == "espn":
@@ -160,7 +156,7 @@ def _check_model() -> bool:
         loader = InternationalLoader()
         df = loader.fetch_data()
         data_source = "international_loader"
-    except Exception as exc:  # noqa: BLE001 - readiness should report and degrade safely.
+    except Exception as exc:
         print(f"historical_loader=error detail={exc}")
         if not csv_path.exists():
             print(f"historical_csv=missing path={csv_path}")
@@ -195,7 +191,7 @@ def _check_live_api(target_date: date) -> bool:
     print("\n[live-api]")
     try:
         fixtures, _, provider_used, attempts = fetch_live_fixtures_from_stack(target_date)
-    except Exception as exc:  # noqa: BLE001 - readiness should report instead of crashing.
+    except Exception as exc:
         print(f"live_api=error detail={exc}")
         return False
 

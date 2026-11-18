@@ -3,6 +3,9 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from sqlalchemy import create_engine, text
+
+from alttez.api.migrations import MIGRATION_PROBES
 
 from alttez.api.migrations import discover_migration_files, discover_pending_migration_files, render_migration_plan
 
@@ -28,6 +31,42 @@ class MigrationRunnerTest(unittest.TestCase):
 
         self.assertEqual([item.name for item in pending_files], ["002_enrichment.sql", "003_indexes.sql"])
         self.assertEqual(applied_names, {"001_base.sql"})
+
+    def test_nba_probes_distinguish_old_and_new_primary_keys(self):
+        engine = create_engine("sqlite://")
+        self.addCleanup(engine.dispose)
+        with engine.begin() as connection:
+            connection.exec_driver_sql("attach database ':memory:' as information_schema")
+            connection.exec_driver_sql("create table information_schema.tables (table_schema text, table_name text)")
+            connection.exec_driver_sql(
+                "create table information_schema.table_constraints "
+                "(constraint_schema text, constraint_name text, table_schema text, table_name text, constraint_type text)"
+            )
+            connection.exec_driver_sql(
+                "create table information_schema.key_column_usage "
+                "(constraint_schema text, constraint_name text, table_schema text, table_name text, "
+                "column_name text, ordinal_position integer)"
+            )
+            probe15 = text(MIGRATION_PROBES["015_nba_predictions.sql"])
+            probe16 = text(MIGRATION_PROBES["016_nba_predictions_key_served_model.sql"])
+            self.assertFalse(connection.execute(probe15).scalar())
+            connection.exec_driver_sql("insert into information_schema.tables values ('public', 'nba_predictions')")
+            connection.exec_driver_sql(
+                "insert into information_schema.table_constraints values "
+                "('public', 'pk_nba_predictions', 'public', 'nba_predictions', 'PRIMARY KEY')"
+            )
+            for position, name in enumerate(("game_id", "model_version"), 1):
+                connection.execute(text(
+                    "insert into information_schema.key_column_usage values "
+                    "('public', 'pk_nba_predictions', 'public', 'nba_predictions', :name, :position)"
+                ), {"name": name, "position": position})
+            self.assertTrue(connection.execute(probe15).scalar())
+            self.assertFalse(connection.execute(probe16).scalar())
+            connection.exec_driver_sql(
+                "insert into information_schema.key_column_usage values "
+                "('public', 'pk_nba_predictions', 'public', 'nba_predictions', 'served_model', 3)"
+            )
+            self.assertTrue(connection.execute(probe16).scalar())
 
 
 if __name__ == "__main__":

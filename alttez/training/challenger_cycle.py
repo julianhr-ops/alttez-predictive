@@ -15,14 +15,16 @@ from sklearn.metrics import log_loss
 from xgboost import XGBRegressor
 
 from alttez.api.db import get_engine
+from alttez.evaluation.baselines import baseline_probabilities
 from alttez.evaluation.metrics import ranked_probability_score
+from alttez.evaluation.paired import PairedDiff, brier_1x2_per_game, paired_bootstrap_diff
 from alttez.evaluation.regulation_points import (
     max_regulation_points,
     points_optimal_prediction,
     regulation_points,
     summarize_regulation_points,
 )
-from alttez.experiments.tournament_oracle import DEFAULT_DIXON_COLES_RHO, build_probability_matrix
+from alttez.experiments.tournament_oracle import build_probability_matrix
 from alttez.features.klement import (
     MODEL_FEATURE_COLUMNS,
     build_klement_feature_state,
@@ -33,13 +35,16 @@ from alttez.features.selection import snap_split_index
 from alttez.operations.prediction_memory import (
     auto_promotion_enabled,
     brier_score_1x2,
-    get_active_model_family,
-    get_active_model_version,
     load_active_model_record,
     production_supported_model_families,
     reflect_prediction_tables,
     set_active_model_version_record,
     upsert_model_version_record,
+)
+from alttez.training.production_champion import (
+    ProductionChampionConfig,
+    ProductionConfigUnavailable,
+    resolve_production_champion_config,
 )
 
 
@@ -50,17 +55,10 @@ DEFAULT_REPORT_DIR = Path("artifacts/model-evals")
 DEFAULT_CHALLENGER_VERSION = "xgboost-challenger-v2"
 DEFAULT_EVALUATION_MATCHES = 250
 DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE = 0.01
-DEFAULT_INCUMBENT_REGRESSION_EPSILON = 1e-9
-# Tolerancia para el RPS: el retador debe igualar o mejorar el RPS del champion
-# (mismo espiritu que el Brier, sin exigir margen arbitrario). Empeorar el RPS por
-# encima de este epsilon lo descalifica aunque el Brier nominal mejore.
 DEFAULT_PROMOTION_RPS_TOLERANCE = 1e-9
-# Umbral de significancia para la prueba de Diebold-Mariano. Solo aplica en la ruta
-# de auto-promocion: la diferencia de perdida debe ser estadisticamente significativa.
-DEFAULT_DM_SIGNIFICANCE_LEVEL = 0.05
+DEFAULT_MIN_PROMOTION_MATCHES = 200
 DEFAULT_CHAMPION_REFIT_INTERVAL = 25
 DEFAULT_MAX_GOALS = 7
-# Single source of truth lives in alttez.features.klement; aliased for compatibility.
 FEATURE_COLUMNS = MODEL_FEATURE_COLUMNS
 
 
@@ -153,8 +151,6 @@ def _score_prediction_row(
         "predicted_outcome": predicted_outcome,
         "actual_outcome": actual_outcome,
         "brier": brier_score_1x2(prob_home, prob_draw, prob_away, actual_outcome),
-        # RPS respeta la ordinalidad del 1X2 (H->D->A); complementa el Brier nominal
-        # y alimenta tanto la metrica agregada como la guardia de promocion.
         "rps": ranked_probability_score(prob_home, prob_draw, prob_away, actual_outcome),
         "prob_home": prob_home,
         "prob_draw": prob_draw,
@@ -185,7 +181,7 @@ def expected_calibration_error(eval_df: pd.DataFrame, *, n_bins: int = 10) -> fl
 
     bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
     ece = 0.0
-    for lower, upper in zip(bin_edges[:-1], bin_edges[1:]):
+    for lower, upper in zip(bin_edges[:-1], bin_edges[1:], strict=False):
         in_bin = (confidence > lower) & (confidence <= upper)
         bin_size = int(in_bin.sum())
         if bin_size == 0:
@@ -215,9 +211,7 @@ def _summarize_probability_rows(
         "accuracy_1x2": float((eval_df["predicted_outcome"] == eval_df["actual_outcome"]).mean()),
         "exact_score_hit_rate": float(eval_df["exact_hit"].mean()),
         "expected_calibration_error": expected_calibration_error(eval_df),
-        # Serie de perdida Brier por partido (orden del holdout) para la prueba de
-        # Diebold-Mariano retador-vs-incumbente. Es metadata interna, no una metrica.
-        "brier_losses": [float(value) for value in eval_df["brier"].tolist()],
+        "brier_losses": [float(value) for value in brier_1x2_per_game(probability_matrix, eval_df["actual_outcome"])],
         **summarize_regulation_points(rows),
     }
     if extra:
@@ -234,11 +228,13 @@ def _champion_lambda_stream(
     train_df: pd.DataFrame,
     holdout_df: pd.DataFrame,
     *,
+    config: ProductionChampionConfig,
     champion_refit_interval: int = DEFAULT_CHAMPION_REFIT_INTERVAL,
 ) -> tuple[list[tuple[float, float]], int]:
     """Per-row Poisson champion (lambda_home, lambda_away) with block refits.
 
-    Returns the lambda stream (ordered by date) and the number of refits, so champion
+    The engine is built from the production configuration, not from defaults. Returns
+    the lambda stream (ordered by date) and the number of refits, so champion
     evaluation and the ensemble blend share one causal source of champion lambdas.
     """
 
@@ -251,13 +247,7 @@ def _champion_lambda_stream(
     for index, row in enumerate(ordered_holdout.itertuples(index=False)):
         if engine is None or index % champion_refit_interval == 0:
             cutoff = pd.to_datetime(row.date).date().isoformat()
-            engine = PoissonEngine(
-                years_window=4,
-                prior_matches=8,
-                min_history_matches=5,
-                recency_half_life_days=365,
-                recent_form_matches=6,
-            )
+            engine = PoissonEngine(**config.poisson_kwargs)
             engine.fit(history_df, target_date=cutoff)
             refit_count += 1
 
@@ -277,23 +267,22 @@ def _xgb_lambda_stream(artifact_bundle: dict[str, Any], holdout_df: pd.DataFrame
     models = artifact_bundle["models"]
     lambdas_home = np.maximum(np.asarray(models["home_goals"].predict(x_holdout), dtype=float), 0.05)
     lambdas_away = np.maximum(np.asarray(models["away_goals"].predict(x_holdout), dtype=float), 0.05)
-    return [(float(h), float(a)) for h, a in zip(lambdas_home, lambdas_away)]
+    return [(float(h), float(a)) for h, a in zip(lambdas_home, lambdas_away, strict=False)]
 
 
 def _score_lambda_stream(
     lambdas: list[tuple[float, float]],
     holdout_df: pd.DataFrame,
     *,
+    rho: float,
     model_version: str,
     model_family: str,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
     rows = []
-    for (lambda_home, lambda_away), row in zip(lambdas, ordered_holdout.itertuples(index=False)):
-        prob_matrix = build_probability_matrix(
-            lambda_home, lambda_away, max_goals=DEFAULT_MAX_GOALS, rho=DEFAULT_DIXON_COLES_RHO
-        )
+    for (lambda_home, lambda_away), row in zip(lambdas, ordered_holdout.itertuples(index=False), strict=False):
+        prob_matrix = build_probability_matrix(lambda_home, lambda_away, max_goals=DEFAULT_MAX_GOALS, rho=rho)
         rows.append(
             _score_prediction_row(
                 prob_matrix=prob_matrix,
@@ -309,16 +298,18 @@ def _evaluate_poisson_champion(
     train_df: pd.DataFrame,
     holdout_df: pd.DataFrame,
     *,
+    config: ProductionChampionConfig,
     champion_refit_interval: int = DEFAULT_CHAMPION_REFIT_INTERVAL,
 ) -> dict[str, Any]:
     lambdas, refit_count = _champion_lambda_stream(
-        train_df, holdout_df, champion_refit_interval=champion_refit_interval
+        train_df, holdout_df, config=config, champion_refit_interval=champion_refit_interval
     )
     return _score_lambda_stream(
         lambdas,
         holdout_df,
-        model_version=get_active_model_version(),
-        model_family=get_active_model_family(),
+        rho=config.rho,
+        model_version=config.model_version,
+        model_family=config.model_family,
         extra={"refit_count": refit_count, "champion_refit_interval": champion_refit_interval},
     )
 
@@ -328,6 +319,7 @@ def evaluate_lambda_blend(
     challenger_lambdas: list[tuple[float, float]],
     holdout_df: pd.DataFrame,
     *,
+    rho: float,
     weight_grid: list[float] | None = None,
 ) -> dict[str, Any]:
     """Grid-search the blend weight w for lambda = w*challenger + (1-w)*champion.
@@ -338,17 +330,18 @@ def evaluate_lambda_blend(
     """
 
     if weight_grid is None:
-        weight_grid = [round(0.1 * i, 1) for i in range(11)]  # 0.0 .. 1.0
+        weight_grid = [round(0.1 * i, 1) for i in range(11)]
 
     best: dict[str, Any] | None = None
     for weight in weight_grid:
         blended = [
             (weight * ch_h + (1.0 - weight) * cp_h, weight * ch_a + (1.0 - weight) * cp_a)
-            for (cp_h, cp_a), (ch_h, ch_a) in zip(champion_lambdas, challenger_lambdas)
+            for (cp_h, cp_a), (ch_h, ch_a) in zip(champion_lambdas, challenger_lambdas, strict=False)
         ]
         summary = _score_lambda_stream(
             blended,
             holdout_df,
+            rho=rho,
             model_version="alttez-ensemble-v1",
             model_family="ensemble",
             extra={"blend_weight": weight},
@@ -360,9 +353,6 @@ def evaluate_lambda_blend(
 
 DEFAULT_MIN_EARLY_STOPPING_SAMPLES = 50
 
-# Recencia para el ponderado del entrenamiento XGBoost. Default 365d para paridad
-# con PoissonEngine.recency_half_life_days (features/poisson.py): el campeon y el
-# retador decaen el pasado al mismo ritmo en vez de tratar todo el historico igual.
 DEFAULT_XGB_TIME_DECAY_HALFLIFE_DAYS = 365
 XGB_TIME_DECAY_HALFLIFE_ENV = "ALTTEZ_XGB_TIME_DECAY_HALFLIFE_DAYS"
 
@@ -415,8 +405,6 @@ def _split_training_and_validation(train_df: pd.DataFrame) -> tuple[pd.DataFrame
 
     validation_size = max(10, len(ordered) // 10)
     validation_size = min(validation_size, len(ordered) - 10)
-    # Snap to a date boundary so the validation set never shares a match-day with
-    # the training core (avoids intra-day leakage into eval_set).
     split_index = snap_split_index(ordered, len(ordered) - validation_size, "date")
     if split_index <= 0 or split_index >= len(ordered):
         return ordered, None
@@ -441,8 +429,7 @@ def _build_goal_regressor(use_early_stopping: bool = True) -> XGBRegressor:
         n_jobs=-1,
     )
     if use_early_stopping:
-        # XGBoost raises if early_stopping_rounds is set without an eval_set, so the
-        # flag is only added when a disjoint validation set is available.
+        # XGBoost 3.2 raises ValueError if early_stopping_rounds is set without an eval_set.
         params["early_stopping_rounds"] = 40
     return XGBRegressor(**params)
 
@@ -452,9 +439,6 @@ def _fit_goal_models(train_df: pd.DataFrame) -> dict[str, Any]:
     use_early_stopping = validation_df is not None
     x_train = train_core[FEATURE_COLUMNS].fillna(0.0)
 
-    # Ponderado por recencia: el corte (max fecha del nucleo) pesa ~1.0; el
-    # pasado decae con half-life. sample_weight se alinea por posicion con x_train
-    # (mismo orden de filas que train_core). El eval_set queda sin ponderar.
     half_life_days = _resolve_time_decay_half_life()
     reference_date = train_core["date"].max()
     sample_weight = _compute_time_decay_weights(train_core["date"], reference_date, half_life_days)
@@ -482,13 +466,12 @@ def _fit_goal_models(train_df: pd.DataFrame) -> dict[str, Any]:
         home_model.fit(x_train, train_core["home_score"], sample_weight=sample_weight, verbose=False)
         away_model.fit(x_train, train_core["away_score"], sample_weight=sample_weight, verbose=False)
 
-    # Average gain importance across both goal models, ranked, for auditability.
     home_imp = np.asarray(getattr(home_model, "feature_importances_", np.zeros(len(FEATURE_COLUMNS))), dtype=float)
     away_imp = np.asarray(getattr(away_model, "feature_importances_", np.zeros(len(FEATURE_COLUMNS))), dtype=float)
     mean_imp = (home_imp + away_imp) / 2.0
     feature_importance = dict(
         sorted(
-            ((col, float(val)) for col, val in zip(FEATURE_COLUMNS, mean_imp)),
+            ((col, float(val)) for col, val in zip(FEATURE_COLUMNS, mean_imp, strict=False)),
             key=lambda item: item[1],
             reverse=True,
         )
@@ -531,11 +514,9 @@ def _train_challenger(train_df: pd.DataFrame) -> dict[str, Any]:
 def _evaluate_challenger(
     artifact_bundle: dict[str, Any],
     holdout_df: pd.DataFrame,
+    *,
+    rho: float,
 ) -> dict[str, Any]:
-    # Holdout features in challenger_df are already causal (each row's elo_*_before,
-    # recent form and knockout weight only depend on earlier matches), so we can score
-    # the whole window in a single vectorized pass instead of rebuilding the feature
-    # state per match. The lambda values are identical to a per-row rebuild.
     ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
     feature_columns = list(artifact_bundle.get("feature_columns") or FEATURE_COLUMNS)
     x_holdout = ordered_holdout[feature_columns].fillna(0.0)
@@ -550,7 +531,7 @@ def _evaluate_challenger(
             float(lambdas_home[index]),
             float(lambdas_away[index]),
             max_goals=DEFAULT_MAX_GOALS,
-            rho=DEFAULT_DIXON_COLES_RHO,
+            rho=rho,
         )
         rows.append(
             _score_prediction_row(
@@ -569,128 +550,161 @@ def _evaluate_challenger(
     )
 
 
-def _incumbent_brier(active_record: dict[str, Any] | None) -> float | None:
-    """Brier of the currently-active production model, if recoverable."""
-
-    if not active_record:
-        return None
-    payload = active_record.get("metrics_payload")
-    if isinstance(payload, dict) and payload.get("brier_score") is not None:
-        try:
-            return float(payload["brier_score"])
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def diebold_mariano(loss_a: list[float], loss_b: list[float]) -> tuple[float, float]:
-    """Prueba de Diebold-Mariano sobre dos series de perdida por partido (menor es mejor).
-
-    Compara la precision predictiva de dos modelos a partir de su perdida por partido
-    (p.ej. Brier por partido del retador vs el incumbente). La diferencia ``d = loss_a -
-    loss_b`` se promedia y se estandariza por su error estandar. Un ``dm_stat`` negativo
-    indica que ``loss_a`` (modelo A) tiene menor perdida -> A es mejor.
-
-    Aproximacion: se usa la varianza muestral simple (sin correccion HAC de Newey-West
-    para autocorrelacion ni el ajuste de muestra chica de Harvey-Leybourne-Newbold) y un
-    p-valor bilateral por aproximacion normal sobre ``dm_stat``. Es adecuado para perdidas
-    por partido razonablemente independientes; documentado como aproximacion.
-
-    Casos degenerados (longitudes distintas o < 2, o varianza ~0 de la diferencia) NO
-    levantan excepcion: devuelven ``(0.0, 1.0)`` (no significativo).
-    """
-
-    series_a = np.asarray(list(loss_a), dtype=float)
-    series_b = np.asarray(list(loss_b), dtype=float)
-    n = series_a.shape[0]
-    if n < 2 or series_b.shape[0] != n:
-        return 0.0, 1.0
-
-    diff = series_a - series_b
-    mean_diff = float(diff.mean())
-    # Varianza muestral (ddof=1) de la diferencia; error estandar de la media.
-    variance = float(diff.var(ddof=1))
-    if not np.isfinite(variance) or variance <= 1e-15:
-        # Series identicas o diferencia constante: sin evidencia de superioridad.
-        return 0.0, 1.0
-
-    standard_error = (variance / n) ** 0.5
-    if standard_error <= 0.0:
-        return 0.0, 1.0
-
-    dm_stat = mean_diff / standard_error
-    # p-valor bilateral por aproximacion normal: 2 * (1 - Phi(|z|)).
-    # math.erf evita una dependencia de scipy; Phi(z) = 0.5*(1+erf(z/sqrt(2))).
-    import math
-
-    cdf = 0.5 * (1.0 + math.erf(abs(dm_stat) / math.sqrt(2.0)))
-    p_value = 2.0 * (1.0 - cdf)
-    p_value = float(min(max(p_value, 0.0), 1.0))
-    return float(dm_stat), p_value
+def _paired_detail(diff: PairedDiff) -> dict[str, Any]:
+    return {
+        "mean_diff": diff.mean_diff,
+        "ci_low": diff.ci_low,
+        "ci_high": diff.ci_high,
+        "n": diff.n,
+        "a_better": diff.a_better,
+        "b_better": diff.b_better,
+    }
 
 
 def _promotion_decision(
     champion_metrics: dict[str, Any],
     challenger_metrics: dict[str, Any],
     *,
-    incumbent_brier: float | None = None,
-    challenger_brier_losses: list[float] | None = None,
-    incumbent_brier_losses: list[float] | None = None,
+    block_ids: Any = None,
+    min_matches: int = DEFAULT_MIN_PROMOTION_MATCHES,
+    reference: str = "champion",
 ) -> tuple[bool, str, dict[str, Any]]:
     """Decide elegibilidad del retador y devuelve el detalle de gobernanza.
 
-    Reglas compuestas (orden de evaluacion):
-      1. Brier (gate primario): el retador debe mejorar el Brier del champion.
-      2. Log Loss (guardrail): no deteriorar el Log Loss materialmente.
-      3. RPS (gate adicional ordinal): el retador debe igualar o mejorar el RPS del
-         champion. Es un requisito ADICIONAL al Brier, no un reemplazo.
-      4. Proteccion del incumbente: no regresar el Brier del modelo activo.
+    Champion y retador se comparan sobre los MISMOS partidos del holdout (las dos
+    series ``brier_losses`` estan alineadas por partido). Reglas, en orden:
+      1. Muestra: al menos ``min_matches`` partidos comunes.
+      2. Brier (gate primario): bootstrap pareado de la diferencia de Brier por partido;
+         el IC completo debe quedar bajo 0 (retador mejor con incertidumbre).
+      3. Log Loss (guardrail): no deteriorar el Log Loss materialmente.
+      4. RPS (gate ordinal): igualar o mejorar el RPS del champion.
 
-    Devuelve ``(promote, reason, detail)``. ``detail`` expone ``challenger_rps``,
-    ``champion_rps`` y ``dm_p_value`` (Diebold-Mariano sobre las perdidas Brier por
-    partido retador vs incumbente) para que el reporte/dashboard las muestren. El
-    ``dm_p_value`` se calcula aqui pero NO bloquea esta decision: la guardia DM solo
-    aplica en la ruta de auto-promocion (ver ``_governance_decision``).
+    No se compara contra metricas guardadas del modelo activo: eso mezclaria otro
+    conjunto de partidos. Devuelve ``(promote, reason, detail)``.
     """
 
     challenger_rps = challenger_metrics.get("rps")
     champion_rps = champion_metrics.get("rps")
-    dm_stat, dm_p_value = diebold_mariano(
-        list(challenger_brier_losses or []), list(incumbent_brier_losses or [])
+    paired = paired_bootstrap_diff(
+        challenger_metrics["brier_losses"], champion_metrics["brier_losses"], block_ids=block_ids
     )
     detail: dict[str, Any] = {
         "challenger_rps": float(challenger_rps) if challenger_rps is not None else None,
         "champion_rps": float(champion_rps) if champion_rps is not None else None,
-        "dm_stat": float(dm_stat),
-        "dm_p_value": float(dm_p_value),
+        "paired_brier": _paired_detail(paired),
+        "min_matches": int(min_matches),
     }
 
-    if float(challenger_metrics["brier_score"]) >= float(champion_metrics["brier_score"]):
-        return False, "Challenger no mejora Brier Score frente al champion actual.", detail
+    if paired.n < min_matches:
+        return False, f"Muestra insuficiente: {paired.n} partidos comunes < {min_matches} requeridos.", detail
+    if not paired.a_better:
+        reason = (
+            f"Challenger no supera al {reference} en Brier con significancia "
+            f"(diferencia {paired.mean_diff:+.4f}, IC [{paired.ci_low:+.4f}, {paired.ci_high:+.4f}])."
+        )
+        return False, reason, detail
     if float(challenger_metrics["log_loss"]) > float(champion_metrics["log_loss"]) + DEFAULT_PROMOTION_LOG_LOSS_TOLERANCE:
-        return False, "Challenger mejora Brier pero deteriora Log Loss materialmente.", detail
-    # RPS gate (ordinal): el retador no puede empeorar el RPS aunque gane en Brier.
-    # El 1X2 es ordinal; un retador que mejora el Brier nominal pero degrada el RPS
-    # esta acertando peor en la *direccion* del resultado y no es elegible.
+        return False, f"Challenger mejora Brier pero deteriora Log Loss materialmente frente al {reference}.", detail
     if (
         challenger_rps is not None
         and champion_rps is not None
         and float(challenger_rps) > float(champion_rps) + DEFAULT_PROMOTION_RPS_TOLERANCE
     ):
         return False, "Challenger mejora Brier pero deteriora RPS ordinal frente al champion.", detail
-    # Incumbent protection: never auto-replace the active model with a worse one.
-    # Small wins are still wins; the tolerance above is only for material Log Loss
-    # decay, not for demanding an arbitrary Brier margin over the active model.
-    if incumbent_brier is not None and float(challenger_metrics["brier_score"]) > incumbent_brier + DEFAULT_INCUMBENT_REGRESSION_EPSILON:
-        return False, "Challenger empeora frente al modelo activo (sin regresion permitida).", detail
-    return True, "Challenger elegible por Brier y RPS; supera champion e incumbente.", detail
+    return True, "Challenger elegible: mejora Brier con IC pareado completamente bajo 0 y sin deterioro de Log Loss ni RPS.", detail
+
+
+def _gated_promotion_decision(
+    champion_metrics: dict[str, Any],
+    challenger_metrics: dict[str, Any],
+    elo_metrics: dict[str, Any],
+    *,
+    block_ids: Any = None,
+    min_matches: int = DEFAULT_MIN_PROMOTION_MATCHES,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Promotion needs to beat the Poisson champion and the Elo-only baseline, under one rule.
+
+    The Poisson champion is not what serves: ``serving_policy`` rescales it to an Elo 1X2. A
+    challenger that only beats the raw Poisson would replace a served rule it has not been
+    compared with, so the Elo-only baseline gets the same gates (same matches, paired Brier CI
+    below 0, no material Log Loss deterioration). The Elo outcome is reported in
+    ``detail["elo_only_paired_brier"]``.
+    """
+
+    promote, reason, detail = _promotion_decision(
+        champion_metrics, challenger_metrics, block_ids=block_ids, min_matches=min_matches
+    )
+    elo_promote, elo_reason, elo_detail = _promotion_decision(
+        elo_metrics, challenger_metrics, block_ids=block_ids, min_matches=min_matches, reference="baseline Elo-only (la regla que sirve)"
+    )
+    detail["elo_only_paired_brier"] = elo_detail["paired_brier"]
+    if promote and not elo_promote:
+        return False, elo_reason, detail
+    return promote, reason, detail
+
+
+def _holdout_baselines(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> tuple[dict[str, np.ndarray], list[str]]:
+    """Baseline 1X2 probabilities on the date-ordered holdout, fitted on the training window only."""
+
+    ordered_train = train_df.sort_values("date").reset_index(drop=True)
+    ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
+    train_outcomes = [_outcome_label(int(h), int(a)) for h, a in zip(ordered_train["home_score"], ordered_train["away_score"], strict=False)]
+    holdout_outcomes = [
+        _outcome_label(int(h), int(a)) for h, a in zip(ordered_holdout["home_score"], ordered_holdout["away_score"], strict=False)
+    ]
+    probabilities = baseline_probabilities(
+        train_outcomes,
+        ordered_train["elo_difference"].to_numpy(dtype=float),
+        ordered_train["neutral"].to_numpy(dtype=bool),
+        ordered_holdout["elo_difference"].to_numpy(dtype=float),
+        ordered_holdout["neutral"].to_numpy(dtype=bool),
+    )
+    return probabilities, holdout_outcomes
+
+
+def _baseline_comparison(
+    train_df: pd.DataFrame,
+    holdout_df: pd.DataFrame,
+    champion_losses: list[float],
+    challenger_losses: list[float],
+    *,
+    block_ids: Any = None,
+) -> dict[str, Any]:
+    """Brier of champion and challenger against uniform, base-rate and Elo-only on the same holdout.
+
+    Baselines are fitted on the training window only. ``mean_diff < 0`` means the model
+    beats the baseline.
+    """
+
+    probabilities, holdout_outcomes = _holdout_baselines(train_df, holdout_df)
+    report: dict[str, Any] = {}
+    for name, matrix in probabilities.items():
+        losses = brier_1x2_per_game(matrix, holdout_outcomes)
+        report[name] = {
+            "brier_score": float(np.mean(losses)),
+            "champion_vs_baseline": _paired_detail(paired_bootstrap_diff(champion_losses, losses, block_ids=block_ids)),
+            "challenger_vs_baseline": _paired_detail(paired_bootstrap_diff(challenger_losses, losses, block_ids=block_ids)),
+        }
+    return report
+
+
+def _elo_only_metrics(train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> dict[str, Any]:
+    """Per-game Brier and mean log loss of the Elo-only baseline, the stand-in for the served Elo rule."""
+
+    probabilities, holdout_outcomes = _holdout_baselines(train_df, holdout_df)
+    elo_probabilities = probabilities["elo_only"]
+    y_true = pd.Series(holdout_outcomes).map({"H": 0, "D": 1, "A": 2}).to_numpy()
+    return {
+        "brier_losses": [float(value) for value in brier_1x2_per_game(elo_probabilities, holdout_outcomes)],
+        "log_loss": float(log_loss(y_true, elo_probabilities, labels=[0, 1, 2])),
+        "rps": None,
+    }
 
 
 def _governance_decision(
     *,
     promote: bool,
     challenger_family: str,
-    dm_p_value: float | None = None,
 ) -> tuple[str, str, str]:
     if not promote:
         return "shadow", "blocked", "Challenger descartado por politica de metricas."
@@ -698,17 +712,7 @@ def _governance_decision(
         return "eligible", "blocked", "Elegible por Brier, pero su familia aun no esta habilitada para inferencia productiva."
     if not auto_promotion_enabled():
         return "eligible", "manual", "Elegible por Brier; pendiente de aprobacion explicita para activacion productiva."
-    # Auto-promote gate adicional (Diebold-Mariano): solo en esta ruta exigimos que la
-    # mejora del retador sobre el incumbente sea estadisticamente significativa (p<0.05).
-    # No afecta las rutas manual/shadow: la activacion manual sigue siendo discrecional.
-    if dm_p_value is not None and float(dm_p_value) >= DEFAULT_DM_SIGNIFICANCE_LEVEL:
-        return (
-            "eligible",
-            "manual",
-            "Elegible por Brier/RPS, pero la mejora no es estadisticamente significativa "
-            f"(Diebold-Mariano p={float(dm_p_value):.3f} >= {DEFAULT_DM_SIGNIFICANCE_LEVEL}); requiere aprobacion manual.",
-        )
-    return "active", "auto", "Promovido automaticamente por mejorar Brier sin deterioro material de Log Loss."
+    return "active", "auto", "Promovido automaticamente por mejorar Brier con IC pareado bajo 0 sin deterioro material de Log Loss."
 
 
 def champion_pointer_status(*, challenger_production_status: str, active_model_exists: bool) -> str:
@@ -749,6 +753,26 @@ def _write_model_artifact(
     return artifact_path
 
 
+def _refuse_cycle(target_date: date, reason: str, *, report_dir: str | Path) -> dict[str, Any]:
+    """Report that the production champion is unavailable; nothing is evaluated or persisted."""
+
+    logging.getLogger(__name__).error("challenger_cycle_refused reason=%s", reason)
+    report = {
+        "target_date": target_date.isoformat(),
+        "promotion_decision": False,
+        "promotion_reason": f"Ciclo rechazado: configuracion de produccion no disponible. {reason}",
+        "production_config": None,
+        "production_config_error": reason,
+        "production_status": "shadow",
+        "activation_mode": "blocked",
+        "governance_reason": "Sin champion de produccion reproducible no se puede promover.",
+        "registry_persisted": False,
+        "registry_error": None,
+    }
+    report["artifact_path"] = str(_write_report(report, report_dir=report_dir))
+    return report
+
+
 def run_challenger_cycle(
     target_date: date,
     *,
@@ -757,11 +781,16 @@ def run_challenger_cycle(
     evaluation_matches: int = DEFAULT_EVALUATION_MATCHES,
     champion_refit_interval: int = DEFAULT_CHAMPION_REFIT_INTERVAL,
 ) -> dict[str, Any]:
+    active_record = load_active_model_record(database_url=database_url)
+    try:
+        config = resolve_production_champion_config(active_record)
+    except ProductionConfigUnavailable as exc:
+        return _refuse_cycle(target_date, str(exc), report_dir=report_dir)
+
     historical_df = load_enriched_historical_matches(database_url=database_url).sort_values("date").reset_index(drop=True)
     challenger_df = _build_challenger_dataset(historical_df, database_url=database_url)
     challenger_df = challenger_df.sort_values("date").reset_index(drop=True)
     eval_size = min(evaluation_matches, max(60, len(challenger_df) // 20))
-    # Snap the split to a date boundary so a single match-day never straddles train/holdout.
     split_index = snap_split_index(challenger_df, len(challenger_df) - eval_size, "date")
     split_index = min(max(split_index, 1), len(challenger_df) - 1)
     train_df = challenger_df.iloc[:split_index].copy()
@@ -770,43 +799,42 @@ def run_challenger_cycle(
     champion_lambdas, champion_refit_count = _champion_lambda_stream(
         train_df,
         holdout_df,
+        config=config,
         champion_refit_interval=champion_refit_interval,
     )
     champion_metrics = _score_lambda_stream(
         champion_lambdas,
         holdout_df,
-        model_version=get_active_model_version(),
-        model_family=get_active_model_family(),
+        rho=config.rho,
+        model_version=config.model_version,
+        model_family=config.model_family,
         extra={"refit_count": champion_refit_count, "champion_refit_interval": champion_refit_interval},
     )
     challenger_artifact = _train_challenger(train_df)
-    challenger_metrics = _evaluate_challenger(challenger_artifact, holdout_df)
+    challenger_metrics = _evaluate_challenger(challenger_artifact, holdout_df, rho=config.rho)
     challenger_metrics["feature_importance"] = challenger_artifact.get("feature_importance")
 
-    # Ensemble probe: does blending champion + challenger lambdas beat either alone?
     challenger_lambdas = _xgb_lambda_stream(challenger_artifact, holdout_df)
-    ensemble_metrics = evaluate_lambda_blend(champion_lambdas, challenger_lambdas, holdout_df)
+    ensemble_metrics = evaluate_lambda_blend(champion_lambdas, challenger_lambdas, holdout_df, rho=config.rho)
 
-    active_record = load_active_model_record(database_url=database_url)
-    incumbent_brier = _incumbent_brier(active_record)
-    # Series de perdida Brier por partido (mismo holdout, mismo orden) para la prueba
-    # de Diebold-Mariano. El champion Poisson evaluado en el holdout es el baseline
-    # incumbente por-partido comparable (las perdidas por-partido del modelo activo
-    # historico no se reconstruyen aqui).
-    challenger_brier_losses = list(challenger_metrics.get("brier_losses") or [])
-    incumbent_brier_losses = list(champion_metrics.get("brier_losses") or [])
-    promote, promotion_reason, promotion_detail = _promotion_decision(
+    ordered_holdout = holdout_df.sort_values("date").reset_index(drop=True)
+    block_ids = ordered_holdout["date"].astype(str).to_numpy()
+    promote, promotion_reason, promotion_detail = _gated_promotion_decision(
         champion_metrics,
         challenger_metrics,
-        incumbent_brier=incumbent_brier,
-        challenger_brier_losses=challenger_brier_losses,
-        incumbent_brier_losses=incumbent_brier_losses,
+        _elo_only_metrics(train_df, holdout_df),
+        block_ids=block_ids,
     )
-    dm_p_value = promotion_detail.get("dm_p_value")
+    baselines = _baseline_comparison(
+        train_df,
+        holdout_df,
+        champion_metrics["brier_losses"],
+        challenger_metrics["brier_losses"],
+        block_ids=block_ids,
+    )
     production_status, activation_mode, governance_reason = _governance_decision(
         promote=promote,
         challenger_family=challenger_metrics["model_family"],
-        dm_p_value=dm_p_value,
     )
 
     report = {
@@ -827,8 +855,18 @@ def run_challenger_cycle(
             f"champion={promotion_detail.get('champion_rps')} "
             "(menor es mejor; el retador debe igualar o mejorar)."
         ),
-        "dm_stat": promotion_detail.get("dm_stat"),
-        "dm_p_value": dm_p_value,
+        "paired_comparison": promotion_detail["paired_brier"],
+        "elo_comparison": promotion_detail["elo_only_paired_brier"],
+        "min_promotion_matches": promotion_detail["min_matches"],
+        "baselines": baselines,
+        "production_config": {
+            "version_key": config.version_key,
+            "model_version": config.model_version,
+            "model_family": config.model_family,
+            "poisson_kwargs": dict(config.poisson_kwargs),
+            "rho": config.rho,
+        },
+        "production_config_error": None,
         "production_status": production_status,
         "activation_mode": activation_mode,
         "governance_reason": governance_reason,
@@ -896,15 +934,12 @@ def run_challenger_cycle(
             }
             upsert_model_version_record(engine, model_versions_table, champion_row)
             upsert_model_version_record(engine, model_versions_table, challenger_row)
-            # Persist the binary into the durable store so any environment can hydrate it.
-            # Without this the artifact only ever exists on the ephemeral training host and
-            # inference silently falls back to Poisson at brief time.
             try:
                 from alttez.operations.artifact_store import upload_artifact
 
                 upload_artifact(challenger_row["version_key"], model_artifact_path, database_url=database_url)
                 report["artifact_uploaded"] = True
-            except Exception as exc:  # noqa: BLE001 - artifact upload must not break the registry write.
+            except Exception as exc:
                 report["artifact_upload_error"] = str(exc)
                 logging.warning("artifact_upload_failed version_key=%s detail=%s", challenger_row["version_key"], exc)
             if production_status == "active":
@@ -915,7 +950,7 @@ def run_challenger_cycle(
                     activation_mode=activation_mode,
                 )
             report["registry_persisted"] = True
-    except Exception as exc:  # noqa: BLE001 - challenger evaluation should still produce the artifact.
+    except Exception as exc:
         report["registry_error"] = str(exc)
 
     report["artifact_path"] = str(report_path)

@@ -93,6 +93,32 @@ MIGRATION_PROBES: dict[str, str] = {
               and column_name = 'gdp_per_capita'
         )
     """,
+    "015_nba_predictions.sql": """
+        select exists (
+            select 1 from information_schema.tables
+            where table_schema = 'public' and table_name = 'nba_predictions'
+        )
+    """,
+    "016_nba_predictions_key_served_model.sql": """
+        select exists (
+            select 1
+            from information_schema.table_constraints tc
+            join information_schema.key_column_usage k
+              on k.constraint_schema = tc.constraint_schema
+             and k.constraint_name = tc.constraint_name
+             and k.table_schema = tc.table_schema
+             and k.table_name = tc.table_name
+            where tc.table_schema = 'public'
+              and tc.table_name = 'nba_predictions'
+              and tc.constraint_type = 'PRIMARY KEY'
+            group by tc.constraint_name
+            having count(*) = 3
+               and sum(case when k.ordinal_position = 1 and k.column_name = 'game_id' then 1
+                            when k.ordinal_position = 2 and k.column_name = 'model_version' then 1
+                            when k.ordinal_position = 3 and k.column_name = 'served_model' then 1
+                            else 0 end) = 3
+        )
+    """,
 }
 
 

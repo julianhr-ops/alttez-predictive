@@ -6,7 +6,12 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from alttez.inference.router import ActiveModelSelection, BaseMatchPredictor, build_active_predictor
+from alttez.inference.router import (
+    ActiveModelSelection,
+    ActiveRecordLookup,
+    BaseMatchPredictor,
+    build_active_predictor,
+)
 from alttez.inference.world_cup_2026 import (
     _sample_match,
     load_world_cup_2026_config,
@@ -44,7 +49,7 @@ def _historical_df() -> pd.DataFrame:
 
 class TestWorldCup2026Simulation(unittest.TestCase):
     def test_simulation_runs_with_official_config(self) -> None:
-        with patch("alttez.inference.router._load_active_model_record_safe", return_value=None):
+        with patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(None)):
             predictor = build_active_predictor(_historical_df(), "2026-05-27")
 
         report = simulate_world_cup_2026(
@@ -174,7 +179,6 @@ class TestWorldCup2026Simulation(unittest.TestCase):
                 return {"matches": 10.0, "effective_matches": 10.0}
 
             def predict_match(self, home_team, away_team, *, is_neutral=False, is_knockout=False, max_goals=7, tournament_context=None):
-                # Most-likely scoreline is 2-1 (index [2,1]).
                 matrix = np.zeros((3, 3))
                 matrix[2, 1] = 0.6
                 matrix[0, 0] = 0.4
@@ -201,11 +205,10 @@ class TestWorldCup2026Simulation(unittest.TestCase):
                 return {"matches": 10.0, "effective_matches": 10.0}
 
             def predict_match(self, home_team, away_team, *, is_neutral=False, is_knockout=False, max_goals=7, tournament_context=None):
-                # Argmax cell is the 1-1 draw, but the home win-region carries more mass.
                 matrix = np.zeros((3, 3))
-                matrix[1, 1] = 0.50  # draw is the single most-likely scoreline
-                matrix[2, 1] = 0.30  # home decisive
-                matrix[1, 2] = 0.10  # away decisive
+                matrix[1, 1] = 0.50
+                matrix[2, 1] = 0.30
+                matrix[1, 2] = 0.10
                 matrix[0, 0] = 0.10
                 return {"prob_home": 0.6, "prob_draw": 0.25, "prob_away": 0.15, "prob_matrix": matrix}
 
@@ -213,7 +216,6 @@ class TestWorldCup2026Simulation(unittest.TestCase):
             DrawArgmaxPredictor(), "Home", "Away",
             rng=np.random.default_rng(0), is_neutral=True, is_knockout=True, deterministic=True,
         )
-        # No penalty draw: a decisive home scoreline from the winning region.
         self.assertGreater(match.home_score, match.away_score)
         self.assertEqual(match.winner, "Home")
         self.assertEqual(match.decided_by, "regular_time")
@@ -221,7 +223,7 @@ class TestWorldCup2026Simulation(unittest.TestCase):
 
 class TestWorldCup2026Bracket(unittest.TestCase):
     def _bracket(self):
-        with patch("alttez.inference.router._load_active_model_record_safe", return_value=None):
+        with patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(None)):
             predictor = build_active_predictor(_historical_df(), "2026-05-27")
         return predict_world_cup_2026_bracket(predictor, config=load_world_cup_2026_config())
 
@@ -235,7 +237,6 @@ class TestWorldCup2026Bracket(unittest.TestCase):
         self.assertIsNotNone(bracket["champion"])
         self.assertIsNotNone(bracket["runner_up"])
         self.assertNotEqual(bracket["champion"], bracket["runner_up"])
-        # Champion is the winner of the final.
         final_match = bracket["final"]
         self.assertEqual(bracket["champion"], final_match["winner"])
 

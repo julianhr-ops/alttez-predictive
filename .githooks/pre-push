@@ -2,7 +2,13 @@
 set -eu
 
 ROOT=$(git rev-parse --show-toplevel)
-PYTHON="$ROOT/venv/Scripts/python.exe"
+if [ -x "$ROOT/venv/Scripts/python.exe" ]; then
+    PYTHON="$ROOT/venv/Scripts/python.exe"
+elif [ -x "$ROOT/venv/bin/python" ]; then
+    PYTHON="$ROOT/venv/bin/python"
+else
+    PYTHON=python
+fi
 
 echo "[pre-push] running unit tests"
 "$PYTHON" -m unittest discover -s tests

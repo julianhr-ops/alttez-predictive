@@ -11,8 +11,7 @@ from .formatting import (
     _fmt_float,
     _fmt_pct,
     _fmt_points_profile,
-    most_likely_total_goals,
-    prob_over_2_5,
+    match_goal_totals,
 )
 
 
@@ -41,7 +40,6 @@ def _prob_value(raw: Any) -> float:
         value = float(raw)
     except (TypeError, ValueError):
         return 0.0
-    # Probabilities may arrive as 0-1 or already as 0-100.
     if value <= 1.0:
         value *= 100.0
     return round(value, 1)
@@ -55,6 +53,7 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
 
     priority_rows = []
     for match in summary["ranked_matches"]:
+        over_prob, _ = match_goal_totals(match)
         priority_rows.append(
             """
             <tr>
@@ -87,8 +86,8 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 decision=html.escape(match["decision_tier"]),
                 decision_class=_decision_class(match["decision_tier"]),
                 xg=html.escape(
-                    f"{_fmt_float(match.get('xg_total'))} (O2.5 {_fmt_pct(prob_over_2_5(match.get('lambda_h'), match.get('lambda_a')))})"
-                    if match.get("lambda_h") is not None
+                    f"{_fmt_float(match.get('xg_total'))} (O2.5 {_fmt_pct(over_prob)})"
+                    if over_prob is not None
                     else _fmt_float(match.get("xg_total"))
                 ),
                 market=html.escape(match.get("best_market") or "N/D"),
@@ -102,6 +101,7 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
     result_chart_payload: dict[str, dict[str, Any]] = {}
     detail_cards = []
     for match_index, match in enumerate(matches):
+        over_prob, total_goals = match_goal_totals(match)
         chart_id = f"score-chart-{match_index}"
         result_id = f"result-chart-{match_index}"
         score_chart_payload[chart_id] = {
@@ -211,15 +211,12 @@ def render_daily_brief_html(payload: dict[str, Any]) -> str:
                 xg_home=html.escape(_fmt_float(match.get("lambda_h"))),
                 xg_away=html.escape(_fmt_float(match.get("lambda_a"))),
                 xg_total_disp=html.escape(_fmt_expected_goals(match.get("lambda_h"), match.get("lambda_a"))),
-                over_25=html.escape(_fmt_pct(prob_over_2_5(match.get("lambda_h"), match.get("lambda_a")))),
-                total_goals=html.escape(str(most_likely_total_goals(match.get("lambda_h"), match.get("lambda_a")) or "N/D")),
+                over_25=html.escape(_fmt_pct(over_prob)),
+                total_goals=html.escape(str(total_goals) if total_goals is not None else "N/D"),
                 market=html.escape(match.get("best_market") or "N/D"),
                 market_prob=html.escape(_fmt_pct(match.get("best_market_probability"))),
                 prediction=html.escape(match.get("primary_score") or "N/D"),
                 score_prob=html.escape(_fmt_pct(match.get("primary_score_probability"))),
-                raw_score=html.escape(
-                    f"{safe_text(match.get('most_likely_score'), 'N/D')} ({_fmt_pct(match.get('most_likely_score_probability'))})"
-                ),
                 ev_score=html.escape(safe_text(match.get("ev_optimal_score"), "N/D")),
                 ev=html.escape(_fmt_float(match.get("primary_ev"), digits=3)),
                 avg_confidence=html.escape(

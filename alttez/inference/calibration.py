@@ -8,6 +8,11 @@ eso sin reentrenar, mediante:
   1. Temperature scaling: p -> p^(1/T) / Z. T>1 suaviza la sobreconfianza.
   2. Piso por clase: ninguna clase queda en ~0, lo que acota el log loss.
 
+La temperatura se ajusta sobre tripletes 1X2, asi que se aplica al triplete 1X2
+agregado. Para calibrar una matriz de marcadores se calibra su 1X2 y cada celda se
+reescala por calibrada/cruda de su clase (local, empate, visitante): la matriz
+sigue siendo una distribucion y sus marginales 1X2 son exactamente las calibradas.
+
 Es post-hoc, reversible y barato. El parametro T se ajusta offline sobre las
 evaluaciones cerradas (ver scripts/fit_probability_calibration.py) y se persiste
 en un artefacto JSON. Si el artefacto no existe, la calibracion es NEUTRA
@@ -19,6 +24,7 @@ Funciones puras y unitariamente testeables segun la politica anti-monolitica.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -31,14 +37,9 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CALIBRATION_PATH = Path("artifacts/calibration/active.json")
 CALIBRATION_PATH_ENV = "ALTTEZ_CALIBRATION_PATH"
-# Calibracion separada para el path de predictor unico (campeon directo, sin
-# pasar por el consenso del comite). La T de active.json se ajusto sobre el blend
-# del consenso; reusarla sobre un campeon ya calibrado lo sobre-suavizaria. Por eso
-# este path tiene su propio artefacto y su propia compuerta.
 DEFAULT_SINGLE_PREDICTOR_CALIBRATION_PATH = Path("artifacts/calibration/single_predictor.json")
 SINGLE_PREDICTOR_CALIBRATION_PATH_ENV = "ALTTEZ_SINGLE_PREDICTOR_CALIBRATION_PATH"
 SINGLE_PREDICTOR_CALIBRATION_ENABLED_ENV = "ALTTEZ_CALIBRATE_SINGLE_PREDICTOR"
-# Piso por clase aplicado a 1X2 en inferencia. 0.0 = neutro (sin piso).
 DEFAULT_CLASS_FLOOR = 0.0
 MIN_TEMPERATURE = 0.05
 
@@ -53,13 +54,11 @@ def temperature_scale(probabilities: np.ndarray, temperature: float) -> np.ndarr
     if temp == 1.0:
         scaled = array.copy()
     else:
-        # Trabaja en log-espacio para estabilidad: p^(1/T) = exp(log(p)/T).
         with np.errstate(divide="ignore"):
             log_p = np.where(array > 0, np.log(array), -np.inf)
         scaled = np.exp(log_p / temp)
     total = scaled.sum()
     if not np.isfinite(total) or total <= 0:
-        # Degenerado: devuelve uniforme antes que propagar NaN.
         return np.full(array.shape, 1.0 / array.size, dtype=float)
     return scaled / total
 
@@ -83,12 +82,69 @@ def apply_class_floor(triplet: np.ndarray, floor: float) -> np.ndarray:
     above_sum = normalized[~below].sum()
     remaining = 1.0 - reserved
     if remaining <= 0.0 or above_sum <= 0.0:
-        # Demasiadas clases bajo el piso: reparte uniforme.
         return np.full(array.shape, 1.0 / array.size)
     out = normalized.copy()
     out[below] = floor
     out[~below] = normalized[~below] / above_sum * remaining
     return out
+
+
+def _class_masks(shape: tuple[int, ...]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Mascaras booleanas (local, empate, visitante) de una matriz goles-local x goles-visitante."""
+    if len(shape) != 2 or shape[0] != shape[1]:
+        raise ValueError(f"La matriz de marcadores debe ser cuadrada, recibio {shape}.")
+    rows, cols = np.indices(shape)
+    return rows > cols, rows == cols, rows < cols
+
+
+def matrix_1x2(matrix: np.ndarray) -> tuple[float, float, float]:
+    """Marginales 1X2 (local, empate, visitante) de una matriz de marcadores, normalizada a suma 1."""
+    array = np.asarray(matrix, dtype=float)
+    masses = np.array([array[mask].sum() for mask in _class_masks(array.shape)])
+    total = masses.sum()
+    if not np.isfinite(total) or total <= 0:
+        return 1 / 3, 1 / 3, 1 / 3
+    masses = masses / total
+    return float(masses[0]), float(masses[1]), float(masses[2])
+
+
+def rescale_matrix_to_triplet(matrix: np.ndarray, target: tuple[float, float, float]) -> np.ndarray:
+    """Reescala la matriz para que sus marginales 1X2 sean `target`, conservando la forma dentro de cada clase.
+
+    Cada celda se multiplica por target_clase / masa_cruda_clase. Si una clase no
+    tiene masa en la matriz (p. ej. matriz 1x1 sin celdas de victoria) no puede
+    recibir la probabilidad pedida: el objetivo se renormaliza sobre las clases
+    con masa.
+    """
+    array = np.asarray(matrix, dtype=float)
+    total = array.sum()
+    if not np.isfinite(total) or total <= 0:
+        return np.full(array.shape, 1.0 / array.size, dtype=float)
+    array = array / total
+    masks = _class_masks(array.shape)
+    raw = np.array([array[mask].sum() for mask in masks])
+    wanted = np.where(raw > 0, np.asarray(target, dtype=float), 0.0)
+    wanted_total = wanted.sum()
+    if wanted_total <= 0:
+        return array
+    wanted = wanted / wanted_total
+    factors = np.divide(wanted, raw, out=np.zeros_like(raw), where=raw > 0)
+    out = array.copy()
+    for mask, factor in zip(masks, factors, strict=False):
+        out[mask] *= factor
+    return out
+
+
+def _calibrate_matrix_via_triplet(
+    calibration: ProbabilityCalibration | IsotonicCalibration, matrix: np.ndarray
+) -> np.ndarray:
+    array = np.asarray(matrix, dtype=float)
+    total = array.sum()
+    normalized = array / total if np.isfinite(total) and total > 0 else array
+    if calibration.is_neutral:
+        return normalized
+    calibrated = calibration.calibrate_triplet(*matrix_1x2(normalized))
+    return rescale_matrix_to_triplet(normalized, calibrated)
 
 
 @dataclass(slots=True, frozen=True)
@@ -103,9 +159,12 @@ class ProbabilityCalibration:
         return self.temperature == 1.0 and self.class_floor <= 0.0
 
     def calibrate_matrix(self, matrix: np.ndarray) -> np.ndarray:
-        """Calibra una matriz de marcadores (goles local x visitante). Coherente
-        para 1X2 y marcadores porque se aplica antes de derivar ambos."""
-        return temperature_scale(matrix, self.temperature)
+        """Calibra una matriz de marcadores (goles local x visitante) via su 1X2.
+
+        La temperatura se ajusto sobre tripletes 1X2, por eso se aplica al 1X2
+        agregado y la matriz se reescala por clase (ver rescale_matrix_to_triplet).
+        """
+        return _calibrate_matrix_via_triplet(self, matrix)
 
     def calibrate_triplet(self, home: float, draw: float, away: float) -> tuple[float, float, float]:
         """Calibra y pisa un vector 1X2. Usar cuando solo se tienen las 3 clases."""
@@ -115,23 +174,6 @@ class ProbabilityCalibration:
 
 
 NEUTRAL_CALIBRATION = ProbabilityCalibration()
-
-
-# --- Calibracion isotonica (alternativa no parametrica a temperature) --------
-#
-# Temperature scaling impone una unica curva monotona global (p^(1/T)); la
-# calibracion isotonica aprende una curva monotona libre por clase, mas flexible
-# cuando la mala calibracion no es uniforme entre clases.
-#
-# Enfoque: one-vs-rest. Para cada clase (H, D, A) se ajusta una IsotonicRegression
-# que mapea la prob cruda de esa clase -> prob calibrada (frecuencia empirica de
-# acierto). Luego se renormaliza el triplete a suma 1.
-#
-# Serializacion SIN picklear sklearn: la funcion escalonada de IsotonicRegression
-# queda definida por sus puntos de quiebre (X_thresholds_, y_thresholds_). Se
-# persisten esos pares (x, y) por clase y se reevalua con np.interp en carga y
-# prediccion. np.interp reproduce exactamente la interpolacion lineal por tramos
-# que usa IsotonicRegression.predict (out_of_bounds="clip" = extremos planos).
 
 
 def _isotonic_curve(raw: np.ndarray, hits: np.ndarray) -> tuple[list[float], list[float]]:
@@ -147,7 +189,7 @@ def _isotonic_curve(raw: np.ndarray, hits: np.ndarray) -> tuple[list[float], lis
         return [], []
     try:
         from sklearn.isotonic import IsotonicRegression
-    except Exception as exc:  # noqa: BLE001 - sin sklearn caemos a identidad.
+    except Exception as exc:
         LOGGER.warning("isotonic_unavailable detail=%s", exc)
         return [], []
     iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
@@ -175,10 +217,9 @@ class IsotonicCalibration:
     Mantiene tres curvas (x, y) escalonadas, una por clase (H, D, A). Se serializa
     como arreglos puros (sin objetos sklearn) y se reevalua con np.interp.
 
-    NOTA: la calibracion isotonica se define solo sobre el triplete 1X2. No hay
-    una calibracion bien definida a nivel de matriz de marcadores, asi que
-    calibrate_matrix es IDENTIDAD (no rompe a los llamadores que la invocan antes
-    de derivar 1X2; la correccion 1X2 se aplica luego en calibrate_triplet).
+    NOTA: la calibracion isotonica se define sobre el triplete 1X2. Para una
+    matriz de marcadores se calibra su 1X2 y la matriz se reescala por clase,
+    igual que en ProbabilityCalibration.
     """
 
     home_x: tuple[float, ...] = ()
@@ -191,7 +232,6 @@ class IsotonicCalibration:
 
     @property
     def is_neutral(self) -> bool:
-        # Neutra cuando no hay curvas aprendidas (arreglos vacios) y sin piso.
         return (
             not self.home_x
             and not self.draw_x
@@ -200,8 +240,8 @@ class IsotonicCalibration:
         )
 
     def calibrate_matrix(self, matrix: np.ndarray) -> np.ndarray:
-        """Identidad: la calibracion isotonica solo aplica al triplete 1X2."""
-        return np.asarray(matrix, dtype=float)
+        """Calibra una matriz de marcadores via su 1X2 calibrado (reescalado por clase)."""
+        return _calibrate_matrix_via_triplet(self, matrix)
 
     def calibrate_triplet(self, home: float, draw: float, away: float) -> tuple[float, float, float]:
         cal_h = _eval_curve(list(self.home_x), list(self.home_y), home)
@@ -231,7 +271,7 @@ class IsotonicCalibration:
         }
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "IsotonicCalibration":
+    def from_payload(cls, payload: dict) -> IsotonicCalibration:
         curves = payload.get("curves", {}) or {}
         home = curves.get("home", {}) or {}
         draw = curves.get("draw", {}) or {}
@@ -307,12 +347,11 @@ def load_active_calibration(
         method = str(payload.get("method", "temperature")).strip().lower()
         if method == "isotonic":
             return IsotonicCalibration.from_payload(payload)
-        # Compatibilidad: sin "method" o "temperature" == comportamiento previo.
         return ProbabilityCalibration(
             temperature=float(payload.get("temperature", 1.0)),
             class_floor=float(payload.get("class_floor", DEFAULT_CLASS_FLOOR)),
         )
-    except Exception as exc:  # noqa: BLE001 - artefacto corrupto no debe tumbar inferencia.
+    except Exception as exc:
         LOGGER.warning("calibration_artifact_unreadable path=%s detail=%s", resolved, exc)
         return NEUTRAL_CALIBRATION
 
@@ -341,8 +380,6 @@ def load_single_predictor_calibration() -> ProbabilityCalibration:
     return load_active_calibration(resolved)
 
 
-# --- Metricas de calibracion (para el arnes de evaluacion) -------------------
-
 _OUTCOME_INDEX = {"H": 0, "D": 1, "A": 2}
 
 
@@ -350,7 +387,7 @@ def log_loss(triplets: np.ndarray, outcomes: list[str], *, epsilon: float = 1e-3
     """Log loss multiclase con piso epsilon. Menor es mejor; uniforme ~1.0986."""
     probs = np.clip(np.asarray(triplets, dtype=float), epsilon, 1.0)
     losses = []
-    for row, outcome in zip(probs, outcomes):
+    for row, outcome in zip(probs, outcomes, strict=False):
         idx = _OUTCOME_INDEX.get(outcome)
         if idx is None:
             continue
@@ -374,7 +411,7 @@ def expected_calibration_error(triplets: np.ndarray, outcomes: list[str], *, bin
     edges = np.linspace(0.0, 1.0, bins + 1)
     ece = 0.0
     total = len(confidences)
-    for low, high in zip(edges[:-1], edges[1:]):
+    for low, high in itertools.pairwise(edges):
         mask = (confidences > low) & (confidences <= high)
         count = int(mask.sum())
         if count == 0:
@@ -406,7 +443,6 @@ def fit_temperature(
 
     best_temp = float(min(search, key=loss_at))
 
-    # Refinamiento por seccion dorada alrededor del mejor punto de la rejilla.
     step = (search[1] - search[0]) if len(search) > 1 else 0.5
     low, high = max(MIN_TEMPERATURE, best_temp - step), best_temp + step
     phi = (np.sqrt(5) - 1) / 2

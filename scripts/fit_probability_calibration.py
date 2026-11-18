@@ -20,11 +20,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import numpy as np
+import pandas as pd
 
 from alttez.api.settings import load_local_env
 from alttez.inference.calibration import (
     DEFAULT_CALIBRATION_PATH,
-    IsotonicCalibration,
     ProbabilityCalibration,
     expected_calibration_error,
     fit_isotonic,
@@ -32,6 +32,22 @@ from alttez.inference.calibration import (
     log_loss,
 )
 from scripts.evaluate_calibration import load_closed_predictions
+
+RAW_PROBABILITY_COLUMNS = ["raw_prob_home", "raw_prob_draw", "raw_prob_away"]
+SERVED_PROBABILITY_COLUMNS = ["prob_home", "prob_draw", "prob_away"]
+
+
+def select_fit_triplets(frame: pd.DataFrame) -> tuple[np.ndarray, int, int]:
+    """Tripletes de ajuste: la probabilidad cruda cuando existe, la almacenada solo en filas legacy.
+
+    Devuelve (tripletes, filas_con_cruda, filas_legacy).
+    """
+    served = frame[SERVED_PROBABILITY_COLUMNS].to_numpy(dtype=float)
+    if not set(RAW_PROBABILITY_COLUMNS).issubset(frame.columns):
+        return served, 0, len(frame)
+    raw = frame[RAW_PROBABILITY_COLUMNS].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    has_raw = ~np.isnan(raw).any(axis=1)
+    return np.where(has_raw[:, None], raw, served), int(has_raw.sum()), int((~has_raw).sum())
 
 
 def _metrics(triplets: np.ndarray, outcomes: list[str]) -> tuple[float, float, float]:
@@ -57,7 +73,7 @@ def _split_holdout(triplets: np.ndarray, outcomes: list[str], frac: float, seed:
     order = rng.permutation(n)
     cut = max(1, int(round(n * (1.0 - frac))))
     tr_idx, va_idx = order[:cut], order[cut:]
-    if va_idx.size == 0:  # dataset minusculo: valida sobre train.
+    if va_idx.size == 0:
         va_idx = tr_idx
     tr_y = [outcomes[i] for i in tr_idx]
     va_y = [outcomes[i] for i in va_idx]
@@ -95,13 +111,22 @@ def main() -> int:
         print("Sin predicciones cerradas; no se puede ajustar.")
         return 1
 
-    triplets = frame[["prob_home", "prob_draw", "prob_away"]].to_numpy(dtype=float)
+    triplets, raw_rows, legacy_rows = select_fit_triplets(frame)
     outcomes = frame["actual_outcome"].tolist()
+    print(f"filas de ajuste: {raw_rows} con probabilidad cruda, {legacy_rows} legacy sin cruda")
+    if legacy_rows:
+        print(
+            "AVISO: las filas legacy usan la probabilidad almacenada, que ya paso por la calibracion "
+            "vigente de su dia; ajustar sobre ellas compone calibraciones. Aplica la migracion 014 y "
+            "deja acumular filas crudas."
+        )
 
     if args.method == "temperature":
         payload = _fit_temperature_payload(triplets, outcomes, args)
     else:
         payload = _fit_isotonic_payload(triplets, outcomes, args)
+    payload["raw_probability_samples"] = raw_rows
+    payload["legacy_calibrated_samples"] = legacy_rows
 
     if args.apply:
         output = Path(args.output)
@@ -189,7 +214,6 @@ def _fit_isotonic_payload(triplets: np.ndarray, outcomes: list[str], args) -> di
     }
 
     if chosen == "isotonic":
-        # Reajusta sobre TODO el set para el artefacto final (mas senal).
         full_iso = fit_isotonic(triplets, outcomes, class_floor=args.class_floor)
         payload = full_iso.to_payload()
     else:

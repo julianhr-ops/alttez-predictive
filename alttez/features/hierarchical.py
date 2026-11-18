@@ -46,7 +46,7 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_HIERARCHICAL_PATH = Path("artifacts/hierarchical/strengths.json")
 HIERARCHICAL_PATH_ENV = "ALTTEZ_HIERARCHICAL_PATH"
-DEFAULT_HOME_ADVANTAGE = 0.3  # media del prior de gamma; usado como fallback.
+DEFAULT_HOME_ADVANTAGE = 0.3
 
 
 @dataclass(slots=True, frozen=True)
@@ -136,13 +136,13 @@ def load_active_hierarchical_strengths(path: str | Path | None = None) -> Hierar
             teams=teams,
             samples=int(payload.get("samples", 0)),
         )
-    except Exception as exc:  # noqa: BLE001 - artefacto corrupto no debe tumbar inferencia.
+    except Exception as exc:
         LOGGER.warning("hierarchical_artifact_unreadable path=%s detail=%s", resolved, exc)
         return HierarchicalStrengths()
 
 
 def fit_hierarchical_model(
-    matches: "pd.DataFrame",  # noqa: F821 - pandas importado por el caller; evita dep dura.
+    matches: "pd.DataFrame",  # noqa: F821
     *,
     draws: int = 1000,
     tune: int = 1000,
@@ -161,7 +161,7 @@ def fit_hierarchical_model(
     (att/def por equipo) y samples.
     """
     import numpy as _np
-    import pymc as pm  # import perezoso: PyMC solo es dependencia de fit-time.
+    import pymc as pm
 
     home = matches["home_team"].map(canonical_team_name).to_numpy()
     away = matches["away_team"].map(canonical_team_name).to_numpy()
@@ -176,12 +176,11 @@ def fit_hierarchical_model(
     not_neutral = (~neutral).astype(float)
     n_teams = len(teams)
 
-    with pm.Model() as model:
+    with pm.Model():
         mu = pm.Normal("mu", mu=0.0, sigma=1.0)
         gamma = pm.Normal("gamma", mu=0.3, sigma=0.1)
         sigma_att = pm.HalfNormal("sigma_att", sigma=1.0)
         sigma_def = pm.HalfNormal("sigma_def", sigma=1.0)
-        # Restriccion suma-cero: identifica att/def frente al nivel global mu.
         att = pm.ZeroSumNormal("att", sigma=sigma_att, shape=n_teams)
         deff = pm.ZeroSumNormal("def", sigma=sigma_def, shape=n_teams)
 

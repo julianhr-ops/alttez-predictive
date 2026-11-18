@@ -4,11 +4,11 @@
 
 | Cambio | Documentos a revisar |
 | --- | --- |
-| Nuevo modulo o limite | `architecture.md`, `README.md` |
-| Nuevo comando o CI | `workflows.md`, `AGENTS.md` |
+| Nuevo modulo o limite | `architecture.md`, `docs/architecture.md`, `README.md` |
+| Nuevo comando o CI | `workflows.md`, `CLAUDE.md` |
 | Nueva variable | `.env.example`, `configuration.md`, workflow |
 | Feature, modelo o payload | `data-and-models.md`, `architecture.md` |
-| Nueva regla obligatoria | `AGENTS.md` |
+| Nueva regla obligatoria | `CLAUDE.md` |
 
 ## Regla de actualizacion
 
@@ -36,7 +36,9 @@ Evitar datos que envejecen sin explicar como verificarlos.
 
 ## Estado
 
-- Ultima auditoria: 2026-08-03.
-- Resultado: se creo `docs/ai/` como fuente neutral. El anterior `CLAUDE.md`
-  presentaba codificacion danada y datos obsoletos sobre Ruff, migraciones y rama.
+- Ultima auditoria: 2026-11-17.
+- Resultado: se corrigieron las migraciones (`001` a `016`), los valores por defecto
+  de los proveedores, la rama activa, la referencia a un `AGENTS.md` inexistente y el
+  estado de Ruff (bloqueante en CI). Se agregaron el paquete `alttez/nba/`, el
+  paquete `alttez/evaluation/` y `docs/architecture.md`.
 - Codigo fuente modificado por esta auditoria: ninguno.

@@ -11,31 +11,21 @@ from alttez.evaluation.regulation_points import rank_regulation_predictions, reg
 from alttez.features.poisson import PoissonEngine
 
 
-# Typical Dixon-Coles low-score dependence parameter. Negative rho lifts the
-# probability of draws and low-scoring lines that the independent Poisson product
-# systematically underestimates. Used as the strict fallback whenever the fitted
-# artifact is unavailable, so inference always boots.
 DEFAULT_DIXON_COLES_RHO = -0.13
 
-# Sane bounds for a Dixon-Coles low-score dependence parameter. The fit script
-# optimizes within [-0.3, 0.0]; the loader rejects anything outside this range.
 DIXON_COLES_RHO_MIN = -0.3
 DIXON_COLES_RHO_MAX = 0.0
 
-# Active artifact written by scripts/fit_dixon_coles_rho.py. Resolved relative to
-# the repo root (this file lives at <root>/alttez/experiments/).
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DIXON_COLES_RHO_PATH = _REPO_ROOT / "artifacts" / "dixon_coles" / "active.json"
 
 
-def load_active_dixon_coles_rho(path: Optional[str] = None) -> float:
-    """Resuelve el rho de Dixon-Coles activo (ajustado por MLE).
+def load_fitted_dixon_coles_rho(path: Optional[str] = None) -> Optional[float]:
+    """Lee el rho ajustado por MLE de ``artifacts/dixon_coles/active.json``.
 
-    Lee ``artifacts/dixon_coles/active.json`` (override via la variable de entorno
-    ``ALTTEZ_DIXON_COLES_RHO_PATH`` o el argumento ``path``) y devuelve su clave
-    ``rho``. Nunca lanza excepciones: si el archivo falta, es ilegible, no contiene
-    un rho numerico o cae fuera del rango ``[-0.3, 0.0]`` devuelve
-    ``DEFAULT_DIXON_COLES_RHO``. La inferencia debe arrancar sin el artefacto.
+    Override via la variable de entorno ``ALTTEZ_DIXON_COLES_RHO_PATH`` o el argumento
+    ``path``. Devuelve ``None`` si el archivo falta, es ilegible, no contiene un rho
+    numerico o cae fuera del rango ``[-0.3, 0.0]``.
     """
 
     resolved = path or os.environ.get("ALTTEZ_DIXON_COLES_RHO_PATH") or DEFAULT_DIXON_COLES_RHO_PATH
@@ -44,12 +34,23 @@ def load_active_dixon_coles_rho(path: Optional[str] = None) -> float:
             payload = json.load(handle)
         rho = float(payload["rho"])
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-        return DEFAULT_DIXON_COLES_RHO
+        return None
 
     if not np.isfinite(rho) or rho < DIXON_COLES_RHO_MIN or rho > DIXON_COLES_RHO_MAX:
-        return DEFAULT_DIXON_COLES_RHO
+        return None
 
     return rho
+
+
+def load_active_dixon_coles_rho(path: Optional[str] = None) -> float:
+    """Resuelve el rho de Dixon-Coles activo (ajustado por MLE).
+
+    Nunca lanza excepciones: si el artefacto no es utilizable devuelve
+    ``DEFAULT_DIXON_COLES_RHO``. La inferencia debe arrancar sin el artefacto.
+    """
+
+    fitted = load_fitted_dixon_coles_rho(path)
+    return DEFAULT_DIXON_COLES_RHO if fitted is None else fitted
 
 
 def calcular_puntos(pred_h: int, pred_a: int, real_h: int, real_a: int, is_knockout: bool = False) -> int:

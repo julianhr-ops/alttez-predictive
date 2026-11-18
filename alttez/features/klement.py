@@ -8,15 +8,13 @@ from typing import Any
 import pandas as pd
 
 from alttez.api.db import read_dataframe
-from alttez.features.elo import EloEngine
+from alttez.features.elo import EloEngine, tournament_k_factor
 from alttez.ingestion.international import InternationalLoader
 from alttez.ingestion.seed_historical import normalize_name
 
 
 WORLD_CUP_2026_NAME = "FIFA World Cup 2026"
 KNOCKOUT_COMPETITION_CLASSES = {"world_cup", "continental"}
-# Single source of truth for the model feature contract. Both the challenger
-# trainer and the inference router import this so the two cannot drift apart.
 MODEL_FEATURE_COLUMNS = [
     "elo_difference",
     "elo_home_before",
@@ -36,7 +34,6 @@ MODEL_FEATURE_COLUMNS = [
     "away_continent_advantage",
     "continent_advantage_diff",
     "is_knockout",
-    # Tier-1 derived variables (scores + dates), all causal.
     "home_rest_days",
     "away_rest_days",
     "rest_days_diff",
@@ -56,7 +53,6 @@ MODEL_FEATURE_COLUMNS = [
     "h2h_draws",
     "h2h_win_balance",
     "h2h_sample_size",
-    # Tier-2 macro (static prior from public.teams; sparse → coverage flag).
     "gdp_per_capita_home",
     "gdp_per_capita_away",
     "gdp_per_capita_diff",
@@ -99,7 +95,6 @@ class KlementFeatureState:
     post_match_history: dict[str, list[tuple[pd.Timestamp, float]]]
     knockout_event_history: dict[str, list[tuple[pd.Timestamp, str]]]
     team_macro: dict[str, dict[str, Any]]
-    # Tier-1 causal state for rest/congestion/form/H2H features.
     team_match_dates: dict[str, list[pd.Timestamp]] = field(default_factory=dict)
     team_goals_history: dict[str, list[tuple[pd.Timestamp, int, int]]] = field(default_factory=dict)
     h2h_history: dict[tuple[str, str], list[tuple[pd.Timestamp, str, int, int]]] = field(default_factory=dict)
@@ -156,17 +151,6 @@ def _is_knockout_stage(stage: str | None) -> bool:
         "knockout",
     )
     return any(keyword in lowered for keyword in keywords)
-
-
-def _elo_k_for_tournament(tournament: str | None, base_k: float) -> float:
-    value = tournament or ""
-    if "FIFA World Cup" in value:
-        return 60
-    if "Copa America" in value or "UEFA Euro" in value:
-        return 50
-    if "qualification" in value.lower():
-        return 40
-    return base_k
 
 
 def _latest_rating_at_or_before(history: list[tuple[pd.Timestamp, float]], anchor: pd.Timestamp) -> float | None:
@@ -506,14 +490,13 @@ def build_klement_feature_state(
 
         window_start = match_date - pd.Timedelta(days=365 * knockout_window_years)
 
-        def _count_knockout_events(team_name: str) -> float:
+        def _count_knockout_events(team_name: str, window_start=window_start, match_date=match_date) -> float:
             event_count = sum(1 for event_date, _ in knockout_events.get(team_name, []) if window_start <= event_date < match_date)
             return float(math.log1p(event_count))
 
         home_knockout_weight.append(_count_knockout_events(home_team))
         away_knockout_weight.append(_count_knockout_events(away_team))
 
-        # Tier-1 causal features (computed from state holding only earlier matches).
         home_rest.append(_rest_days(team_match_dates.get(home_team, []), match_date))
         away_rest.append(_rest_days(team_match_dates.get(away_team, []), match_date))
         home_cong.append(_congestion(team_match_dates.get(home_team, []), match_date))
@@ -557,7 +540,7 @@ def build_klement_feature_state(
         home_eff = current_home_elo + home_advantage
         expected_home = elo_engine.get_expected_score(home_eff, current_away_elo)
         expected_away = 1 - expected_home
-        k = _elo_k_for_tournament(getattr(row, "tournament", None), elo_engine.k_factor)
+        k = tournament_k_factor(getattr(row, "tournament", None), elo_engine.k_factor)
         if elo_engine.mov_enabled:
             k *= elo_engine.margin_of_victory_multiplier(
                 int(row.home_score), int(row.away_score), home_eff, current_away_elo
@@ -569,7 +552,6 @@ def build_klement_feature_state(
         post_match_history[home_team].append((match_date, new_home_elo))
         post_match_history[away_team].append((match_date, new_away_elo))
 
-        # Update Tier-1 state AFTER computing this row's features (preserves causality).
         home_goals = int(row.home_score)
         away_goals = int(row.away_score)
         team_match_dates[home_team].append(match_date)

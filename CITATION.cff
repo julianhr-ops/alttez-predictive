@@ -1,10 +1,30 @@
-@software{prophitBet2024,
-  author = {Vasileos Kochliaridis},
-  orcid = {0000-0001-9431-6679},
-  month = {1},
-  title = {{ProphitBet - An Open Source Soccer Prediction App}},
-  url = {https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor},
-  version = {2.0.0},
-  year = {2024}
-}
-  
+cff-version: 1.2.0
+message: "If you use this software, please cite it using this metadata."
+type: software
+title: "ALTTEZ Predictive Engine"
+abstract: >-
+  Walk-forward validated probability models for football (1X2) and NBA games,
+  built on free data. Every model is scored against baselines with paired
+  bootstrap confidence intervals.
+authors:
+  - given-names: Julián
+    family-names: Heredia Arrauz
+repository-code: "https://github.com/julianhr-ops/alttez-predictive"
+license: MIT
+keywords:
+  - sports analytics
+  - probabilistic forecasting
+  - elo
+  - poisson
+  - calibration
+  - walk-forward validation
+references:
+  - type: software
+    title: "ProphitBet - An Open Source Soccer Prediction App"
+    authors:
+      - given-names: Vasileios
+        family-names: Kochliaridis
+        orcid: "https://orcid.org/0000-0001-9431-6679"
+    repository-code: "https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor"
+    license: MIT
+    notes: "Upstream project that this repository started from."

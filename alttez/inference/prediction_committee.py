@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -12,10 +13,12 @@ import pandas as pd
 
 from alttez.api.db import read_dataframe
 from alttez.experiments.tournament_oracle import optimize_prediction
-from alttez.inference.calibration import load_active_calibration
-from alttez.inference.committee_weighting import WeightingDecision, resolve_committee_weights
+from alttez.inference.calibration import load_active_calibration, matrix_1x2
+from alttez.inference.committee_weighting import CHAMPION_ROLE, WeightingDecision, resolve_committee_weights
 from alttez.features.hierarchical import load_active_hierarchical_strengths
 from alttez.inference.router import (
+    _matrix_total_fields,
+    _raw_probability_fields,
     ActiveModelSelection,
     BaseMatchPredictor,
     BivariatePoissonMatchPredictor,
@@ -27,6 +30,7 @@ from alttez.inference.router import (
     build_active_predictor,
     exact_scoreline_decision,
 )
+from alttez.inference.serving_policy import POLICY_NONE, POLICY_POISSON, EloUnavailableError, ServingPolicy
 from alttez.ingestion.live_matches import canonical_team_name
 
 
@@ -99,7 +103,7 @@ def load_latest_challenger_record(*, database_url: str | None = None) -> dict[st
             continue
         try:
             payload = joblib.load(artifact)
-        except Exception as exc:  # noqa: BLE001 - invalid challenger should not break committee construction.
+        except Exception as exc:
             LOGGER.debug(
                 "challenger_record_skipped_unloadable_artifact version_key=%s artifact_path=%s detail=%s",
                 record.get("version_key"),
@@ -154,6 +158,21 @@ def _normalize_members(members: list[CommitteeMember]) -> list[CommitteeMember]:
     ]
 
 
+def _member_fallback_reason(predictor: BaseMatchPredictor, prediction: dict[str, Any] | None = None) -> str | None:
+    used = getattr(predictor, "used_fallback", False)
+    reason = getattr(predictor, "fallback_reason", None)
+    if prediction is not None and "used_fallback" in prediction:
+        used, reason = prediction["used_fallback"], prediction.get("fallback_reason")
+    if not used:
+        return None
+    return reason or "motivo desconocido"
+
+
+def _format_fallback_reasons(fallback_reasons: dict[str, str | None]) -> str | None:
+    reasons = [f"{role}: {reason}" for role, reason in fallback_reasons.items() if reason]
+    return "; ".join(reasons) or None
+
+
 class PredictionCommittee(BaseMatchPredictor):
     def __init__(
         self,
@@ -165,11 +184,18 @@ class PredictionCommittee(BaseMatchPredictor):
         if not members:
             raise ValueError("PredictionCommittee requires at least one member.")
         self.members = _normalize_members(members)
-        # Decision de pesos (guardia de consenso / error inverso). None = pesos previos.
         self.weighting = weighting
-        # Calibracion post-hoc del consenso (temperature scaling ajustado offline
-        # sobre las predicciones cerradas del comite). Neutra si no hay artefacto.
-        self.calibration = load_active_calibration()
+        fallback_members = [
+            member for member in self.members if getattr(member.predictor, "used_fallback", False)
+        ]
+        fallback_reason = (
+            "; ".join(
+                f"{member.role}: {getattr(member.predictor, 'fallback_reason', None) or 'motivo desconocido'}"
+                for member in fallback_members
+            )
+            if fallback_members
+            else None
+        )
         super().__init__(
             selection=ActiveModelSelection(
                 version_key=None,
@@ -177,11 +203,22 @@ class PredictionCommittee(BaseMatchPredictor):
                 model_family="committee",
                 artifact_path=None,
                 requested_production_status="active",
-            )
+            ),
+            used_fallback=bool(fallback_members),
+            fallback_reason=fallback_reason,
         )
+        self.calibration = load_active_calibration()
 
     def get_team_profile(self, team: str) -> dict[str, float]:
         return self.members[0].predictor.get_team_profile(canonical_team_name(team))
+
+    def _champion_serving_policy(self) -> ServingPolicy | None:
+        champion = next((member.predictor for member in self.members if member.role == CHAMPION_ROLE), None)
+        return getattr(champion, "serving_policy", None)
+
+    def _unserved_policy_label(self) -> str:
+        champion = next((member.predictor for member in self.members if member.role == CHAMPION_ROLE), None)
+        return POLICY_POISSON if isinstance(champion, PoissonMatchPredictor) else POLICY_NONE
 
     def predict_match(
         self,
@@ -197,7 +234,7 @@ class PredictionCommittee(BaseMatchPredictor):
         away_team = canonical_team_name(away_team)
         member_predictions: list[dict[str, Any]] = []
         matrices: list[tuple[float, np.ndarray]] = []
-
+        fallback_reasons = {member.role: _member_fallback_reason(member.predictor) for member in self.members}
         for member in self.members:
             try:
                 prediction = member.predictor.predict_match(
@@ -208,7 +245,8 @@ class PredictionCommittee(BaseMatchPredictor):
                     max_goals=max_goals,
                     tournament_context=tournament_context,
                 )
-            except Exception as exc:  # noqa: BLE001 - one vote should not kill the committee.
+                fallback_reasons[member.role] = _member_fallback_reason(member.predictor, prediction)
+            except Exception as exc:
                 LOGGER.warning("committee_member_failed role=%s detail=%s", member.role, exc)
                 continue
 
@@ -228,6 +266,7 @@ class PredictionCommittee(BaseMatchPredictor):
                 continue
 
             primary_score = prediction.get("primary_score")
+            member_home, member_draw, member_away = (float(value) for value in matrix_1x2(prob_matrix))
             member_predictions.append(
                 {
                     "role": member.role,
@@ -242,6 +281,9 @@ class PredictionCommittee(BaseMatchPredictor):
                     "ev_optimal_value": prediction.get("ev_optimal_value"),
                     "lambda_h": prediction.get("lambda_h"),
                     "lambda_a": prediction.get("lambda_a"),
+                    "prob_home": member_home,
+                    "prob_draw": member_draw,
+                    "prob_away": member_away,
                 }
             )
             matrices.append((member.weight, np.asarray(prob_matrix, dtype=float)))
@@ -262,13 +304,22 @@ class PredictionCommittee(BaseMatchPredictor):
         total_weight = sum(weight for weight, _ in matrices)
         consensus_matrix = sum((weight / total_weight) * matrix for weight, matrix in matrices)
         consensus_matrix = consensus_matrix / consensus_matrix.sum()
-        # Calibracion del consenso antes de derivar 1X2 y marcadores: coherente
-        # para ambos. Neutra (identidad) si no hay artefacto activo.
-        # NO se aplica cuando el comite defiere al campeon: la temperatura se
-        # ajusto sobre el consenso (blend) y sobre-suavizaria la salida de un
-        # campeon ya bien calibrado (p.ej. Poisson).
         deferred = bool(self.weighting and self.weighting.deferred_to_champion)
         calibration_active = (not deferred) and (not self.calibration.is_neutral)
+        raw_1x2 = matrix_1x2(consensus_matrix)
+        serving_policy = self._champion_serving_policy()
+        served_policy = self._unserved_policy_label()
+        if serving_policy is not None:
+            try:
+                consensus_matrix = serving_policy.serve(consensus_matrix, home_team, away_team, is_neutral)
+                served_policy = serving_policy.name
+                calibration_active = False
+            except EloUnavailableError as exc:
+                if not any(fallback_reasons.values()):
+                    fallback_reasons["committee"] = (
+                        f"serving policy {serving_policy.name} unavailable for {home_team} vs {away_team}: {exc}"
+                    )
+                    LOGGER.warning(fallback_reasons["committee"])
         if calibration_active:
             consensus_matrix = self.calibration.calibrate_matrix(consensus_matrix)
         recommendations = optimize_prediction(consensus_matrix, is_knockout=is_knockout).head(5).copy()
@@ -297,8 +348,9 @@ class PredictionCommittee(BaseMatchPredictor):
             "model_family": self.model_family,
             "requested_model_version": self.requested_model_version,
             "requested_model_family": self.requested_model_family,
-            "used_fallback": False,
-            "fallback_reason": None,
+            "used_fallback": any(fallback_reasons.values()),
+            "fallback_reason": _format_fallback_reasons(fallback_reasons),
+            "serving_policy": served_policy,
             "profile_local": profile_local,
             "profile_visitante": profile_visitante,
             "prediction_supported": True,
@@ -307,9 +359,11 @@ class PredictionCommittee(BaseMatchPredictor):
             "lambda_h": float(np.mean(member_lambdas_h)) if member_lambdas_h else None,
             "lambda_a": float(np.mean(member_lambdas_a)) if member_lambdas_a else None,
             "prob_matrix": consensus_matrix,
+            **_matrix_total_fields(consensus_matrix),
             "prob_home": result_probabilities.get(f"Victoria {home_team}"),
             "prob_draw": result_probabilities.get("Empate"),
             "prob_away": result_probabilities.get(f"Victoria {away_team}"),
+            **_raw_probability_fields(raw_1x2),
             "result_summary": result_summary,
             "recommendations": recommendations,
             "primary_score": score_decision["primary_score"],
@@ -331,7 +385,7 @@ class PredictionCommittee(BaseMatchPredictor):
             "committee_weights": {member.role: member.weight for member in self.members},
             "committee_weighting_strategy": self.weighting.strategy if self.weighting else "default",
             "committee_deferred_to_champion": bool(self.weighting.deferred_to_champion) if self.weighting else False,
-            "calibration_temperature": self.calibration.temperature,
+            "calibration_temperature": getattr(self.calibration, "temperature", None),
             "calibration_applied": calibration_active,
             "discordance_warning": _discordance_warning(member_scores),
             "member_primary_scores": member_scores,
@@ -364,6 +418,7 @@ def build_prediction_committee(
                     artifact_path=None,
                     requested_production_status="committee",
                 ),
+                serving=False,
             ),
             DEFAULT_COMMITTEE_WEIGHTS["poisson_baseline"],
         ),
@@ -384,9 +439,6 @@ def build_prediction_committee(
         ),
     ]
 
-    # Miembro jerarquico bayesiano: solo se anade si hay artefacto de fuerzas
-    # activo (ajuste offline via scripts/fit_hierarchical_bayes.py). Sin artefacto
-    # no aporta senal y se omite para no diluir el consenso.
     if not load_active_hierarchical_strengths().is_empty:
         try:
             members.append(
@@ -404,7 +456,7 @@ def build_prediction_committee(
                     DEFAULT_COMMITTEE_WEIGHTS["hierarchical"],
                 )
             )
-        except Exception as exc:  # noqa: BLE001 - committee can run without hierarchical.
+        except Exception as exc:
             LOGGER.warning("hierarchical_committee_load_failed detail=%s", exc)
 
     challenger_record = load_latest_challenger_record(database_url=database_url)
@@ -423,7 +475,7 @@ def build_prediction_committee(
                     DEFAULT_COMMITTEE_WEIGHTS["challenger"],
                 ),
             )
-        except Exception as exc:  # noqa: BLE001 - committee can run without challenger.
+        except Exception as exc:
             LOGGER.warning("challenger_committee_load_failed detail=%s", exc)
 
     weighting = _resolve_member_weights(members, database_url=database_url)
@@ -433,6 +485,33 @@ def build_prediction_committee(
             for member in members
         ]
     return PredictionCommittee(members, weighting=weighting)
+
+
+def _load_champion_paired_losses(
+    member_versions: dict[str, str],
+    committee_version: str,
+    database_url: str | None,
+) -> tuple[Sequence[float], Sequence[float]] | None:
+    """Perdidas Brier por partido (consenso, campeon) sobre partidos comunes, o None sin muestra.
+
+    Sin ellas la guardia de consenso no se evalua; un fallo de lectura se avisa en
+    WARNING en vez de silenciar la guardia.
+    """
+    champion_version = member_versions.get(CHAMPION_ROLE)
+    if champion_version is None:
+        return None
+    try:
+        from alttez.operations.prediction_memory import load_committee_paired_losses
+
+        return load_committee_paired_losses(
+            consensus_version=committee_version,
+            member_role=CHAMPION_ROLE,
+            member_version=champion_version,
+            database_url=database_url,
+        )
+    except Exception as exc:
+        LOGGER.warning("committee_guard_losses_unavailable detail=%s", exc)
+        return None
 
 
 def _resolve_member_weights(
@@ -449,8 +528,6 @@ def _resolve_member_weights(
     try:
         from alttez.operations.prediction_memory import load_prediction_learning_audit
 
-        # Ventana amplia: las evaluaciones cerradas pueden ser mas viejas que el
-        # default de 180 dias; necesitamos suficiente muestra para ponderar.
         audit = load_prediction_learning_audit(database_url=database_url, lookback_days=365)
         member_versions = {member.role: str(member.predictor.model_version) for member in members}
         return resolve_committee_weights(
@@ -458,7 +535,8 @@ def _resolve_member_weights(
             audit.get("models", []),
             DEFAULT_COMMITTEE_WEIGHTS,
             committee_version=committee_version,
+            paired_losses=_load_champion_paired_losses(member_versions, committee_version, database_url),
         )
-    except Exception as exc:  # noqa: BLE001 - weighting is an optimization, never a hard dependency.
+    except Exception as exc:
         LOGGER.warning("committee_weighting_failed detail=%s", exc)
         return None

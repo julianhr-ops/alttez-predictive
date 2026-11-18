@@ -1,389 +1,183 @@
 # ALTTEZ Predictive Engine
 
-ALTTEZ is the active development branch of the former ProphitBet codebase, reshaped into a football prediction platform focused on:
+[![CI](https://github.com/julianhr-ops/alttez-predictive/actions/workflows/ci.yml/badge.svg)](https://github.com/julianhr-ops/alttez-predictive/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.txt)
+![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)
 
-- international match ingestion
-- Supabase-backed historical storage
-- ELO and Poisson feature engineering
-- tournament prediction optimization
-- a Streamlit dashboard for interactive analysis
-- a multi-provider ingestion stack for operational data
+ALTTEZ produces win probabilities for international football (1X2 and scorelines) and for NBA games from free public data, and it measures every model before trusting it. A daily pipeline ingests results, serves predictions, stores each prediction once, grades it after the game, and builds a report. The core of the project is the evaluation harness. Each model is scored walk-forward against simple baselines on identical games, with paired bootstrap confidence intervals, and the repository keeps the findings that went against its own models.
 
-This branch is currently centered on national-team workflows and tournament forecasting.
+## Why it is different
 
-## Status
+- **Walk-forward validation.** Every test period is predicted only from data that came before it. Hyperparameters, calibrators and blend weights are fitted on earlier seasons or years and never on the period being scored. Ratings score a game from the state before its date, so a prediction cannot see its own result.
+- **Baselines on the same games.** Uniform, base rate, plain Elo and the NBA closing line are scored on the identical matches as the model. Beating a coin flip is not reported as a win.
+- **Uncertainty on every comparison.** `alttez/evaluation/paired.py` resamples per-game loss differences, in blocks of game dates when games share a day, and reports a 95% interval. A difference counts only when the interval excludes 0.
+- **The legacy soccer model lost to plain Elo, and the fix was measured before it was served.** The audit found that the original Poisson champion is worse than an Elo-only baseline on Brier, RPS and log loss, pooled and in 7 of 8 test years, with a draw bias that one temperature cannot fix. The harness then scored eight candidate replacements. Selection used 2018 to 2022 only, and 2023 to 2025 were kept as an untouched final test. The chosen Elo ordinal rule beat the Poisson champion there by Brier -0.0728 [-0.0836, -0.0623] on 3,191 matches, and it is now served by default through `alttez/inference/serving_policy.py`. The Poisson score matrix is rescaled to the Elo 1X2 so scorelines stay coherent, and `ALTTEZ_SERVING_POLICY=off` restores plain Poisson. The same report says the rule is statistically equivalent to plain Elo, so the win is mostly "use Elo" ([docs/validation_soccer.md](docs/validation_soccer.md)).
+- **NBA Elo does not beat the closing line.** Elo beats the constant home rate and vanilla Elo, but it does not beat the market close in any test season. A blend of Elo and the market line only reproduces the line. So the served prediction defers to the market-based blend whenever a line exists, and uses calibrated Elo only for games with no line ([docs/nba.md](docs/nba.md)).
+- **Leakage and duplication fixed with tests.** The audit found and fixed a calibration fitted on one shape and applied to another, duplicate prediction rows that inflated the learning data, an Elo K factor that treated qualifiers as finals, and a registry failure that silently served the fallback ([docs/model-history.md](docs/model-history.md)). NBA predictions are keyed on game, model version and served model, written while the game is scheduled and never rewritten after tip-off. A line that appears after the first prediction adds a blend row beside the Elo row, and the scoreboard counts each game once.
 
-The `desarrollo` branch already includes:
+## Results
 
-- migration from the legacy `src/` layout to the `alttez/` package
-- a Supabase schema and compatibility view for historical international results
-- a historical seed pipeline from `international_results.csv`
-- a Streamlit dashboard powered by the new ingestion layer
-- a provider stack with `API-Football`, `football-data.org`, `StatsBomb Open Data`, and local JSON fallback support
+Every number below is copied from a validation report, and each report names the command that reproduces it.
 
-What is still in progress:
+### NBA, walk-forward, test seasons 2020-21 to 2025-26
 
-- completing a local StatsBomb Open Data mirror in this environment
-- building the transformation layer from `raw_matches_api` into canonical match tables for daily ingestion
+7,776 games were played in the test seasons and 7,764 of them have a closing line. The table is scored on those 7,764 games so every row sees the same games. Source is [docs/nba.md](docs/nba.md), reproduced with `python scripts/nba_validate.py`.
 
-## Repository layout
+| model | Brier | log loss | accuracy | ECE |
+| --- | --- | --- | --- | --- |
+| constant home rate | 0.2473 | 0.6878 | 0.554 | 0.011 |
+| vanilla Elo | 0.2199 | 0.6295 | 0.646 | 0.013 |
+| MOV Elo | 0.2174 | 0.6240 | 0.651 | 0.012 |
+| MOV Elo + Platt | 0.2173 | 0.6238 | 0.652 | 0.012 |
+| market close | 0.2067 | 0.5995 | 0.678 | 0.012 |
+| Elo + market blend | 0.2070 | 0.6004 | 0.679 | 0.010 |
+
+The paired bootstrap, by game date, pooled over the six test seasons, says MOV Elo beats the constant rate and vanilla Elo. Against vanilla Elo its log loss difference is -0.0055 [-0.0078, -0.0032], a gain of about 0.005. It does not beat the market close in any season. Pooled, its log loss is +0.0245 [+0.0202, +0.0288] worse than the market. The blend gives the Elo logit a coefficient of about zero and the market logit about 1.03, so it reproduces the market. Its Brier difference against the market is +0.0004 [-0.0000, +0.0008] and its log loss difference is +0.0009 [+0.0000, +0.0017].
+
+### Soccer 1X2, walk-forward
+
+Source is [docs/validation_soccer.md](docs/validation_soccer.md). The work has two stages, a diagnosis of the legacy Poisson champion on 2018 to 2025 and a held-out test of a replacement.
+
+**Stage 1, diagnosis.** 7,611 identical international matches, test years 2018 to 2025, reproduced with `python scripts/validate_soccer.py --refit-days 1 --workers 10` (33 minutes in the report).
+
+| model | Brier | RPS | log loss | accuracy |
+| --- | --- | --- | --- | --- |
+| uniform | 0.6667 | 0.2390 | 1.0986 | 0.475 |
+| base rate | 0.6350 | 0.2282 | 1.0527 | 0.475 |
+| Elo only | 0.5148 | 0.1707 | 0.8741 | 0.597 |
+| Poisson raw | 0.5811 | 0.1998 | 0.9760 | 0.526 |
+| Poisson + temperature | 0.5811 | 0.1996 | 0.9761 | 0.526 |
+
+Paired bootstrap, model minus baseline, lower is better. Poisson raw against Elo only is Brier +0.0663 [+0.0585, +0.0735], so the Poisson champion is worse. Poisson raw against base rate is -0.0539 [-0.0605, -0.0476], so it beats the base rate. Poisson + temperature against Poisson raw is Brier +0.0000 [-0.0007, +0.0007], so calibration changes nothing measurable. The accuracy of the uniform and base-rate rows is the home-win share, because both always pick home.
+
+**Stage 2, selection and held-out test.** Eight candidate rules were declared and compared on 2018 to 2022 only, and the simplest one inside the noise of the best was chosen, an Elo ordinal rule (Elo ratings with a fitted draw model). It was committed as the primary candidate before 2023 to 2025 were scored. Those three years are an untouched test of 3,191 matches, reproduced with `python scripts/validate_soccer.py --refit-days 1 --raw-cache-dir artifacts/soccer/raw --report-years 2023 2025 --candidates elo_ordinal`.
+
+| model | Brier | RPS | log loss | accuracy |
+| --- | --- | --- | --- | --- |
+| uniform | 0.6667 | 0.2389 | 1.0986 | 0.467 |
+| base rate | 0.6381 | 0.2295 | 1.0569 | 0.467 |
+| Elo only | 0.5142 | 0.1700 | 0.8714 | 0.599 |
+| Poisson raw (legacy champion) | 0.5855 | 0.2014 | 0.9812 | 0.522 |
+| Poisson + temperature | 0.5862 | 0.2015 | 0.9821 | 0.522 |
+| Elo ordinal draw | 0.5127 | 0.1694 | 0.8700 | 0.602 |
+
+Elo ordinal against Poisson raw, paired bootstrap, 2023 to 2025, is Brier -0.0728 [-0.0836, -0.0623], RPS -0.0320 [-0.0364, -0.0278] and log loss -0.1113 [-0.1271, -0.0955]. The Brier interval is below 0 in each of the three years. The draw over-prediction is gone. On the held-out years the mean predicted draw rate is 0.224 for Elo ordinal and 0.283 for Poisson raw, against 0.233 observed.
+
+The gain comes from using Elo, not from the fitted draw model. Elo ordinal against plain Elo only is Brier -0.0015 [-0.0025, -0.0004] on the held-out years, and over 2018 to 2025 (selection years included) it is -0.0003 [-0.0010, +0.0003]. The report treats the two Elo rules as equivalent in accuracy and prefers the fitted one for serving because its draw rate is calibrated and it comes with a coherent score matrix. A blend with the Poisson 1X2 added nothing.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    SRC["Free data<br/>martj42, hoopR, ESPN, StatsBomb"] --> ING["Ingestion<br/>provider stack, loaders, cache"]
+    ING --> FEAT["Features and ratings<br/>Elo, Poisson, MOV Elo"]
+    FEAT --> MOD["Models<br/>Poisson, Elo ordinal, XGBoost, committee, NBA blend"]
+    MOD --> CAL["Calibration<br/>temperature, isotonic, Platt"]
+    CAL --> SERVE["Serving<br/>router, Elo ordinal serving policy, NBA served model"]
+    SERVE --> DB[("Postgres<br/>one row per prediction")]
+    DAILY["Daily pipeline<br/>run_daily_process.ps1"] --> ING
+    DAILY --> SERVE
+    DB --> REP["Reports<br/>daily brief, NBA digest, dashboard"]
+    EVAL["Evaluation<br/>baselines, paired bootstrap, backtests"] -. validates .-> MOD
+```
+
+[docs/architecture.md](docs/architecture.md) has the detailed diagram and a module-level walkthrough.
+
+## Tech stack
+
+- Python 3.13 with pandas, NumPy, SciPy, scikit-learn, XGBoost and PyMC for the models, and Optuna for tuning.
+- PostgreSQL on Supabase through SQLAlchemy and psycopg, with 16 forward-only SQL migrations in `sql/supabase/migrations/`.
+- Streamlit and Altair for the dashboard.
+- `unittest` for tests, Ruff for lint, and GitHub Actions for CI and the scheduled daily run.
+- PowerShell for the daily orchestrator, `scripts/run_daily_process.ps1`.
+
+## Quickstart
+
+You need Python 3.13 or newer. These commands run on Linux, macOS and Windows and need no database and no API key.
+
+```bash
+git clone https://github.com/julianhr-ops/alttez-predictive.git
+cd alttez-predictive
+python -m venv venv
+```
+
+Activate the environment with `source venv/bin/activate` on Linux and macOS, or `venv\Scripts\Activate.ps1` in Windows PowerShell. Then install the dependencies and run the checks.
+
+```bash
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests
+python scripts/nba_validate.py
+python scripts/nba_daily.py --dry-run
+python scripts/nba_daily.py --dry-run --html out.html
+python scripts/validate_soccer.py --help
+```
+
+- `unittest discover` runs the offline test suite. Tests never use the network.
+- `nba_validate.py` downloads the hoopR files into `artifacts/nba/`, runs the NBA walk-forward validation, writes `artifacts/nba/validation.json` and prints the markdown report.
+- `nba_daily.py --dry-run` predicts the games on the ESPN scoreboard and prints the digest without opening a database. It refuses to predict and exits with code 3 when the data is stale. Add `--html out.html` to also write the digest as a self-contained HTML page.
+- `validate_soccer.py` runs the soccer backtest. A full run takes tens of minutes, so start with `--help`.
+
+The database, the dashboard and the daily process need configuration. `.env.example` is the template, [docs/provider-stack.md](docs/provider-stack.md) covers the providers, and [docs/ai/workflows.md](docs/ai/workflows.md) covers the local workflows (in Spanish).
+
+To browse predictions, start the dashboard with `python -m streamlit run alttez/dashboard/app.py` and pick `NBA` in the sidebar. It needs `SUPABASE_DB_URL` for data and shows a no-database message with the dry-run command when the variable is missing.
+
+## Project layout
 
 ```text
 alttez/
-  api/                Database and environment helpers
-  dashboard/          Streamlit application
-  experiments/        Research and validation scripts
-  features/           ELO, Poisson, statistics, preprocessing
-  ingestion/          Historical seed, loaders, provider stack
-  models/             Legacy model wrappers adapted to alttez/
-  training/           Training helpers
-
-sql/supabase/         Schema and compatibility SQL
-sql/supabase/migrations/  Versioned Supabase migration chain
-scripts/              Operational PowerShell helpers
-storage/network/      Local cached datasets
-docs/                 Operational notes
+  api/          database engine, settings, migration runner
+  dashboard/    Streamlit application, with the NBA view in nba_view.py
+  evaluation/   baselines, paired bootstrap, metrics, soccer backtest
+  experiments/  tournament oracle and World Cup research code
+  features/     Elo, Poisson, Klement features, preprocessing
+  inference/    router, committee, calibration, World Cup 2026 simulator
+  ingestion/    provider stack, certification, historical seed, result backfill
+  models/       model wrappers inherited from ProphitBet
+  nba/          NBA data, models, validation, prediction, storage
+  network/      connectivity helpers
+  operations/   prediction memory, artifact store, alerts, expansion policy
+  reports/      daily brief, tournament review, NBA digest, Telegram delivery
+  training/     trainer, tuner, champion and challenger cycle
+scripts/        command-line entry points and the PowerShell daily orchestrator
+sql/supabase/   numbered migrations, 001 to 016
+tests/          unittest suite and fixtures
+docs/           architecture, validation reports, model history, provider stack, notes in docs/ai
+storage/        tournament review state and World Cup 2026 configuration
+.github/        CI and the scheduled daily workflow
 ```
 
-## Core workflows
+## Data sources and licenses
 
-### 1. Dashboard
+| Source | Used for | License or terms |
+| --- | --- | --- |
+| [hoopR-nba-data](https://github.com/sportsdataverse/hoopR-nba-data) | NBA schedule and closing lines | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), attribution required. The repository does not redistribute the files. The scripts download them at run time and cache them under `artifacts/nba/`. |
+| [martj42/international_results](https://github.com/martj42/international_results) | International match history | CC0 |
+| [StatsBomb Open Data](https://github.com/statsbomb/open-data) | Optional event data from a local clone | Attribution to StatsBomb required when the data is used. |
+| ESPN public JSON | Live scoreboards and the odds ESPN relays | Unofficial endpoints, used for personal and educational purposes. They can change without notice. ALTTEZ has no affiliation with ESPN. |
+| football-data.org | Optional fixtures and results | Free API key and the provider's terms. |
 
-Run the Streamlit app:
+Schedule and betting-line data come from sportsdataverse/hoopR-nba-data (CC BY 4.0). ALTTEZ drops non-NBA franchise ids and duplicate rows, converts tip-off times to US dates and normalises the sign of the spread. The odds that ESPN shows come from DraftKings and belong to a third party. Nothing here is affiliated with the NBA, ESPN, DraftKings or any bookmaker.
 
-```powershell
-venv\Scripts\python.exe -m streamlit run alttez/dashboard/app.py
-```
+## Limitations and known follow-ups
 
-Optional helper script:
+- The soccer serving rule is Elo based. Its edge over plain Elo is inside the noise, so the validated claim is "Elo beats the Poisson champion", not "the fitted draw model beats Elo". A class-specific correction of the Poisson 1X2 and a Poisson model with Elo inputs are untested.
+- A team with no Elo rating, or a match the support gate rejects, keeps the Poisson path and is flagged as a fallback. Calibration of the served Elo 1X2 is not applied, since the existing temperature was fitted on Poisson output.
+- The soccer backtest scores 7,611 of 7,829 test-year matches. The router abstains on the other 218 because a team has fewer than 5 matches in the last 4 years.
+- XGBoost, the hierarchical and bivariate Poisson models, the committee consensus and the tournament simulation are not evaluated in the backtest.
+- The Elo constants come from the original code. Whether they were tuned on the test years is unknown.
+- NBA Elo adds no measurable information to the closing line. Its value is coverage of games that have no line yet.
+- The NBA blend is fitted on odds-API closing lines from hoopR. Live lines come from ESPN, usually DraftKings. The live scoreboard in the NBA digest checks that gap and shows an interval only from 30 lined games.
+- The scheduled workflow runs only on the owner's repository and needs a Supabase database and secrets. A fork runs the tests and the validation scripts but not the daily process.
+- Dashboard and brief strings are in Spanish, and so is part of the docs under `docs/ai/`.
 
-```powershell
-.\scripts\start_streamlit_supabase.ps1
-```
+## Disclaimer
 
-That helper now runs the shadow readiness preflight before launching Streamlit.
+ALTTEZ is a research and engineering project. Its output is a statistical result and not betting advice or financial advice. Nobody should stake money on it. Team and league names appear only to identify the data.
 
-One-click launcher for Windows:
+## License and credits
 
-```powershell
-.\open_alttez_dashboard.cmd
-```
+MIT, see [LICENSE.txt](LICENSE.txt). The code began as a reshaping of [ProphitBet](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor) by Vasileios Kochliaridis, whose copyright notice stays in the license. The ALTTEZ name is the owner's. Citation metadata is in [CITATION.cff](CITATION.cff).
 
-Or, if you prefer PowerShell directly:
+## Resumen en español
 
-```powershell
-.\scripts\open_alttez_dashboard.ps1
-```
-
-The dashboard reads historical data through `InternationalLoader`, which now prefers Supabase and falls back locally only when needed.
-
-### 2. Historical seed into Supabase
-
-Dry run:
-
-```powershell
-venv\Scripts\python.exe -m alttez.ingestion.seed_historical --dry-run
-```
-
-Real load:
-
-```powershell
-venv\Scripts\python.exe -m alttez.ingestion.seed_historical
-```
-
-### 3. Provider stack healthcheck
-
-Check which providers are configured:
-
-```powershell
-venv\Scripts\python.exe -m alttez.ingestion.provider_healthcheck
-```
-
-JSON output:
-
-```powershell
-venv\Scripts\python.exe -m alttez.ingestion.provider_healthcheck --json
-```
-
-### 4. Provider stack dry-run
-
-Fetch from the configured provider stack without writing to Supabase:
-
-```powershell
-venv\Scripts\python.exe -m alttez.ingestion.provider_stack --dry-run
-```
-
-Provider override example:
-
-```powershell
-venv\Scripts\python.exe -m alttez.ingestion.provider_stack --provider-order api_football,football_data_org --dry-run
-```
-
-### 5. Live pipeline smoke test
-
-Validate provider fetch, historical training, and recommendation generation in one pass:
-
-```powershell
-venv\Scripts\python.exe scripts\smoke_live_pipeline.py --date 2026-05-26
-```
-
-Persist the live agenda and verify readback from Supabase:
-
-```powershell
-venv\Scripts\python.exe scripts\smoke_live_pipeline.py --date 2026-05-26 --write
-```
-
-When the live batch includes finished matches with enough metric coverage, ALTTEZ also writes a certification report under `artifacts/certification/` and the dashboard surfaces that status alongside the sync result.
-
-A successful provider query with no international fixtures exits with code 3 (idle/no_schedule), distinct from code 1 for provider or operational failures.
-
-Daily process runner:
-
-```powershell
-.\scripts\run_daily_process.ps1 -ApplyMigrations -WriteSmoke
-```
-
-The same sequence is scheduled in GitHub Actions at 02:00 UTC through `.github/workflows/daily_process.yml`, where the workflow materializes a temporary `.env`, applies migrations, runs the live smoke pipeline, generates the daily brief, runs the champion-vs-challenger batch, and uploads certification plus model-evaluation artifacts. Daily brief delivery is enabled automatically only when the required Telegram or webhook secrets are present.
-
-### 6. Daily brief to Telegram
-
-The brief can be delivered automatically to a Telegram chat after the daily process.
-
-Local setup:
-
-```powershell
-ALTTEZ_DAILY_BRIEF_DELIVER=true
-ALTTEZ_DAILY_BRIEF_DELIVERY_CHANNEL=telegram
-ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN=<bot-token>
-ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID=<chat-id>
-```
-
-Manual delivery test:
-
-```powershell
-.\scripts\send_daily_brief.ps1 -Date 2026-05-26
-```
-
-GitHub Actions setup:
-
-- `ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN`
-- `ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID`
-
-Once those secrets exist, the scheduled workflow sends the brief every day at `02:00 UTC`.
-
-### 7. Prediction memory and model monitoring
-
-ALTTEZ now keeps point-in-time prediction memory in Supabase:
-
-- `prediction_runs`
-- `match_predictions`
-- `prediction_evaluations`
-- `model_versions`
-
-The daily brief persists the exact probabilities emitted for the day, and the live sync closes evaluations once those matches finish. The Streamlit dashboard now includes a dedicated `Rendimiento del modelo` view with:
-
-- historical `Brier Score`
-- `Log Loss`
-- `1X2 accuracy`
-- exact score hit rate
-- metrics by `model_version`
-- confidence-band calibration
-- champion vs challenger registry
-
-Manual challenger cycle:
-
-```powershell
-venv\Scripts\python.exe scripts\run_challenger_cycle.py --date 2026-05-26
-```
-
-The challenger cycle now applies a formal governance rule:
-
-- `Brier Score` decides eligibility
-- `Log Loss` acts as a guardrail
-- `production_status` shows whether the challenger is only `eligible`, still `shadow`, or truly `active`
-- auto-promotion stays off by default unless `ALTTEZ_AUTO_PROMOTE_MODELS=true`
-
-The production router now resolves the active model directly from `public.model_versions`. If the active artifact is not loadable, ALTTEZ falls back automatically to the Poisson champion and leaves that trace in the brief and dashboard payload.
-
-Manual activation and rollback:
-
-```powershell
-venv\Scripts\python.exe scripts\activate_model_version.py --version-key <version-key>
-venv\Scripts\python.exe scripts\rollback_active_model.py
-```
-
-To allow XGBoost as a production family, keep:
-
-```powershell
-ALTTEZ_SUPPORTED_PRODUCTION_MODEL_FAMILIES=poisson,xgboost
-```
-
-### 7.1. Mundial 2026 simulator
-
-ALTTEZ now includes a dedicated `World Cup 2026` simulator that runs on the same active predictor used by the daily brief.
-
-Run it with:
-
-```powershell
-venv\Scripts\python.exe scripts\run_world_cup_2026_simulation.py --date 2026-05-27 --iterations 500
-```
-
-The simulator expects a local JSON configuration at:
-
-```text
-storage/world_cup_2026/world_cup_2026_config.json
-```
-
-That file should declare:
-
-- `groups`
-- `knockout_fixtures`
-
-Artifacts are written under:
-
-```text
-artifacts/world-cup-2026/
-```
-
-For a fast validation pass, use `--iterations 100`.
-
-The `Rendimiento del modelo` panel now shows:
-
-- the current `active` model
-- challengers `eligible` or `blocked`
-- and the latest `Mundial 2026` simulation artifact when available
-
-### 8. Telegram incident alerts
-
-If you want critical pipeline failures to reach Telegram too, configure:
-
-```powershell
-ALTTEZ_ALERTS_TELEGRAM_ENABLED=true
-ALTTEZ_ALERTS_TELEGRAM_BOT_TOKEN=<bot-token>
-ALTTEZ_ALERTS_TELEGRAM_CHAT_ID=<chat-id>
-```
-
-The daily process now sends a short incident message when a critical stage fails, including:
-
-- readiness
-- migrations
-- smoke pipeline
-- daily brief
-- challenger cycle
-
-## Environment
-
-Copy the template and fill in the real credentials:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Important variables:
-
-- `SUPABASE_DB_URL`
-- `ALTTEZ_DATA_SOURCE`
-- `ALTTEZ_SUPABASE_VIEW`
-- `ALTTEZ_ALLOW_LOCAL_FALLBACK`
-- `ALTTEZ_PROVIDER_STACK`
-- `ALTTEZ_API_FOOTBALL_KEY`
-- `ALTTEZ_FOOTBALL_DATA_KEY`
-- `ALTTEZ_STATSBOMB_OPEN_ROOT`
-- `ALTTEZ_LOCAL_JSON_PATH`
-
-The runtime now auto-loads `.env` through `alttez.api.settings`, so the app no longer depends on shell-exported variables.
-
-If you change `.env` while Streamlit is already running, restart the process before retrying a live sync. The launcher scripts already do the right thing in the right order, so you usually do not need to remember the long command anymore.
-Recommended pre-flight check:
-
-```powershell
-venv\Scripts\python.exe -m alttez.ingestion.provider_healthcheck --json
-```
-
-## Supabase
-
-The canonical migration chain for fresh installs lives in:
-
-- [001_base_catalogs_and_match_tables.sql](sql/supabase/migrations/001_base_catalogs_and_match_tables.sql)
-- [002_match_enrichment.sql](sql/supabase/migrations/002_match_enrichment.sql)
-- [003_indexes.sql](sql/supabase/migrations/003_indexes.sql)
-- [004_updated_at_triggers.sql](sql/supabase/migrations/004_updated_at_triggers.sql)
-- [005_international_results_compat_view.sql](sql/supabase/migrations/005_international_results_compat_view.sql)
-- [006_certification_batches.sql](sql/supabase/migrations/006_certification_batches.sql)
-- [007_alert_events.sql](sql/supabase/migrations/007_alert_events.sql)
-- [008_prediction_memory.sql](sql/supabase/migrations/008_prediction_memory.sql)
-- [009_model_governance.sql](sql/supabase/migrations/009_model_governance.sql)
-
-The compatibility view keeps the current analytical code working while the canonical schema evolves underneath.
-Dry-run the migration chain:
-
-```powershell
-venv\Scripts\python.exe scripts\apply_supabase_migrations.py
-```
-
-Apply the migration chain to Supabase:
-
-```powershell
-venv\Scripts\python.exe scripts\apply_supabase_migrations.py --apply
-```
-
-The migration chain is also validated automatically in CI on push and pull request.
-
-Optional local hook install:
-
-```powershell
-.\scripts\install_git_hooks.ps1
-```
-
-That installs the `pre-push` hook from `.githooks/pre-push` into `.git/hooks/pre-push`, which runs tests, readiness, and the migration plan before a push.
-If your checkout blocks writes into `.git`, use `git config core.hooksPath .githooks` or copy the hook manually into `.git/hooks/pre-push`.
-
-## Modeling stack
-
-### Historical international pipeline
-
-- `alttez.ingestion.international.InternationalLoader`
-- `alttez.features.elo.EloEngine`
-- `alttez.features.poisson.PoissonEngine`
-- `alttez.experiments.world_cup_prep`
-- `alttez.experiments.train_world_cup`
-- `alttez.experiments.tournament_oracle`  
-
-### Tournament optimizer
-
-The current tournament oracle:
-
-- estimates expected goals from recent form
-- builds a Poisson score matrix
-- computes expected value using the polla rules
-- returns the scoreline that maximizes long-run points
-
-## Provider strategy
-
-ALTTEZ does not rely on a single API anymore.
-
-Default stack:
-
-1. `api_football`
-2. `football_data_org`
-3. `statsbomb_open`
-4. `local_json`
-
-This lets us combine operational coverage, structured fallback, analytical richness, and manual recovery paths.
-
-More details:
-
-- [docs/provider-stack.md](docs/provider-stack.md)
-
-## Notes for this branch
-
-- `desarrollo` is the active branch for the ALTTEZ migration work
-- the legacy top-level launcher files were removed in favor of the package-first structure
-- the old `src/` tree is being retired from this branch
-
-## Practical next steps
-
-1. finish wiring a local StatsBomb Open Data mirror
-2. transform `raw_matches_api` into canonical `matches` and `match_team_stats`
-3. schedule the daily ingestion job
-4. commit the branch in logical blocks as the migration stabilizes
+ALTTEZ calcula probabilidades de victoria para fútbol internacional (1X2 y marcadores) y para partidos de la NBA usando solo datos públicos y gratuitos. Cada modelo se valida con el método walk-forward, contra modelos de referencia sobre los mismos partidos y con intervalos de confianza de bootstrap pareado. El repositorio conserva los resultados negativos. La auditoría mostró que el campeón Poisson de fútbol era peor que un Elo simple. Se evaluaron ocho reglas candidatas, se eligió una con los años 2018 a 2022 y se probó en 2023 a 2025, que no se usaron para elegir. La regla ganadora, un Elo ordinal con modelo de empates, mejora al campeón Poisson con una diferencia de Brier de -0.0728 [-0.0836, -0.0623] sobre 3,191 partidos, y hoy se sirve por defecto (`ALTTEZ_SERVING_POLICY=off` devuelve el Poisson original). Frente a un Elo simple la diferencia es estadísticamente equivalente. El Elo de la NBA no supera la línea de cierre del mercado, así que cuando existe una línea el modelo servido se apoya en el mercado. Para probarlo, instale Python 3.13 o superior, cree un entorno virtual, ejecute `pip install -r requirements.txt` y luego `python -m unittest discover -s tests`. Para ver las predicciones NBA sin base de datos, ejecute `python scripts/nba_daily.py --dry-run --html out.html`, que genera un resumen HTML autocontenido. El panel (`python -m streamlit run alttez/dashboard/app.py`) tiene una opción NBA en la barra lateral. Necesita `SUPABASE_DB_URL` para mostrar datos y, sin ella, muestra un aviso claro. Las cifras están en `docs/nba.md` y `docs/validation_soccer.md`, y la guía local en español está en `docs/ai/workflows.md`. Este proyecto es de investigación y no constituye asesoría de apuestas ni financiera.

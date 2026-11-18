@@ -14,6 +14,7 @@ No escribe nada; solo mide.
 from __future__ import annotations
 
 import argparse
+import logging
 from datetime import datetime, timezone
 
 import numpy as np
@@ -26,33 +27,63 @@ from alttez.inference.calibration import (
     load_active_calibration,
     log_loss,
 )
+from alttez.operations.prediction_memory import select_latest_pre_kickoff
+
+LOGGER = logging.getLogger(__name__)
 
 
-def load_closed_predictions(*, database_url: str | None, lookback_days: int) -> pd.DataFrame:
-    """Predicciones cerradas con sus 3 probabilidades y el resultado real."""
-    lookback_start = (datetime.now(timezone.utc).date() - pd.Timedelta(days=lookback_days)).isoformat()
-    return read_dataframe(
-        """
+RAW_COLUMNS_SQL = """
+            mp.raw_predicted_home_win_prob as raw_prob_home,
+            mp.raw_predicted_draw_prob as raw_prob_draw,
+            mp.raw_predicted_away_win_prob as raw_prob_away,"""
+LEGACY_RAW_COLUMNS_SQL = """
+            null::numeric as raw_prob_home,
+            null::numeric as raw_prob_draw,
+            null::numeric as raw_prob_away,"""
+
+
+def closed_predictions_query(*, include_raw: bool) -> str:
+    raw_columns = RAW_COLUMNS_SQL if include_raw else LEGACY_RAW_COLUMNS_SQL
+    return f"""
         select
+            mp.match_id,
             mp.model_version,
+            mp.prediction_created_at,
+            mp.kickoff_at,
             mp.predicted_home_win_prob as prob_home,
             mp.predicted_draw_prob as prob_draw,
-            mp.predicted_away_win_prob as prob_away,
+            mp.predicted_away_win_prob as prob_away,{raw_columns}
             pe.actual_outcome
         from public.prediction_evaluations as pe
         join public.match_predictions as mp on mp.id = pe.prediction_id
         where mp.match_date >= :lookback_start
           and pe.actual_outcome is not null
-        """,
-        params={"lookback_start": lookback_start},
-        database_url=database_url,
-    )
+        """
+
+
+def load_closed_predictions(*, database_url: str | None, lookback_days: int) -> pd.DataFrame:
+    """Predicciones cerradas, una por (partido, model_version), con probabilidades servidas y crudas.
+
+    Si la migracion 014 aun no esta aplicada las columnas crudas no existen: se
+    avisa y se carga la consulta legacy con las columnas crudas en NULL.
+    """
+    params = {"lookback_start": (datetime.now(timezone.utc).date() - pd.Timedelta(days=lookback_days)).isoformat()}
+    try:
+        frame = read_dataframe(closed_predictions_query(include_raw=True), params=params, database_url=database_url)
+    except Exception as exc:
+        LOGGER.warning(
+            "No se pudieron leer las probabilidades crudas (%s); aplica la migracion 014. "
+            "Se usan solo las probabilidades almacenadas (ya calibradas).",
+            exc,
+        )
+        frame = read_dataframe(closed_predictions_query(include_raw=False), params=params, database_url=database_url)
+    return select_latest_pre_kickoff(frame)
 
 
 def _brier(triplets: np.ndarray, outcomes: list[str]) -> float:
     index = {"H": 0, "D": 1, "A": 2}
     errors = []
-    for row, outcome in zip(triplets, outcomes):
+    for row, outcome in zip(triplets, outcomes, strict=False):
         target = np.zeros(3)
         idx = index.get(outcome)
         if idx is None:
@@ -67,7 +98,7 @@ def _accuracy(triplets: np.ndarray, outcomes: list[str]) -> float:
     index = {"H": 0, "D": 1, "A": 2}
     hits = [
         1.0 if int(np.argmax(row)) == index.get(outcome, -1) else 0.0
-        for row, outcome in zip(triplets, outcomes)
+        for row, outcome in zip(triplets, outcomes, strict=False)
     ]
     return float(np.mean(hits)) if hits else 0.0
 

@@ -7,7 +7,8 @@
 | Historico internacional | Supabase o fallback local | Entrenamiento y perfiles |
 | Agenda/resultados live | Stack de proveedores | Prediccion diaria y cierre |
 | Configuracion Mundial 2026 | `storage/world_cup_2026/` | Simulacion |
-| Graficos de paises | `storage/graphics/countries/` | Presentacion |
+| NBA: calendario y lineas de cierre | hoopR-nba-data (CC BY 4.0), cache en `artifacts/nba/` | Entrenamiento y validacion NBA |
+| NBA: partidos proximos y linea | ESPN scoreboard, una fecha por llamada | Prediccion diaria NBA |
 | Artefactos de modelos | Local/Supabase segun servicio | Inferencia versionada |
 | Reportes y auditorias | `artifacts/` | Salidas regenerables |
 
@@ -40,7 +41,13 @@ cambio de payload requiere revisar brief, dashboard, memoria y pruebas.
 
 No comparar modelos solo por accuracy. El proyecto usa Brier, Log Loss, RPS,
 calibracion y metricas operativas; la politica concreta vive en
-`training/challenger_cycle.py`.
+`training/challenger_cycle.py`. Todo modelo se compara con baselines (uniforme,
+tasa base, Elo) sobre los mismos partidos, con bootstrap pareado
+(`alttez/evaluation/`). La validacion walk-forward mostro que el campeon Poisson
+no supera a Elo solo y que una regla Elo ordinal, elegida con 2018 a 2022 y
+confirmada en 2023 a 2025, si lo supera (`docs/validation_soccer.md`). Esa regla
+se sirve por defecto (`inference/serving_policy.py`, `ALTTEZ_SERVING_POLICY=off`
+la desactiva). Elo NBA no supera la linea de cierre (`docs/nba.md`).
 
 ## Cold start y fallbacks
 

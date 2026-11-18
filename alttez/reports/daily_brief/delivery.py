@@ -2,32 +2,16 @@ from __future__ import annotations
 
 import html
 import json
-import mimetypes
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib import error, parse, request
+from urllib import error, request
 
 from alttez.dashboard.analysis_helpers import safe_text
-from .constants import DEFAULT_DELIVERY_TIMEOUT_SECONDS
-from .formatting import _fmt_expected_goals, _fmt_float, _fmt_pct, most_likely_total_goals, prob_over_2_5
+from alttez.reports.telegram_delivery import send_document, send_message, telegram_config
+from .formatting import _fmt_expected_goals, _fmt_float, _fmt_pct, match_goal_totals
 
 
-def _delivery_timeout_seconds() -> int:
-    timeout_raw = os.getenv("ALTTEZ_DAILY_BRIEF_DELIVERY_TIMEOUT_SECONDS", "").strip()
-    if not timeout_raw:
-        timeout_raw = os.getenv("ALTTEZ_DAILY_BRIEF_WEBHOOK_TIMEOUT_SECONDS", "10").strip() or "10"
-    try:
-        return max(1, int(timeout_raw))
-    except ValueError:
-        return DEFAULT_DELIVERY_TIMEOUT_SECONDS
-
-
-def _telegram_delivery_config() -> tuple[str | None, str | None]:
-    token = os.getenv("ALTTEZ_DAILY_BRIEF_TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("ALTTEZ_DAILY_BRIEF_TELEGRAM_CHAT_ID", "").strip()
-    return (token or None, chat_id or None)
 
 
 def _delivery_channel() -> str:
@@ -76,9 +60,8 @@ def _build_telegram_summary_text(payload: dict[str, Any]) -> str:
         lines.extend(["", "🎯 <b>Top decisiones</b>"])
         for index, match in enumerate(ranked_matches, start=1):
             executive_decision = _executive_decision_label(match)
-            over_prob = prob_over_2_5(match.get("lambda_h"), match.get("lambda_a"))
+            over_prob, total_goals = match_goal_totals(match)
             over_text = f" · Over 2.5 {_fmt_pct(over_prob)}" if over_prob is not None else ""
-            total_goals = most_likely_total_goals(match.get("lambda_h"), match.get("lambda_a"))
             total_text = f" · Total mas probable {total_goals} goles" if total_goals is not None else ""
             lines.append(
                 (
@@ -98,84 +81,6 @@ def _build_telegram_summary_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _telegram_api_url(bot_token: str, method: str) -> str:
-    return f"https://api.telegram.org/bot{bot_token}/{method}"
-
-
-def _send_telegram_message(bot_token: str, chat_id: str, text: str) -> tuple[bool, str | None]:
-    data = parse.urlencode(
-        {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": "true",
-        }
-    ).encode("utf-8")
-    req = request.Request(
-        _telegram_api_url(bot_token, "sendMessage"),
-        data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with request.urlopen(req, timeout=_delivery_timeout_seconds()) as response:
-            if 200 <= int(getattr(response, "status", 200)) < 300:
-                return True, None
-            return False, f"Telegram sendMessage returned HTTP {getattr(response, 'status', 'unknown')}."
-    except error.URLError as exc:
-        return False, str(exc)
-
-
-def _build_multipart_payload(fields: dict[str, str], file_field: str, file_path: Path) -> tuple[bytes, str]:
-    boundary = f"----ALTTEZBoundary{datetime.now(timezone.utc).timestamp()}".replace(".", "")
-    file_bytes = file_path.read_bytes()
-    mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-    chunks: list[bytes] = []
-
-    for key, value in fields.items():
-        chunks.extend(
-            [
-                f"--{boundary}\r\n".encode("utf-8"),
-                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8"),
-                value.encode("utf-8"),
-                b"\r\n",
-            ]
-        )
-
-    chunks.extend(
-        [
-            f"--{boundary}\r\n".encode("utf-8"),
-            (
-                f'Content-Disposition: form-data; name="{file_field}"; filename="{file_path.name}"\r\n'
-            ).encode("utf-8"),
-            f"Content-Type: {mime_type}\r\n\r\n".encode("utf-8"),
-            file_bytes,
-            b"\r\n",
-            f"--{boundary}--\r\n".encode("utf-8"),
-        ]
-    )
-    return b"".join(chunks), boundary
-
-
-def _send_telegram_document(bot_token: str, chat_id: str, file_path: Path, caption: str | None = None) -> tuple[bool, str | None]:
-    fields = {"chat_id": chat_id}
-    if caption:
-        fields["caption"] = caption
-        fields["parse_mode"] = "HTML"
-    payload, boundary = _build_multipart_payload(fields, "document", file_path)
-    req = request.Request(
-        _telegram_api_url(bot_token, "sendDocument"),
-        data=payload,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        method="POST",
-    )
-    try:
-        with request.urlopen(req, timeout=_delivery_timeout_seconds()) as response:
-            if 200 <= int(getattr(response, "status", 200)) < 300:
-                return True, None
-            return False, f"Telegram sendDocument returned HTTP {getattr(response, 'status', 'unknown')}."
-    except error.URLError as exc:
-        return False, str(exc)
 
 
 def _dispatch_daily_brief_webhook(payload: dict[str, Any], html_content: str, webhook_url: str | None = None) -> tuple[bool, str | None]:
@@ -216,16 +121,16 @@ def _dispatch_daily_brief_webhook(payload: dict[str, Any], html_content: str, we
 
 
 def _dispatch_daily_brief_telegram(payload: dict[str, Any], html_path: Path, json_path: Path) -> tuple[bool, str | None]:
-    bot_token, chat_id = _telegram_delivery_config()
+    bot_token, chat_id = telegram_config()
     if not bot_token or not chat_id:
         return False, "Telegram bot token or chat id is not configured."
 
     summary_text = _build_telegram_summary_text(payload)
-    sent, error_message = _send_telegram_message(bot_token, chat_id, summary_text)
+    sent, error_message = send_message(bot_token, chat_id, summary_text)
     if not sent:
         return False, error_message
 
-    html_sent, html_error = _send_telegram_document(
+    html_sent, html_error = send_document(
         bot_token,
         chat_id,
         html_path,
@@ -234,7 +139,7 @@ def _dispatch_daily_brief_telegram(payload: dict[str, Any], html_path: Path, jso
     if not html_sent:
         return False, html_error
 
-    json_sent, json_error = _send_telegram_document(bot_token, chat_id, json_path)
+    json_sent, json_error = send_document(bot_token, chat_id, json_path)
     if not json_sent:
         return False, json_error
 
@@ -249,7 +154,7 @@ def dispatch_daily_brief(
     webhook_url: str | None = None,
 ) -> tuple[bool, str | None, str]:
     delivery_channel = _delivery_channel()
-    telegram_token, telegram_chat_id = _telegram_delivery_config()
+    telegram_token, telegram_chat_id = telegram_config()
 
     if delivery_channel in {"telegram", "auto"} and telegram_token and telegram_chat_id:
         delivered, error_message = _dispatch_daily_brief_telegram(payload, html_path, json_path)

@@ -22,6 +22,7 @@ $tournamentReviews = Join-Path $root "scripts\process_tournament_reviews.py"
 $brief = Join-Path $root "scripts\generate_daily_brief.py"
 $challenger = Join-Path $root "scripts\run_challenger_cycle.py"
 $pipelineAlert = Join-Path $root "scripts\send_pipeline_alert.py"
+$nbaDaily = Join-Path $root "scripts\nba_daily.py"
 $envPath = Join-Path $root ".env"
 
 function Get-AlttezEnvValue {
@@ -54,6 +55,29 @@ function Clear-LoopbackProxyTrap {
             [Environment]::SetEnvironmentVariable($Name, $null, "Process")
             Write-Output "PROCESS: cleared invalid local proxy $Name"
         }
+    }
+}
+
+$script:NbaStageInvoked = $false
+
+# NBA runs on free data and is independent of the soccer schedule, so it runs on the
+# idle/no_schedule path too. Non-fatal: it must never abort the soccer brief.
+function Invoke-NbaStage {
+    $script:NbaStageInvoked = $true
+    $script:CurrentStage = "nba predictions"
+    Write-Output "PROCESS: nba predictions"
+    $nbaArgs = @($nbaDaily, "--date", $Date)
+    if ($DatabaseUrl) {
+        $nbaArgs += @("--database-url", $DatabaseUrl)
+    }
+    $deliverNba = (Get-AlttezEnvValue "ALTTEZ_DAILY_BRIEF_DELIVER")
+    if ($deliverNba -and $deliverNba.ToLowerInvariant() -in @("1", "true", "yes", "on")) {
+        $nbaArgs += "--deliver"
+    }
+    & $python @nbaArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "PROCESS: nba predictions degraded (non-fatal)"
+        & $python $pipelineAlert --stage $script:CurrentStage --date $Date --message "NBA predictions failed (non-fatal); see nba_daily exit code $LASTEXITCODE." --level warning | Out-Null
     }
 }
 
@@ -141,6 +165,7 @@ try {
     }
 
     if ($NoSchedule) {
+        Invoke-NbaStage
         Write-Output "PROCESS: complete (idle/no_schedule)"
         exit 0
     }
@@ -193,11 +218,21 @@ try {
         throw "Challenger cycle failed."
     }
 
+    Invoke-NbaStage
+
     Write-Output "PROCESS: complete"
 }
 catch {
     $errorMessage = $_.Exception.Message
     Write-Output "PROCESS: pipeline incident alert"
     & $python $pipelineAlert --stage $CurrentStage --date $Date --message $errorMessage --level critical | Out-Null
+    if (-not $script:NbaStageInvoked) {
+        try {
+            Invoke-NbaStage
+        }
+        catch {
+            Write-Output "PROCESS: nba predictions failed (non-fatal)"
+        }
+    }
     throw
 }

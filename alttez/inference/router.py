@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -19,7 +20,6 @@ from alttez.evaluation.regulation_points import (
     scoreline_scenarios_for_prediction,
 )
 from alttez.experiments.tournament_oracle import (
-    DEFAULT_DIXON_COLES_RHO,
     build_probability_matrix,
     optimize_prediction,
     validate_points_optimal_recommendations,
@@ -33,7 +33,66 @@ from alttez.ingestion.live_matches import canonical_team_name
 from alttez.features.poisson import PoissonEngine
 from alttez.features.bivariate_poisson import BivariatePoissonEngine, load_active_bivariate_params
 from alttez.features.hierarchical import HierarchicalBayesEngine, load_active_hierarchical_strengths
-from alttez.inference.calibration import load_single_predictor_calibration
+from alttez.inference.calibration import load_single_predictor_calibration, matrix_1x2
+from alttez.inference.serving_policy import (
+    POLICY_ELO_ORDINAL,
+    POLICY_NONE,
+    POLICY_POISSON,
+    EloUnavailableError,
+    ServingPolicy,
+    build_serving_policy,
+    serving_policy_enabled,
+)
+
+
+def _matrix_total_fields(matrix: np.ndarray) -> dict[str, float | int]:
+    totals = np.indices(matrix.shape).sum(axis=0)
+    masses = np.bincount(totals.ravel(), weights=matrix.ravel())
+    return {"prob_over_2_5": float(masses[3:].sum()), "most_likely_total": int(masses.argmax())}
+
+
+def _join_reasons(*reasons: str | None) -> str | None:
+    joined = "; ".join(reason for reason in reasons if reason)
+    return joined or None
+
+
+@dataclass(frozen=True, slots=True)
+class _ServedMatrix:
+    matrix: np.ndarray
+    raw_1x2: tuple[float, float, float]
+    policy: str
+    used_fallback: bool
+    fallback_reason: str | None
+
+
+
+
+def _raw_probability_fields(raw_1x2: tuple[float, float, float]) -> dict[str, float]:
+    return {"raw_prob_home": raw_1x2[0], "raw_prob_draw": raw_1x2[1], "raw_prob_away": raw_1x2[2]}
+
+
+LOGGER = logging.getLogger(__name__)
+
+ARTIFACTS_DIR_ENV = "ALTTEZ_ARTIFACTS_DIR"
+DEFAULT_ARTIFACTS_DIR = "artifacts"
+
+
+class ArtifactPathError(ValueError):
+    """El artifact_path del registro apunta fuera del directorio de artefactos permitido."""
+
+
+def resolve_artifact_path(raw_path: str | Path, *, artifacts_dir: str | Path | None = None) -> Path:
+    """Resuelve `raw_path` y exige que quede dentro del directorio de artefactos.
+
+    joblib.load ejecuta codigo arbitrario al deserializar, asi que una ruta venida de
+    la base de datos no puede salirse de `artifacts/` (ni por `..` ni por rutas
+    absolutas ni por enlaces simbolicos): se compara la ruta ya resuelta.
+    """
+    base = Path(artifacts_dir or os.getenv(ARTIFACTS_DIR_ENV) or DEFAULT_ARTIFACTS_DIR).resolve()
+    resolved = Path(raw_path).resolve()
+    if not resolved.is_relative_to(base):
+        raise ArtifactPathError(f"artifact_path fuera del directorio de artefactos permitido ({base}): {raw_path}")
+    return resolved
 
 
 DEFAULT_POISSON_MODEL_VERSION = "poisson-champion-v2"
@@ -47,7 +106,6 @@ DEFAULT_POISSON_KWARGS = {
     "recency_half_life_days": 365,
     "recent_form_matches": 6,
 }
-# Single source of truth lives in alttez.features.klement; aliased for compatibility.
 XGBOOST_FEATURE_COLUMNS = MODEL_FEATURE_COLUMNS
 DEFAULT_MAX_GOALS = 7
 
@@ -238,11 +296,8 @@ def _is_prediction_supported(profile_local: dict[str, float], profile_visitante:
     away_effective = float(profile_visitante.get("effective_matches", 0.0))
     threshold = _support_threshold()
     if threshold <= 0:
-        return True, None  # gating disabled
+        return True, None
 
-    # Stricter gating: BOTH teams must clear the minimum history and have effective
-    # (recency-weighted) support. This drops matchups that would only produce noise
-    # instead of letting a single well-covered team carry an unsupported prediction.
     if min(local_matches, away_matches) < threshold:
         return False, f"Historial insuficiente: se requieren >= {threshold} partidos por equipo."
     if min(local_effective, away_effective) <= 0:
@@ -275,9 +330,14 @@ class BaseMatchPredictor(ABC):
         self.model_family = selection.model_family
         self.used_fallback = used_fallback
         self.fallback_reason = fallback_reason
-        # Calibracion del predictor unico (separada del consenso del comite).
-        # NEUTRA salvo que ALTTEZ_CALIBRATE_SINGLE_PREDICTOR este encendido.
         self.calibration = load_single_predictor_calibration()
+
+    def _calibrate_matrix(self, prob_matrix: np.ndarray) -> tuple[np.ndarray, tuple[float, float, float]]:
+        """Calibra la matriz (si la calibracion esta activa) y devuelve tambien su 1X2 crudo, previo a calibrar."""
+        raw_1x2 = matrix_1x2(prob_matrix)
+        if not self.calibration.is_neutral:
+            prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
+        return prob_matrix, raw_1x2
 
     @abstractmethod
     def get_team_profile(self, team: str) -> dict[str, float]:
@@ -307,6 +367,7 @@ class PoissonMatchPredictor(BaseMatchPredictor):
         poisson_kwargs: dict[str, Any] | None = None,
         used_fallback: bool = False,
         fallback_reason: str | None = None,
+        serving: bool | None = None,
     ) -> None:
         super().__init__(selection=selection, used_fallback=used_fallback, fallback_reason=fallback_reason)
         self.model_version = DEFAULT_POISSON_MODEL_VERSION if used_fallback else selection.model_version
@@ -316,6 +377,30 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             kwargs.update(poisson_kwargs)
         self.engine = PoissonEngine(**kwargs)
         self.engine.fit(historical_df, target_date=target_date)
+        self.serving_policy: ServingPolicy | None = None
+        if serving_policy_enabled(serving):
+            try:
+                self.serving_policy = build_serving_policy(historical_df, target_date)
+            except Exception as exc:
+                reason = f"serving policy {POLICY_ELO_ORDINAL} unavailable: {type(exc).__name__}: {exc}"
+                LOGGER.warning(reason)
+                self.used_fallback = True
+                self.fallback_reason = _join_reasons(self.fallback_reason, reason)
+
+    def _serve_matrix(self, prob_matrix: np.ndarray, home_team: str, away_team: str, is_neutral: bool) -> _ServedMatrix:
+        """Apply the serving policy; the raw Poisson 1X2 is kept either way for the calibration pipeline."""
+        raw_1x2 = matrix_1x2(prob_matrix)
+        if self.serving_policy is not None:
+            try:
+                served = self.serving_policy.serve(prob_matrix, home_team, away_team, is_neutral)
+            except EloUnavailableError as exc:
+                reason = f"serving policy {self.serving_policy.name} unavailable for {home_team} vs {away_team}: {exc}"
+                LOGGER.warning(reason)
+                matrix, _ = self._calibrate_matrix(prob_matrix)
+                return _ServedMatrix(matrix, raw_1x2, POLICY_POISSON, True, _join_reasons(self.fallback_reason, reason))
+            return _ServedMatrix(served, raw_1x2, self.serving_policy.name, self.used_fallback, self.fallback_reason)
+        matrix, _ = self._calibrate_matrix(prob_matrix)
+        return _ServedMatrix(matrix, raw_1x2, POLICY_POISSON, self.used_fallback, self.fallback_reason)
 
     def get_team_profile(self, team: str) -> dict[str, float]:
         return self.engine.get_team_profile(canonical_team_name(team))
@@ -345,6 +430,7 @@ class PoissonMatchPredictor(BaseMatchPredictor):
                 "requested_model_family": self.requested_model_family,
                 "used_fallback": self.used_fallback,
                 "fallback_reason": self.fallback_reason,
+                "serving_policy": POLICY_POISSON if self.serving_policy is None else self.serving_policy.name,
                 "profile_local": profile_local,
                 "profile_visitante": profile_visitante,
                 "prediction_supported": False,
@@ -375,11 +461,9 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             }
 
         lambda_h, lambda_a = self.engine.predict_xg(home_team, away_team, is_neutral=is_neutral)
-        # rho=None resuelve el rho Dixon-Coles ajustado por MLE (artifact activo),
-        # con fallback a DEFAULT_DIXON_COLES_RHO cuando no hay artefacto.
         prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=None)
-        if not self.calibration.is_neutral:
-            prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
+        served = self._serve_matrix(prob_matrix, home_team, away_team, is_neutral)
+        prob_matrix, raw_1x2 = served.matrix, served.raw_1x2
         recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
         score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
@@ -398,8 +482,9 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             "model_family": self.model_family,
             "requested_model_version": self.requested_model_version,
             "requested_model_family": self.requested_model_family,
-            "used_fallback": self.used_fallback,
-            "fallback_reason": self.fallback_reason,
+            "used_fallback": served.used_fallback,
+            "fallback_reason": served.fallback_reason,
+            "serving_policy": served.policy,
             "profile_local": profile_local,
             "profile_visitante": profile_visitante,
             "prediction_supported": True,
@@ -408,9 +493,11 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             "lambda_h": float(lambda_h),
             "lambda_a": float(lambda_a),
             "prob_matrix": prob_matrix,
+            **_matrix_total_fields(prob_matrix),
             "prob_home": result_probabilities.get(f"Victoria {home_team}"),
             "prob_draw": result_probabilities.get("Empate"),
             "prob_away": result_probabilities.get(f"Victoria {away_team}"),
+            **_raw_probability_fields(raw_1x2),
             "result_summary": result_summary,
             "recommendations": recommendations,
             "primary_score": score_decision["primary_score"],
@@ -443,17 +530,15 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         super().__init__(selection=selection)
         if not selection.artifact_path:
             raise FileNotFoundError("El modelo activo XGBoost no declara artifact_path.")
-        artifact_path = Path(selection.artifact_path)
+        artifact_path = resolve_artifact_path(selection.artifact_path)
         if not artifact_path.exists() and selection.version_key:
-            # The binary may not be on this host (ephemeral runner / fresh checkout).
-            # Hydrate it from the durable store keyed by version_key before giving up.
             try:
                 from alttez.operations.artifact_store import download_artifact
 
                 fetched = download_artifact(selection.version_key, artifact_path, database_url=database_url)
                 if fetched is not None:
-                    artifact_path = fetched
-            except Exception:  # noqa: BLE001 - fall through to the explicit not-found error below.
+                    artifact_path = resolve_artifact_path(fetched)
+            except Exception:
                 pass
         if not artifact_path.exists():
             raise FileNotFoundError(f"No existe el artefacto XGBoost activo: {artifact_path}")
@@ -480,6 +565,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
                 requested_production_status=selection.requested_production_status,
             ),
             poisson_kwargs=poisson_kwargs,
+            serving=False,
         )
         self.recent_state = _build_recent_form_state(self.historical_df)
         _, self.klement_state = build_klement_feature_state(self.historical_df, database_url=database_url)
@@ -535,6 +621,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
         baseline["requested_model_family"] = self.requested_model_family
         baseline["used_fallback"] = self.used_fallback
         baseline["fallback_reason"] = self.fallback_reason
+        baseline["serving_policy"] = POLICY_NONE
         if not baseline["prediction_supported"]:
             return baseline
 
@@ -543,8 +630,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             lambda_h = max(float(self.models["home_goals"].predict(feature_df)[0]), 0.05)
             lambda_a = max(float(self.models["away_goals"].predict(feature_df)[0]), 0.05)
             prob_matrix = build_probability_matrix(lambda_h, lambda_a, max_goals=max_goals, rho=None)
-            if not self.calibration.is_neutral:
-                prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
+            prob_matrix, raw_1x2 = self._calibrate_matrix(prob_matrix)
             recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
             recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
             score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
@@ -557,9 +643,11 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             baseline["lambda_h"] = float(lambda_h)
             baseline["lambda_a"] = float(lambda_a)
             baseline["prob_matrix"] = prob_matrix
+            baseline.update(_matrix_total_fields(prob_matrix))
             baseline["prob_home"] = result_probabilities.get(f"Victoria {home_team}")
             baseline["prob_draw"] = result_probabilities.get("Empate")
             baseline["prob_away"] = result_probabilities.get(f"Victoria {away_team}")
+            baseline.update(_raw_probability_fields(raw_1x2))
             baseline["result_summary"] = result_summary
             baseline["recommendations"] = recommendations
             baseline["primary_score"] = score_decision["primary_score"]
@@ -575,16 +663,19 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             baseline["scoreline_candidates"] = score_decision["scoreline_candidates"]
             baseline["score_selection_policy"] = "most_likely_outcome_exact_score"
         else:
+            # The v1 classifier has no score matrix.
+            baseline.pop("prob_over_2_5", None)
+            baseline.pop("most_likely_total", None)
             probabilities = self.model.predict_proba(feature_df)[0]
             probability_map = {label: float(probabilities[idx]) for idx, label in enumerate(self.label_order)}
             probability_map.setdefault("H", 0.0)
             probability_map.setdefault("D", 0.0)
             probability_map.setdefault("A", 0.0)
+            raw_1x2 = (probability_map["H"], probability_map["D"], probability_map["A"])
             if not self.calibration.is_neutral:
-                cal_h, cal_d, cal_a = self.calibration.calibrate_triplet(
-                    probability_map["H"], probability_map["D"], probability_map["A"]
+                probability_map["H"], probability_map["D"], probability_map["A"] = self.calibration.calibrate_triplet(
+                    *raw_1x2
                 )
-                probability_map["H"], probability_map["D"], probability_map["A"] = cal_h, cal_d, cal_a
             market_rows = [
                 {"Mercado": f"Victoria {home_team}", "Probabilidad": probability_map["H"]},
                 {"Mercado": "Empate", "Probabilidad": probability_map["D"]},
@@ -593,6 +684,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             baseline["prob_home"] = probability_map["H"]
             baseline["prob_draw"] = probability_map["D"]
             baseline["prob_away"] = probability_map["A"]
+            baseline.update(_raw_probability_fields(raw_1x2))
             baseline["result_summary"] = pd.DataFrame(market_rows)
 
         best_market = max(market_rows, key=lambda row: float(row["Probabilidad"]))
@@ -623,7 +715,7 @@ class BivariatePoissonMatchPredictor(BaseMatchPredictor):
         super().__init__(selection=selection)
         self.model_family = "bivariate_poisson"
         self.poisson_baseline = PoissonMatchPredictor(
-            historical_df, target_date, selection=selection, poisson_kwargs=poisson_kwargs
+            historical_df, target_date, selection=selection, poisson_kwargs=poisson_kwargs, serving=False
         )
         params = load_active_bivariate_params()
         self.engine = BivariatePoissonEngine(
@@ -661,8 +753,7 @@ class BivariatePoissonMatchPredictor(BaseMatchPredictor):
         lambda_h = float(baseline["lambda_h"])
         lambda_a = float(baseline["lambda_a"])
         prob_matrix = self.engine.build_matrix(lambda_h, lambda_a, max_goals=max_goals)
-        if not self.calibration.is_neutral:
-            prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
+        prob_matrix, raw_1x2 = self._calibrate_matrix(prob_matrix)
         recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
         score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
@@ -674,9 +765,11 @@ class BivariatePoissonMatchPredictor(BaseMatchPredictor):
         best_market = max(result_summary.to_dict(orient="records"), key=lambda row: float(row["Probabilidad"]))
 
         baseline["prob_matrix"] = prob_matrix
+        baseline.update(_matrix_total_fields(prob_matrix))
         baseline["prob_home"] = result_probabilities.get(f"Victoria {home_team}")
         baseline["prob_draw"] = result_probabilities.get("Empate")
         baseline["prob_away"] = result_probabilities.get(f"Victoria {away_team}")
+        baseline.update(_raw_probability_fields(raw_1x2))
         baseline["result_summary"] = result_summary
         baseline["recommendations"] = recommendations
         baseline["primary_score"] = score_decision["primary_score"]
@@ -760,8 +853,7 @@ class HierarchicalMatchPredictor(BaseMatchPredictor):
 
         lambda_h, lambda_a = self.engine.expected_goals(home_team, away_team, is_neutral=is_neutral)
         prob_matrix = self.engine.build_matrix(home_team, away_team, is_neutral=is_neutral, max_goals=max_goals)
-        if not self.calibration.is_neutral:
-            prob_matrix = self.calibration.calibrate_matrix(prob_matrix)
+        prob_matrix, raw_1x2 = self._calibrate_matrix(prob_matrix)
         recommendations = optimize_prediction(prob_matrix, is_knockout=is_knockout).head(5).copy()
         recommendations["EV"] = recommendations["EV"].map(lambda value: round(float(value), 3))
         score_decision = exact_scoreline_decision(prob_matrix, recommendations, is_knockout=is_knockout)
@@ -785,9 +877,11 @@ class HierarchicalMatchPredictor(BaseMatchPredictor):
             "lambda_h": float(lambda_h),
             "lambda_a": float(lambda_a),
             "prob_matrix": prob_matrix,
+            **_matrix_total_fields(prob_matrix),
             "prob_home": result_probabilities.get(f"Victoria {home_team}"),
             "prob_draw": result_probabilities.get("Empate"),
             "prob_away": result_probabilities.get(f"Victoria {away_team}"),
+            **_raw_probability_fields(raw_1x2),
             "result_summary": result_summary,
             "recommendations": recommendations,
             "primary_score": score_decision["primary_score"],
@@ -825,17 +919,23 @@ def _selection_from_record(record: dict[str, Any] | None) -> ActiveModelSelectio
     )
 
 
-def _load_active_model_record_safe(*, database_url: str | None = None) -> dict[str, Any] | None:
-    # Keep inference bootable even if the model registry stack is temporarily unavailable.
-    try:
-        from alttez.operations.prediction_memory import load_active_model_record
-    except Exception:
-        return None
+@dataclass(frozen=True, slots=True)
+class ActiveRecordLookup:
+    """Resultado de consultar el registro de modelos: el registro, o el error que impidio leerlo."""
 
+    record: dict[str, Any] | None
+    error: str | None = None
+
+
+def _load_active_model_record_safe(*, database_url: str | None = None) -> ActiveRecordLookup:
     try:
-        return load_active_model_record(database_url=database_url)
-    except Exception:
-        return None
+        from alttez.operations.prediction_memory import fetch_active_model_record
+
+        return ActiveRecordLookup(record=fetch_active_model_record(database_url=database_url))
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        LOGGER.warning("Model registry unavailable, serving Poisson fallback: %s", error)
+        return ActiveRecordLookup(record=None, error=error)
 
 
 def build_active_predictor(
@@ -850,7 +950,8 @@ def build_active_predictor(
     else:
         target_date_str = str(target_date)
 
-    selection = _selection_from_record(_load_active_model_record_safe(database_url=database_url))
+    lookup = _load_active_model_record_safe(database_url=database_url)
+    selection = _selection_from_record(lookup.record)
     family = selection.model_family.strip().lower()
 
     if family == "xgboost":
@@ -862,21 +963,29 @@ def build_active_predictor(
                 poisson_kwargs=poisson_kwargs,
                 database_url=database_url,
             )
-        except Exception as exc:  # noqa: BLE001 - production fallback should keep the pipeline alive.
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            LOGGER.warning(
+                "Active %s model %s failed to load, serving Poisson fallback: %s",
+                selection.model_family,
+                selection.model_version,
+                reason,
+            )
             return PoissonMatchPredictor(
                 historical_df,
                 target_date_str,
                 selection=selection,
                 poisson_kwargs=poisson_kwargs,
                 used_fallback=True,
-                fallback_reason=str(exc),
+                fallback_reason=reason,
             )
 
+    registry_failed = lookup.error is not None
     return PoissonMatchPredictor(
         historical_df,
         target_date_str,
         selection=selection,
         poisson_kwargs=poisson_kwargs,
-        used_fallback=False,
-        fallback_reason=None,
+        used_fallback=registry_failed,
+        fallback_reason=f"model registry unavailable: {lookup.error}" if registry_failed else None,
     )
