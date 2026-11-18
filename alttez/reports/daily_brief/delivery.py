@@ -9,7 +9,7 @@ from urllib import error, request
 
 from alttez.dashboard.analysis_helpers import safe_text
 from alttez.reports.telegram_delivery import send_document, send_message, telegram_config
-from .formatting import _fmt_expected_goals, _fmt_float, _fmt_pct, most_likely_total_goals, prob_over_2_5
+from .formatting import _fmt_expected_goals, _fmt_float, _fmt_pct, match_goal_totals
 
 
 
@@ -60,9 +60,8 @@ def _build_telegram_summary_text(payload: dict[str, Any]) -> str:
         lines.extend(["", "🎯 <b>Top decisiones</b>"])
         for index, match in enumerate(ranked_matches, start=1):
             executive_decision = _executive_decision_label(match)
-            over_prob = prob_over_2_5(match.get("lambda_h"), match.get("lambda_a"))
+            over_prob, total_goals = match_goal_totals(match)
             over_text = f" · Over 2.5 {_fmt_pct(over_prob)}" if over_prob is not None else ""
-            total_goals = most_likely_total_goals(match.get("lambda_h"), match.get("lambda_a"))
             total_text = f" · Total mas probable {total_goals} goles" if total_goals is not None else ""
             lines.append(
                 (

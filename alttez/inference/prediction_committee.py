@@ -17,6 +17,7 @@ from alttez.inference.calibration import load_active_calibration, matrix_1x2
 from alttez.inference.committee_weighting import CHAMPION_ROLE, WeightingDecision, resolve_committee_weights
 from alttez.features.hierarchical import load_active_hierarchical_strengths
 from alttez.inference.router import (
+    _matrix_total_fields,
     _raw_probability_fields,
     ActiveModelSelection,
     BaseMatchPredictor,
@@ -358,6 +359,7 @@ class PredictionCommittee(BaseMatchPredictor):
             "lambda_h": float(np.mean(member_lambdas_h)) if member_lambdas_h else None,
             "lambda_a": float(np.mean(member_lambdas_a)) if member_lambdas_a else None,
             "prob_matrix": consensus_matrix,
+            **_matrix_total_fields(consensus_matrix),
             "prob_home": result_probabilities.get(f"Victoria {home_team}"),
             "prob_draw": result_probabilities.get("Empate"),
             "prob_away": result_probabilities.get(f"Victoria {away_team}"),

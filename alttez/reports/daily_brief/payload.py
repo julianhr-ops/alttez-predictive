@@ -257,6 +257,10 @@ def _build_match_brief(row_dict: dict[str, Any], predictor: BaseMatchPredictor, 
         "discordance_warning": bool(prediction.get("discordance_warning", False)),
         "member_primary_scores": prediction.get("member_primary_scores", []),
     }
+    for key in ("prob_over_2_5", "most_likely_total"):
+        if key in prediction:
+            brief[key] = prediction[key]
+
 
     if not prediction_supported:
         brief.update(

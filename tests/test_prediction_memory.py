@@ -31,6 +31,13 @@ from alttez.operations.prediction_memory import (
 
 
 class TestPredictionMemory(unittest.TestCase):
+    def test_match_payload_preserves_serving_and_total_fields(self) -> None:
+        fields = {"used_fallback": True, "fallback_reason": "missing Elo", "serving_policy": "poisson",
+                  "prob_over_2_5": 0.17, "most_likely_total": 0}
+        match = {"match_id": "m1", "target_date": "2026-05-27", "home_team": "Mexico", "away_team": "Brazil", **fields}
+        row = _filter_match_prediction_row(match, "run-row", "run", "v1", "poisson")
+        self.assertEqual({key: row["payload"].get(key) for key in fields}, fields)
+
     def test_brier_score_rewards_calibrated_prediction(self) -> None:
         confident_correct = brier_score_1x2(0.75, 0.15, 0.10, "H")
         flat_prediction = brier_score_1x2(0.34, 0.33, 0.33, "H")

@@ -95,13 +95,7 @@ def _fmt_pct(value: Any, default: str = "N/D") -> str:
 
 
 def prob_over_2_5(lambda_h: Any, lambda_a: Any) -> float | None:
-    """Probabilidad de mas de 2.5 goles totales desde las lambdas del modelo.
-
-    La suma de dos Poisson independientes es Poisson(lambda_h + lambda_a), asi que
-    P(total > 2.5) = 1 - P(0) - P(1) - P(2). Funcion pura para que el resumen de
-    Telegram comunique el nivel de goles esperado (no solo el marcador modal, que
-    cae por debajo de la media). Devuelve None si las lambdas no son validas.
-    """
+    """Calcula el Over 2.5 desde lambdas para payloads antiguos sin matriz servida."""
     if lambda_h is None or lambda_a is None:
         return None
     try:
@@ -115,13 +109,7 @@ def prob_over_2_5(lambda_h: Any, lambda_a: Any) -> float | None:
 
 
 def most_likely_total_goals(lambda_h: Any, lambda_a: Any) -> int | None:
-    """Numero de goles totales mas probable (moda de Poisson(lambda_h+lambda_a)).
-
-    El total de dos Poisson independientes es Poisson de la suma. Devuelve el k con
-    mayor masa via recurrencia de la pmf (exacto, sin scipy). Este total es mas
-    intuitivo y coherente con los goles esperados que un marcador exacto unico (cuya
-    moda cae por debajo de la media). Devuelve None si las lambdas no son validas.
-    """
+    """Calcula la moda Poisson desde lambdas para payloads antiguos sin matriz servida."""
     if lambda_h is None or lambda_a is None:
         return None
     try:
@@ -139,6 +127,12 @@ def most_likely_total_goals(lambda_h: Any, lambda_a: Any) -> int | None:
         k += 1
         pmf = pmf * total / k
     return best_k
+
+
+def match_goal_totals(match: dict[str, Any]) -> tuple[float | None, int | None]:
+    over = match["prob_over_2_5"] if "prob_over_2_5" in match else prob_over_2_5(match.get("lambda_h"), match.get("lambda_a"))
+    total = match["most_likely_total"] if "most_likely_total" in match else most_likely_total_goals(match.get("lambda_h"), match.get("lambda_a"))
+    return over, total
 
 
 def _fmt_expected_goals(lambda_h: Any, lambda_a: Any) -> str:
