@@ -34,6 +34,8 @@ from alttez.inference.serving_policy import (
     serving_policy_enabled,
 )
 from tests.test_inference_router import DummyGoalModel, _historical_df
+from alttez.reports.daily_brief import _build_telegram_summary_text, prob_over_2_5, render_daily_brief_html
+from alttez.reports.daily_brief.payload import _build_match_brief
 from tests.test_soccer_backtest import synthetic_matches
 
 SIDES = ("home", "draw", "away")
@@ -220,6 +222,28 @@ class CommitteeServingTests(unittest.TestCase):
         self.enterContext(patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(None)))
         self.enterContext(patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}))
         os.environ.pop(SERVING_POLICY_ENV, None)
+
+    def test_served_total_is_used_in_brief_and_telegram(self) -> None:
+        committee = _committee()
+        prediction = committee.predict_match("Mexico", "Brazil", is_neutral=True)
+        matrix = prediction["prob_matrix"]
+        expected = sum(float(matrix[h, a]) for h in range(matrix.shape[0]) for a in range(matrix.shape[1]) if h + a >= 3)
+        totals = [sum(float(matrix[h, a]) for h in range(matrix.shape[0]) for a in range(matrix.shape[1]) if h + a == k)
+                  for k in range(sum(matrix.shape) - 1)]
+        self.assertAlmostEqual(prediction["prob_over_2_5"], expected)
+        self.assertEqual(prediction["most_likely_total"], int(np.argmax(totals)))
+        self.assertNotAlmostEqual(expected, prob_over_2_5(prediction["lambda_h"], prediction["lambda_a"]), places=3)
+
+        match = _build_match_brief({"id": "m1", "home_team": "Mexico", "away_team": "Brazil", "is_neutral": True}, committee)
+        payload = {"target_date": "2026-05-27", "generated_at": "2026-05-27", "batch_summary": {},
+                   "alert_summary": {"items": [], "critical": 0, "warning": 0, "info": 0},
+                   "summary": {"ranked_matches": [match], "total_matches": 1, "analyzable_matches": 1,
+                               "high_priority_matches": 0, "certification_status": "certified", "coverage_pct": 100},
+                   "matches": [match]}
+        expected_text = f"{expected * 100:.1f}%"
+        self.assertEqual(match["prob_over_2_5"], prediction["prob_over_2_5"])
+        self.assertIn(expected_text, render_daily_brief_html(payload))
+        self.assertIn(expected_text, _build_telegram_summary_text(payload))
 
     def test_committee_serves_the_elo_1x2_and_keeps_the_members_as_diagnostics(self) -> None:
         committee = _committee()

@@ -45,6 +45,12 @@ from alttez.inference.serving_policy import (
 )
 
 
+def _matrix_total_fields(matrix: np.ndarray) -> dict[str, float | int]:
+    totals = np.indices(matrix.shape).sum(axis=0)
+    masses = np.bincount(totals.ravel(), weights=matrix.ravel())
+    return {"prob_over_2_5": float(masses[3:].sum()), "most_likely_total": int(masses.argmax())}
+
+
 def _join_reasons(*reasons: str | None) -> str | None:
     joined = "; ".join(reason for reason in reasons if reason)
     return joined or None
@@ -487,6 +493,7 @@ class PoissonMatchPredictor(BaseMatchPredictor):
             "lambda_h": float(lambda_h),
             "lambda_a": float(lambda_a),
             "prob_matrix": prob_matrix,
+            **_matrix_total_fields(prob_matrix),
             "prob_home": result_probabilities.get(f"Victoria {home_team}"),
             "prob_draw": result_probabilities.get("Empate"),
             "prob_away": result_probabilities.get(f"Victoria {away_team}"),
@@ -636,6 +643,7 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             baseline["lambda_h"] = float(lambda_h)
             baseline["lambda_a"] = float(lambda_a)
             baseline["prob_matrix"] = prob_matrix
+            baseline.update(_matrix_total_fields(prob_matrix))
             baseline["prob_home"] = result_probabilities.get(f"Victoria {home_team}")
             baseline["prob_draw"] = result_probabilities.get("Empate")
             baseline["prob_away"] = result_probabilities.get(f"Victoria {away_team}")
@@ -754,6 +762,7 @@ class BivariatePoissonMatchPredictor(BaseMatchPredictor):
         best_market = max(result_summary.to_dict(orient="records"), key=lambda row: float(row["Probabilidad"]))
 
         baseline["prob_matrix"] = prob_matrix
+        baseline.update(_matrix_total_fields(prob_matrix))
         baseline["prob_home"] = result_probabilities.get(f"Victoria {home_team}")
         baseline["prob_draw"] = result_probabilities.get("Empate")
         baseline["prob_away"] = result_probabilities.get(f"Victoria {away_team}")
@@ -865,6 +874,7 @@ class HierarchicalMatchPredictor(BaseMatchPredictor):
             "lambda_h": float(lambda_h),
             "lambda_a": float(lambda_a),
             "prob_matrix": prob_matrix,
+            **_matrix_total_fields(prob_matrix),
             "prob_home": result_probabilities.get(f"Victoria {home_team}"),
             "prob_draw": result_probabilities.get("Empate"),
             "prob_away": result_probabilities.get(f"Victoria {away_team}"),
