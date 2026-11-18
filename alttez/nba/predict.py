@@ -211,6 +211,7 @@ def build_predictions(
     models: FittedModels,
     inputs: NbaInputs,
     upcoming: list[data.NbaScheduledGame],
+    started: list[data.NbaScheduledGame],
     *,
     now: datetime,
 ) -> PredictionRun:
@@ -239,8 +240,21 @@ def build_predictions(
     planned: list[PlannedPrediction] = []
     if ready:
         target = _target_frame(ready)
+        history_ids = set(history["game_id"])
+        seeds = [
+            game for game in started
+            if game.game_id not in history_ids and (game.state == "in" or (game.state == "post" and game.completed))
+        ]
+        seed_frame = _target_frame(seeds).sort_values("game_date") if seeds else None
+        seed_rows = iter(seed_frame.itertuples(index=False)) if seed_frame is not None else iter(())
+        seed = next(seed_rows, None)
         last_played: dict[int, int] = {}
         for day, group in target.groupby("game_date", sort=True):
+            while seed is not None and seed.game_date < day:
+                seed_day = _day_number(seed.game_date)
+                for team in (seed.home_id, seed.away_id):
+                    last_played[int(team)] = max(last_played.get(int(team), seed_day), seed_day)
+                seed = next(seed_rows, None)
             prior = history[history["game_date"] < day].reset_index(drop=True)
             group = group.reset_index(drop=True)
             out = predict_day(models, prior, group, last_played)
@@ -282,15 +296,18 @@ def build_predictions(
 
 def fetch_upcoming(
     today: date, *, now: datetime | None = None, fetch: ScoreboardFetch = data.fetch_espn_scoreboard
-) -> list[data.NbaScheduledGame]:
-    """Fetch three ESPN calendar dates and retain games that have not started."""
+) -> tuple[list[data.NbaScheduledGame], list[data.NbaScheduledGame]]:
+    """Fetch upcoming games and started games from three ESPN calendar dates."""
     now = now or datetime.now(UTC)
     seen: dict[int, data.NbaScheduledGame] = {}
+    started: dict[int, data.NbaScheduledGame] = {}
     for offset in (-1, 0, 1):
         for game in fetch(today + timedelta(days=offset)):
             if game.state == "pre" and game.start_time > now:
                 seen.setdefault(game.game_id, game)
-    return list(seen.values())
+            elif game.state == "in" or (game.state == "post" and game.completed):
+                started.setdefault(game.game_id, game)
+    return list(seen.values()), list(started.values())
 
 
 def predict_upcoming(
@@ -304,4 +321,5 @@ def predict_upcoming(
     """Gate on freshness, then fit (unless ``models`` is given) and predict the upcoming games."""
     check_freshness(inputs.newest_completed, inputs.scheduled_dates, today)
     fitted = models if models is not None else fit_for_prediction(inputs)
-    return build_predictions(fitted, inputs, fetch_upcoming(today, now=now, fetch=fetch), now=now)
+    upcoming, started = fetch_upcoming(today, now=now, fetch=fetch)
+    return build_predictions(fitted, inputs, upcoming, started, now=now)
