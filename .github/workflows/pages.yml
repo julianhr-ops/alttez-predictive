@@ -10,13 +10,23 @@ on:
     paths:
       - "site/**"
       - "alttez/site/**"
+      - "alttez/nba/**"
+      - "alttez/inference/serving_policy.py"
       - "scripts/build_site.py"
+      - "scripts/nba_ledger.py"
+      - "scripts/nba_site_data.py"
+      - "scripts/soccer_site_data.py"
       - ".github/workflows/pages.yml"
   pull_request:
     paths:
       - "site/**"
       - "alttez/site/**"
+      - "alttez/nba/**"
+      - "alttez/inference/serving_policy.py"
       - "scripts/build_site.py"
+      - "scripts/nba_ledger.py"
+      - "scripts/nba_site_data.py"
+      - "scripts/soccer_site_data.py"
       - ".github/workflows/pages.yml"
 
 permissions:

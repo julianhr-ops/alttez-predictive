@@ -169,19 +169,32 @@ class ContentTests(SiteTestCase):
         nba = self.page(self.build(**{"nba_upcoming.json": upcoming}), "nba.html")
         self.assertIn("holds no completed games", nba)
 
-    def test_scoreboard_without_paired_interval_says_when_it_appears(self):
+    def test_scoreboard_below_threshold_says_how_many_lined_games_are_needed(self):
         board = load_fixture("nba_scoreboard.json")
-        board["paired_brier_diff"] = None
+        board.update(paired_brier_diff=None, n_market=21)
         nba = self.page(self.build(**{"nba_scoreboard.json": board}), "nba.html")
-        self.assertIn("paired interval appears once 30", nba)
+        self.assertIn("needs 30 graded games with a market line and there are 21, so 9 more are needed", nba)
         self.assertNotIn("Paired Brier difference", nba)
 
-    def test_scoreboard_with_paired_interval_reads_it(self):
+    def test_scoreboard_with_interval_containing_zero_says_no_measurable_difference(self):
         nba = self.page(self.build(), "nba.html")
+        self.assertIn("served minus market", nba)
+        self.assertIn("Negative means the served model had the lower Brier score", nba)
         self.assertIn("+0.0026 [-0.0041, +0.0094]", nba)
-        self.assertIn("no measurable difference", nba)
+        self.assertIn("no measurable difference yet", nba)
         self.assertIn("Predicted before tip-off: 40 of 44", nba)
         self.assertIn("First prediction on 2026-10-22", nba)
+
+    def test_scoreboard_interval_away_from_zero_names_the_better_model(self):
+        board = load_fixture("nba_scoreboard.json")
+        board["paired_brier_diff"] = {"mean": -0.01, "lo": -0.015, "hi": -0.005}
+        better = self.page(self.build(**{"nba_scoreboard.json": board}), "nba.html")
+        self.assertIn("The interval is below 0, so the served model had the lower Brier score.", better)
+        self.assertNotIn("no measurable difference yet", better)
+        board["paired_brier_diff"] = {"mean": 0.01, "lo": 0.005, "hi": 0.015}
+        worse = self.page(self.build(**{"nba_scoreboard.json": board}), "nba.html")
+        self.assertIn("The interval is above 0, so the served model had the higher Brier score and the market did better", worse)
+        self.assertNotIn("no measurable difference yet", worse)
 
     def test_empty_scoreboard_has_no_blank_table(self):
         board = load_fixture("nba_scoreboard.json")

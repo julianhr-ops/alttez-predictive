@@ -259,19 +259,24 @@ def nba_scoreboard_html(board: dict[str, Any]) -> Html:
         if paired:
             mean, lo, hi = paired["mean"], paired["lo"], paired["hi"]
             if lo > 0:
-                verdict = "The interval is above 0, so the served model is worse than the market on these games."
+                verdict = "The interval is above 0, so the served model had the higher Brier score and the market did better."
             elif hi < 0:
-                verdict = "The interval is below 0, so the served model is better than the market on these games."
+                verdict = "The interval is below 0, so the served model had the lower Brier score."
             else:
                 verdict = "The interval contains 0, so there is no measurable difference yet."
             parts.append(
                 "<p>Paired Brier difference, served minus market, 95% interval "
-                f"{fmt.esc(fmt.interval(mean, lo, hi))}. {fmt.esc(verdict)}</p>"
+                f"{fmt.esc(fmt.interval(mean, lo, hi))}. Negative means the served model had the lower Brier score. "
+                f"{fmt.esc(verdict)}</p>"
+            )
+        elif board["n_market"] < MIN_PAIRED_GAMES:
+            needed = MIN_PAIRED_GAMES - board["n_market"]
+            parts.append(
+                f'<p class="muted">No paired interval yet. It needs {MIN_PAIRED_GAMES} graded games with a market line '
+                f"and there are {fmt.esc(fmt.count(board['n_market']))}, so {fmt.esc(fmt.count(needed))} more are needed.</p>"
             )
         else:
-            parts.append(
-                f'<p class="muted">The paired interval appears once {MIN_PAIRED_GAMES} games with a market line are graded.</p>'
-            )
+            parts.append('<p class="muted">The paired interval is not available in this data file.</p>')
     before = board["predicted_before_tipoff"]
     first = board.get("first_prediction_at")
     line = f"Predicted before tip-off: {fmt.count(before['n'])} of {fmt.count(before['of'])}."
