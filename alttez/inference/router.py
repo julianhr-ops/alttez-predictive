@@ -663,6 +663,9 @@ class XGBoostMatchPredictor(BaseMatchPredictor):
             baseline["scoreline_candidates"] = score_decision["scoreline_candidates"]
             baseline["score_selection_policy"] = "most_likely_outcome_exact_score"
         else:
+            # The v1 classifier has no score matrix.
+            baseline.pop("prob_over_2_5", None)
+            baseline.pop("most_likely_total", None)
             probabilities = self.model.predict_proba(feature_df)[0]
             probability_map = {label: float(probabilities[idx]) for idx, label in enumerate(self.label_order)}
             probability_map.setdefault("H", 0.0)

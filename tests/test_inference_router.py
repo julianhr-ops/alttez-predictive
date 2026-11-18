@@ -122,6 +122,33 @@ class TestInferenceRouter(unittest.TestCase):
             places=3,
         )
 
+    def test_schema_v1_xgboost_omits_matrix_totals(self) -> None:
+        artifact_dir = Path("artifacts/test-router")
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifact_dir / "xgboost-classifier.joblib"
+        joblib.dump(
+            {"artifact_schema_version": 1, "model": DummyProbabilityModel()},
+            artifact_path,
+        )
+        active_record = {
+            "version_key": "xgboost-classifier-v1:2026-05-27",
+            "model_version": "xgboost-classifier-v1",
+            "model_family": "xgboost",
+            "artifact_path": str(artifact_path),
+            "production_status": "active",
+        }
+        with (
+            patch("alttez.inference.router._load_active_model_record_safe", return_value=ActiveRecordLookup(active_record)),
+            patch.dict(os.environ, {"ALTTEZ_MIN_SUPPORTED_MATCHES": "0"}),
+        ):
+            predictor = build_active_predictor(_historical_df(), "2026-05-27")
+            prediction = predictor.predict_match("Mexico", "USA", is_neutral=True)
+
+        self.assertEqual(prediction["artifact_schema_version"], 1)
+        self.assertAlmostEqual(prediction["prob_home"], 0.58)
+        self.assertNotIn("prob_over_2_5", prediction)
+        self.assertNotIn("most_likely_total", prediction)
+
     def test_build_active_predictor_loads_schema_v2_xgboost_artifact_when_available(self) -> None:
         artifact_dir = Path("artifacts/test-router")
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -170,6 +197,8 @@ class TestInferenceRouter(unittest.TestCase):
         self.assertFalse(predictor.used_fallback)
         self.assertEqual(prediction["model_version"], "xgboost-active-v1")
         self.assertEqual(prediction["artifact_schema_version"], 2)
+        self.assertIn("prob_over_2_5", prediction)
+        self.assertIn("most_likely_total", prediction)
         self.assertGreater(float(prediction["lambda_h"]), float(prediction["lambda_a"]))
         self.assertAlmostEqual(
             float(prediction["prob_home"] or 0.0) + float(prediction["prob_draw"] or 0.0) + float(prediction["prob_away"] or 0.0),
