@@ -1,0 +1,1 @@
+{"generated_at": "2026-11-18T14:05:00Z", "n_graded": 42, "n_market": 36, "served": {"brier": 0.2113, "accuracy": 0.667}, "market": {"brier": 0.2087, "accuracy": 0.69}, "paired_brier_diff": {"mean": 0.0026, "lo": -0.0041, "hi": 0.0094}, "predicted_before_tipoff": {"n": 40, "of": 44}, "first_prediction_at": "2026-10-22T14:00:00Z", "last_graded_at": "2026-11-18T05:30:00Z"}

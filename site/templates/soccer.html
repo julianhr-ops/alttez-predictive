@@ -1,0 +1,55 @@
+<h1>International football</h1>
+<p class="lead">The served 1X2 probabilities come from an Elo ordinal rule with a fitted draw model. It replaced a Poisson model that lost to plain Elo in the audit. The tables below are the walk-forward validation.</p>
+
+<section aria-labelledby="validation">
+<h2 id="validation">Walk-forward validation</h2>
+$validation
+</section>
+
+<section aria-labelledby="ranking">
+<h2 id="ranking">Elo ranking, top 25</h2>
+<p class="muted">Ratings as of $as_of, among teams with a match in the last 24 months. Source $source.</p>
+$ranking
+</section>
+
+<section aria-labelledby="calculator">
+<h2 id="calculator">Matchup calculator</h2>
+<p>Pick two teams and a venue. The result is a lookup in a table of probabilities that the same serving code produced at build time, so this page and the pipeline cannot disagree.</p>
+<p id="calc-fallback" class="notice" role="status">The calculator needs JavaScript.</p>
+<div id="calc" class="calc" hidden>
+<div class="calc-grid">
+<div>
+<label for="calc-a-filter">Team A, search</label>
+<input id="calc-a-filter" type="search" autocomplete="off" aria-controls="calc-a">
+<label for="calc-a">Team A</label>
+<select id="calc-a"></select>
+</div>
+<div>
+<label for="calc-b-filter">Team B, search</label>
+<input id="calc-b-filter" type="search" autocomplete="off" aria-controls="calc-b">
+<label for="calc-b">Team B</label>
+<select id="calc-b"></select>
+</div>
+</div>
+<fieldset>
+<legend>Venue</legend>
+<label class="radio"><input type="radio" name="venue" value="neutral" checked> Neutral</label>
+<label class="radio"><input type="radio" name="venue" value="a_home"> Team A at home</label>
+<label class="radio"><input type="radio" name="venue" value="b_home"> Team B at home</label>
+</fieldset>
+<div class="result">
+<p id="calc-summary" class="takeaway" aria-live="polite"></p>
+<div id="calc-result"></div>
+</div>
+</div>
+$ratings_data
+</section>
+
+<section aria-labelledby="not">
+<h2 id="not">What this is not</h2>
+<ul class="tight">
+<li>It is not betting advice. Nobody should stake money on it.</li>
+<li>It is the Elo ordinal rule only. It rates teams from results, so it knows nothing about injuries, squads or lineups.</li>
+<li>The live pipeline can only predict fixtures that exist. National teams play in international windows, so coverage of live fixtures depends on the calendar.</li>
+</ul>
+</section>

@@ -42,3 +42,5 @@ mundial_2026_team_stats.csv
 poisson_team_metrics.csv
 test_fbref_extraction.py
 transform_data_poisson.py
+
+site_out/

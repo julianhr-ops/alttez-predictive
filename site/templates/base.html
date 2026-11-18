@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>$title</title>
+<meta name="description" content="$description">
+<meta name="color-scheme" content="light dark">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="ALTTEZ Predictive Engine">
+<meta property="og:title" content="$title">
+<meta property="og:description" content="$description">
+<meta property="og:url" content="${site_url}$page_file">
+<meta name="twitter:card" content="summary">
+<link rel="icon" type="image/svg+xml" href="$favicon">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+<div class="wrap">
+<a class="brand" href="index.html">ALTTEZ</a>
+<nav aria-label="Main">
+<ul>
+$nav
+</ul>
+</nav>
+</div>
+</header>
+<main id="main" class="wrap">
+$body
+</main>
+<footer>
+<div class="wrap">
+<p>Schedule and betting-line data: sportsdataverse/hoopR-nba-data (CC BY 4.0).</p>
+<p>Soccer results: $soccer_source.</p>
+<p>ALTTEZ is a research and engineering project. Its output is a statistical result and not betting advice. It has no affiliation with the NBA, ESPN, DraftKings, FIFA or any bookmaker.</p>
+<p><a href="${repo}">Source code on GitHub</a>. MIT licence.</p>
+</div>
+</footer>
+$scripts
+</body>
+</html>

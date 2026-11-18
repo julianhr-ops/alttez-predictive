@@ -1,0 +1,29 @@
+<h1>NBA</h1>
+<p class="lead">Each game gets one served probability. When a betting line exists, the served model is a blend of Elo and the market line. Without a line it is calibrated Elo. Predictions are stored before tip-off and graded when the game ends.</p>
+
+<section aria-labelledby="upcoming">
+<h2 id="upcoming">Upcoming games</h2>
+$upcoming
+</section>
+
+<section aria-labelledby="scoreboard">
+<h2 id="scoreboard">Live scoreboard</h2>
+$scoreboard
+</section>
+
+<section aria-labelledby="recent">
+<h2 id="recent">Recent graded games</h2>
+$recent
+</section>
+
+<section aria-labelledby="validation">
+<h2 id="validation">Walk-forward validation</h2>
+$validation
+</section>
+
+<section aria-labelledby="how">
+<h2 id="how">How to read this</h2>
+<p>The Brier score is the mean squared error of the home-win probability. Lower is better, and always predicting 50% scores 0.25. The market column is the betting line turned into a probability. It is a strong baseline, so matching it is a good result and beating it is rare.</p>
+<p>A probability of 62% means the home team should win about 62 times in 100 similar games, not that it will win this one. Compare the served model with the market on the same games before trusting either. The paired difference is the served Brier score minus the market Brier score on the same games, so a negative value means the served model had the lower Brier score. A paired interval that contains 0 means no measurable difference.</p>
+<p class="muted small">Lines come from ESPN, usually DraftKings, and belong to a third party. This is not betting advice.</p>
+</section>

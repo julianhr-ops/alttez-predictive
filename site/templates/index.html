@@ -1,0 +1,30 @@
+<h1>ALTTEZ predictive engine</h1>
+<p class="lead">ALTTEZ turns free public data into win probabilities for international football and for NBA games. It scores every model walk-forward against simple baselines on the same games, and it grades its own live predictions after the games end. It keeps the results that went against its own models.</p>
+
+<section aria-labelledby="numbers">
+<h2 id="numbers">Headline numbers</h2>
+<dl class="stats">
+$stats
+</dl>
+<p class="muted small">Every number on this site is read from a data file generated for this build. Lower Brier is better.</p>
+</section>
+
+<section aria-labelledby="findings">
+<h2 id="findings">Honest findings</h2>
+<ul class="tight">
+<li><strong>The legacy Poisson soccer model lost to plain Elo.</strong> An audit found it worse than an Elo-only baseline pooled and in most test years. A replacement rule was chosen on earlier years and then tested on years it never saw. See the <a href="soccer.html">soccer page</a>.</li>
+<li><strong>NBA Elo does not beat the closing line.</strong> It beats simpler baselines, but it does not beat the market close in any test season. So the served prediction defers to the market-based blend when a line exists. See the <a href="nba.html">NBA page</a>.</li>
+<li><strong>Negative results stay in the repository.</strong> The <a href="method.html">method page</a> lists the leakage and duplication bugs the audit found and fixed.</li>
+</ul>
+</section>
+
+<section aria-labelledby="explore">
+<h2 id="explore">Explore</h2>
+<ul class="links">
+<li><a href="nba.html">NBA predictions and live scoreboard</a></li>
+<li><a href="soccer.html">Soccer validation and matchup calculator</a></li>
+<li><a href="method.html">Evaluation method</a></li>
+<li><a href="${repo}">Repository</a></li>
+<li><a href="${repo}#readme">README</a></li>
+</ul>
+</section>
