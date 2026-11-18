@@ -37,7 +37,7 @@ Evitar datos que envejecen sin explicar como verificarlos.
 ## Estado
 
 - Ultima auditoria: 2026-11-17.
-- Resultado: se corrigieron las migraciones (`001` a `015`), los valores por defecto
+- Resultado: se corrigieron las migraciones (`001` a `016`), los valores por defecto
   de los proveedores, la rama activa, la referencia a un `AGENTS.md` inexistente y el
   estado de Ruff (bloqueante en CI). Se agregaron el paquete `alttez/nba/`, el
   paquete `alttez/evaluation/` y `docs/architecture.md`.
