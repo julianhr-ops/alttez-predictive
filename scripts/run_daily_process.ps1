@@ -58,9 +58,12 @@ function Clear-LoopbackProxyTrap {
     }
 }
 
+$script:NbaStageInvoked = $false
+
 # NBA runs on free data and is independent of the soccer schedule, so it runs on the
 # idle/no_schedule path too. Non-fatal: it must never abort the soccer brief.
 function Invoke-NbaStage {
+    $script:NbaStageInvoked = $true
     $script:CurrentStage = "nba predictions"
     Write-Output "PROCESS: nba predictions"
     $nbaArgs = @($nbaDaily, "--date", $Date)
@@ -223,5 +226,13 @@ catch {
     $errorMessage = $_.Exception.Message
     Write-Output "PROCESS: pipeline incident alert"
     & $python $pipelineAlert --stage $CurrentStage --date $Date --message $errorMessage --level critical | Out-Null
+    if (-not $script:NbaStageInvoked) {
+        try {
+            Invoke-NbaStage
+        }
+        catch {
+            Write-Output "PROCESS: nba predictions failed (non-fatal)"
+        }
+    }
     throw
 }

@@ -93,7 +93,7 @@ class ServedModelTests(unittest.TestCase):
 
 class BuildPredictionsTests(PredictionTestBase):
     def build(self, upcoming, models=None):
-        return predict.build_predictions(models or self.models, self.inputs, upcoming, now=self.now)
+        return predict.build_predictions(models or self.models, self.inputs, upcoming, [], now=self.now)
 
     def test_line_present_serves_the_blend_and_records_the_market(self):
         run = self.build([scheduled(1, 1, 2, self.tip, line=4.5)])
@@ -143,6 +143,26 @@ class BuildPredictionsTests(PredictionTestBase):
         self.assertEqual(run.predictions, ())
         self.assertEqual([s.reason for s in run.skipped], ["already started", "already started"])
 
+    def test_started_games_seed_only_later_dates(self):
+        models = replace(self.models, elo_params=replace(self.models.elo_params, b2b_penalty=60.0))
+        tip = self.tip + timedelta(days=4)
+        game = scheduled(9999, 1, 2, tip)
+        previous = scheduled(9998, 1, 3, tip - timedelta(days=1), state="in")
+        same = scheduled(9997, 1, 3, tip, state="in")
+        postponed = replace(previous, state="post", completed=False)
+        baseline = predict.build_predictions(models, self.inputs, [game], [], now=self.now)
+        seeded = predict.build_predictions(models, self.inputs, [game], [previous], now=self.now)
+        frame = predict._target_frame([game])
+        prior = self.games[self.games["game_date"] < frame["game_date"].iloc[0]].reset_index(drop=True)
+        day = predict._day_number(frame["game_date"].iloc[0])
+        expected = predict.predict_day(models, prior, frame, {1: day - 1})["p_elo_platt"].iloc[0]
+        self.assertEqual([p.row.game_id for p in seeded.predictions], [9999])
+        self.assertEqual(seeded.predictions[0].row.p_home_elo, round(float(expected), 6))
+        self.assertNotEqual(seeded.predictions[0].row.p_home_elo, baseline.predictions[0].row.p_home_elo)
+        for excluded in (same, postponed):
+            result = predict.build_predictions(models, self.inputs, [game], [excluded], now=self.now)
+            self.assertEqual(result.predictions[0].row.p_home_elo, baseline.predictions[0].row.p_home_elo)
+
     def test_back_to_back_across_upcoming_dates_is_penalised(self):
         models = replace(self.models, elo_params=replace(self.models.elo_params, b2b_penalty=60.0))
         tomorrow = self.tip + timedelta(days=1)
@@ -160,9 +180,9 @@ class BuildPredictionsTests(PredictionTestBase):
         first = scheduled(1, 1, 2, tip)
         second = scheduled(2, 3, 1, tip + timedelta(days=1))
         board = {today - timedelta(days=1): [first], today: [second]}
-        games = predict.fetch_upcoming(today, now=now, fetch=lambda day: board.get(day, []))
-        both = predict.build_predictions(models, self.inputs, games, now=now)
-        alone = predict.build_predictions(models, self.inputs, [second], now=now)
+        games, started = predict.fetch_upcoming(today, now=now, fetch=lambda day: board.get(day, []))
+        both = predict.build_predictions(models, self.inputs, games, started, now=now)
+        alone = predict.build_predictions(models, self.inputs, [second], [], now=now)
         self.assertEqual([prediction.row.game_id for prediction in both.predictions], [1, 2])
         self.assertGreater(both.predictions[1].row.p_home_elo, alone.predictions[0].row.p_home_elo)
 
@@ -206,9 +226,10 @@ class FetchTests(unittest.TestCase):
             seen.append(day)
             return [scheduled(1, 1, 2, tip), scheduled(10 + len(seen), 3, 4, tip)]
 
-        games = predict.fetch_upcoming(date(2026, 11, 17), now=tip - timedelta(hours=1), fetch=fetch)
+        games, started = predict.fetch_upcoming(date(2026, 11, 17), now=tip - timedelta(hours=1), fetch=fetch)
         self.assertEqual(seen, [date(2026, 11, 16), date(2026, 11, 17), date(2026, 11, 18)])
         self.assertEqual([g.game_id for g in games], [1, 11, 12, 13])
+        self.assertEqual(started, [])
 
     def test_previous_espn_date_includes_only_not_started_games(self):
         today = date(2026, 11, 18)
@@ -219,8 +240,9 @@ class FetchTests(unittest.TestCase):
             scheduled(3, 1, 2, now),
             scheduled(4, 1, 2, now + timedelta(hours=1), state="in"),
         ]
-        games = predict.fetch_upcoming(today, now=now, fetch=lambda day: board if day == today - timedelta(days=1) else [])
+        games, started = predict.fetch_upcoming(today, now=now, fetch=lambda day: board if day == today - timedelta(days=1) else [])
         self.assertEqual([game.game_id for game in games], [1, 2])
+        self.assertEqual([game.game_id for game in started], [4])
 
 
 if __name__ == "__main__":
