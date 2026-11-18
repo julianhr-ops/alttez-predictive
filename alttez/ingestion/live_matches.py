@@ -88,6 +88,9 @@ QUALIFIER_KEYWORDS = (
     "qualifying",
     "qualifier",
 )
+# Finals hosted by one country, where the other teams play away from home. The historical dataset marks
+# these games neutral, and ESPN does not flag them.
+SINGLE_HOST_NEUTRAL_TOURNAMENTS = frozenset({"african cup of nations", "gulf cup"})
 CONTINENTAL_KEYWORDS = (
     "uefa euro",
     "euro championship",
@@ -276,10 +279,10 @@ def classify_competition(tournament_name: str | None, stage: str | None) -> str:
     haystack = f"{tournament_name or ''} {stage or ''}".casefold()
     if any(keyword in haystack for keyword in FRIENDLY_KEYWORDS):
         return "friendly"
-    if any(keyword in haystack for keyword in WORLD_CUP_KEYWORDS):
-        return "world_cup"
     if any(keyword in haystack for keyword in QUALIFIER_KEYWORDS):
         return "qualifiers"
+    if any(keyword in haystack for keyword in WORLD_CUP_KEYWORDS):
+        return "world_cup"
     if any(keyword in haystack for keyword in CONTINENTAL_KEYWORDS):
         return "continental"
     return "other_international"
@@ -294,7 +297,12 @@ def infer_effective_is_neutral(
     venue_country_name: str | None = None,
     provider_is_neutral: bool | None = None,
 ) -> bool:
-    """Infer neutral venue when providers omit World Cup venue metadata."""
+    """Infer neutral venue when providers omit it.
+
+    World Cup finals are neutral unless a host plays or a team's own country is the venue. Qualifiers are
+    played at home, so they only count as neutral when the provider says so. Single-host finals
+    (``SINGLE_HOST_NEUTRAL_TOURNAMENTS``) are neutral when the venue country is known and is neither team.
+    """
 
     home = canonical_team_name(home_team)
     away = canonical_team_name(away_team)
@@ -305,7 +313,13 @@ def infer_effective_is_neutral(
     if provider_is_neutral is True:
         return True
 
-    haystack = f"{tournament_name or ''} {competition_class or ''}".casefold()
+    name = (tournament_name or "").casefold().strip()
+    if venue_country and name in SINGLE_HOST_NEUTRAL_TOURNAMENTS:
+        return True
+
+    haystack = f"{name} {competition_class or ''}".casefold()
+    if any(keyword in haystack for keyword in QUALIFIER_KEYWORDS):
+        return bool(provider_is_neutral)
     is_world_cup = "world_cup" in haystack or any(keyword in haystack for keyword in WORLD_CUP_KEYWORDS)
     if is_world_cup:
         if not venue_country:

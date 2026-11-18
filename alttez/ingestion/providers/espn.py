@@ -3,9 +3,10 @@
 ESPN exposes a stable, key-free scoreboard JSON per league per date at
 ``site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard?dates=YYYYMMDD``.
 Unlike football-data.org's free tier it covers both scheduled and finished
-fixtures across World Cup (``fifa.world``) and international friendlies
-(``fifa.friendly``), which is why it replaces the retired api-football key in
-the live agenda stack.
+fixtures across the World Cup (``fifa.world``), international friendlies
+(``fifa.friendly``) and the national-team competitions listed in
+``alttez.ingestion.espn_competitions``, which is why it replaces the retired
+api-football key in the live agenda stack.
 
 This provider only sweeps the network and returns raw ESPN events, each stamped
 with the league/season context needed downstream. Parsing into ``ScheduledMatch``
@@ -22,13 +23,13 @@ from typing import Any
 
 import requests
 
+from alttez.ingestion.espn_competitions import ESPN_DEFAULT_LEAGUES, tournament_name
 from alttez.ingestion.providers.base import MatchProvider, ProviderFetchRequest, ProviderFetchResult
 
 
 LOGGER = logging.getLogger(__name__)
 
 ESPN_BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer"
-ESPN_DEFAULT_LEAGUES: tuple[str, ...] = ("fifa.world", "fifa.friendly")
 DEFAULT_TIMEOUT = 20
 
 
@@ -50,13 +51,16 @@ def stamp_espn_event(event: dict[str, Any], league_meta: dict[str, Any]) -> dict
 
 
 def extract_league_meta(payload: dict[str, Any], league_slug: str) -> dict[str, Any]:
-    """Pulls league display name + season year from a scoreboard payload. Pure function."""
+    """Pulls league display name + season year from a scoreboard payload. Pure function.
+
+    The name is the one the competition is stored under (see ``espn_competitions``).
+    """
 
     leagues = payload.get("leagues") or []
     league = leagues[0] if leagues and isinstance(leagues[0], dict) else {}
     season = league.get("season") or {}
     return {
-        "name": league.get("name") or "FIFA World Cup",
+        "name": tournament_name(league_slug, league.get("name")) or "FIFA World Cup",
         "slug": league.get("slug") or league_slug,
         "season_year": season.get("year"),
     }
